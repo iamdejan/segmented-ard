@@ -3,6 +3,7 @@ import os
 import glob
 import time
 import warnings
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -47,11 +48,27 @@ class Configuration:
 
     APPLY_SHUFFLE=True
     SEED = 768
-    HEIGHT = 224
-    WIDTH = 224
+    HEIGHT = 1280
+    WIDTH = 720
     CHANNELS = 3 # RGB
 
-    PATH = "./data"
+
+class ImagePath:
+    BASE = "./data/bdd100k"
+    SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
+    SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
+    SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
+
+    IMAGE_TRAIN_PATH = BASE + "/images_10k/train"
+    IMAGE_VAL_PATH = BASE + "/images_10k/val"
+
+
+def find_image_path_from_mask(complete_mask_path: str) -> str:
+    file_path_split = complete_mask_path.split("/")
+    mask_file_name = file_path_split[-1].split("_")[0]
+
+    image_path = ImagePath.IMAGE_TRAIN_PATH + "/" + mask_file_name + ".jpg"
+    return image_path
 
 
 def main() -> None:
@@ -60,6 +77,10 @@ def main() -> None:
     print('*'*26)
     print(f'torch \t\t - {torch.__version__}')
     print(f'torchvision \t - {torchvision.__version__}')
+
+    # get masks
+    segmentation_masks = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    print(list(map(find_image_path_from_mask, segmentation_masks[:5])))
 
 
 if __name__ == "__main__":
