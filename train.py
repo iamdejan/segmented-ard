@@ -20,6 +20,9 @@ from torchvision import transforms
 from torchinfo import summary
 from torchview import draw_graph
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 from PIL import Image
 from tqdm.notebook import tqdm
 from typing import Dict, List, Tuple
@@ -63,6 +66,43 @@ class ImagePath:
     IMAGE_VAL_PATH = BASE + "/images_10k/val"
 
 
+class BDDSegmentationDataset(Dataset):
+    def __init__(self, df: pd.DataFrame, transform=None):
+        super(BDDSegmentationDataset, self).__init__()
+
+        self.image_paths = df["image_paths"].to_list()
+        self.mask_paths = df["mask_paths"].to_list()
+        self.transform = transform
+
+
+    def load_sample(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        image_path = self.image_paths[index]
+        mask_path = self.mask_paths[index]
+
+        image = Image.open(image_path)
+        mask = Image.open(mask_path)
+
+        image = np.array(image).astype(np.float32) / 255.0
+        mask = np.array(mask).astype(np.float32) / 255.0
+
+        return image, mask
+
+
+    def __len__(self) -> int:
+        return self.image_paths.__len__()
+
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        image, mask = self.load_sample(index)
+
+        # Transform if necessary
+        if self.transform:
+            transformed = self.transform(image=image, mask=mask)
+        else:
+            transformed = ToTensorV2(image=image, mask=mask)
+        return transformed["image"], transformed["mask"].unsqueeze_(0)
+
+
 def find_image_path_from_mask(complete_mask_path: str) -> str:
     file_path_split = complete_mask_path.split("/")
     mask_file_name = file_path_split[-1].split("_")[0]
@@ -79,8 +119,28 @@ def main() -> None:
     print(f'torchvision \t - {torchvision.__version__}')
 
     # get masks
-    segmentation_masks = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
-    print(list(map(find_image_path_from_mask, segmentation_masks[:5])))
+    mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    image_paths = list(map(find_image_path_from_mask, mask_paths))
+
+    df = pd.DataFrame({
+        "image_paths": image_paths,
+        "mask_paths": mask_paths,
+    })
+    print(df[:5])
+    train_df, test_df = train_test_split(df, test_size=0.2, random_state=Configuration.SEED)
+
+    # TODO: add adversary
+    train_transforms = A.Compose([
+        A.RandomBrightnessContrast(p=0.2),
+        A.HorizontalFlip(p=0.5),
+        ToTensorV2(),
+    ])
+
+    inference_transforms = A.Compose([
+        ToTensorV2(),
+    ])
+    train_set = BDDSegmentationDataset(train_df, transform=train_transforms)
+    test_set = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
 
 if __name__ == "__main__":
