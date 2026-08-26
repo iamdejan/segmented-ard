@@ -1,0 +1,23 @@
+[workspace]
+authors = ["Giovanni Dejan <giovanni.dejan@binus.ac.id>"]
+channels = ["conda-forge"]
+name = "python-pixi-template"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+start = "python3 main.py"
+test = "pytest tests/ -v"
+lint-ci = "ruff check ."
+lint-fix = "ruff check . --fix"
+type-check = "mypy ."
+
+[dependencies]
+python = ">=3.13,<3.14"
+mypy = ">=1.19.1,<2"
+ruff = ">=0.15.5,<0.16"
+pytest = ">=9.0.2,<10"
+pre-commit = ">=4.5.1,<5"
+
+[pypi-dependencies]
+mcp-pypi = ">=3.0.0, <4"

@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: lint-fix
+        name: Fix lint
+        entry: pixi run lint-fix
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: type-check
+        name: Type check with mypy
+        entry: pixi run type-check
+        language: system
+        types: [python]
+        pass_filenames: false

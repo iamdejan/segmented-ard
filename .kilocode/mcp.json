@@ -1,0 +1,38 @@
+{
+    "mcpServers": {
+        "pypi": {
+            "command": "pixi",
+            "args": [
+                "run",
+                "mcp-pypi",
+                "stdio"
+            ],
+            "description": "Access Python package information from PyPI",
+            "alwaysAllow": [
+                "batch_check_packages",
+                "batch_check_vulnerabilities",
+                "check_package_exists",
+                "check_pyproject_toml",
+                "check_requirements_txt",
+                "check_vulnerabilities",
+                "compare_versions",
+                "get_dependencies",
+                "get_dependency_tree",
+                "get_latest_version",
+                "get_package_changelog",
+                "get_package_documentation",
+                "get_package_info",
+                "get_package_metadata",
+                "get_package_releases",
+                "get_package_stats",
+                "get_security_report",
+                "list_package_versions",
+                "quick_security_check",
+                "scan_dependency_vulnerabilities",
+                "scan_installed_packages",
+                "search_packages",
+                "security_audit_project"
+            ]
+        }
+    }
+}
