@@ -114,7 +114,7 @@ class BDDSegmentationDataset(Dataset):
             transformed = self.transform(image=image, mask=mask)
         else:
             transformed = ToTensorV2(image=image, mask=mask)
-        return transformed["image"], transformed["mask"]
+        return transformed["image"], transformed["mask"].unsqueeze_(0)
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
