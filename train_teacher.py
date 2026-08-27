@@ -5,6 +5,7 @@ import numpy as np
 
 import torch
 import torchvision
+import torch.optim.lr_scheduler as lr_scheduler
 
 from torch import nn
 from torch.utils.data import (Dataset, DataLoader)
@@ -15,7 +16,7 @@ from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
 from tqdm.notebook import tqdm
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
@@ -88,12 +89,42 @@ class BDDSegmentationDataset(Dataset):
         return transformed["image"], transformed["mask"].unsqueeze_(0)
 
 
-def find_image_path_from_mask(complete_mask_path: str) -> str:
+def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
     file_path_split = complete_mask_path.split("/")
     mask_file_name = file_path_split[-1].split("_")[0]
 
-    image_path = ImagePath.IMAGE_TRAIN_PATH + "/" + mask_file_name + ".jpg"
+    image_path = base_image_path + "/" + mask_file_name + ".jpg"
     return image_path
+
+
+def find_train_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_TRAIN_PATH)
+
+
+def find_val_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_VAL_PATH)
+
+
+def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # load train, then split into train-test
+    train_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+
+    train_test_df = pd.DataFrame({
+        "image_paths": train_mask_paths,
+        "mask_paths": train_image_paths,
+    })
+    train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
+
+    # load val
+    val_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    val_df = pd.DataFrame({
+        "image_paths": val_image_paths,
+        "mask_paths": val_mask_paths,
+    })
+
+    return train_df, val_df, test_df
 
 
 def execute_epoch(
@@ -110,7 +141,7 @@ def execute_epoch(
     train_loss, train_dice = 0, 0
     
     # Execute training loop over train dataloader
-    for batch, (X, y) in enumerate(dataloader):
+    for _, (X, y) in enumerate(dataloader):
         # Load data onto target device
         X, y = X.to(device), y.to(device)
         
@@ -148,7 +179,7 @@ def evaluate(
     model:torch.nn.Module,
     dataloader:torch.utils.data.DataLoader,
     loss_fn:torch.nn.Module,
-    device:torch.device) -> Tuple[float, float]:
+    device:torch.device) -> tuple[float, float]:
     
     # Set model into eval mode
     model.eval()
@@ -159,7 +190,7 @@ def evaluate(
     # Active inferene context manager
     with torch.inference_mode():
         # Execute eval loop over dataloader
-        for batch, (X, y) in enumerate(dataloader):
+        for _, (X, y) in enumerate(dataloader):
             # Load data onto target device
             X, y = X.to(device), y.to(device)
 
@@ -261,7 +292,7 @@ def predict(
     # Active inferene context manager
     with torch.inference_mode():
         # Execute eval loop over dataloader
-        for batch, (X, y) in enumerate(tqdm(sample_loader)):
+        for _, (X, y) in enumerate(tqdm(sample_loader)):
             # Load data onto target device
             X, y = X.to(device), y.to(device)
 
@@ -285,16 +316,7 @@ def main() -> None:
     print(f'torch \t\t - {torch.__version__}')
     print(f'torchvision \t - {torchvision.__version__}')
 
-    # get masks
-    mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
-    image_paths = list(map(find_image_path_from_mask, mask_paths))
-
-    df = pd.DataFrame({
-        "image_paths": image_paths,
-        "mask_paths": mask_paths,
-    })
-    print(df[:5])
-    train_df, test_df = train_test_split(df, test_size=0.2, random_state=Configuration.SEED)
+    train_df, val_df, test_df = load_dataset_from_files()
 
     train_transforms = A.Compose([
         A.RandomBrightnessContrast(p=0.2),
@@ -306,6 +328,7 @@ def main() -> None:
         ToTensorV2(),
     ])
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
+    val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
     train_loader = DataLoader(
@@ -313,6 +336,11 @@ def main() -> None:
         batch_size=Configuration.BATCH_SIZE,
         shuffle=Configuration.APPLY_SHUFFLE
     )
+    val_loader = DataLoader(
+            dataset=val_ds,
+            batch_size=Configuration.BATCH_SIZE,
+            shuffle=Configuration.APPLY_SHUFFLE
+        )
     test_loader = DataLoader(
         dataset=test_ds,
         batch_size=Configuration.BATCH_SIZE,
@@ -336,6 +364,41 @@ def main() -> None:
                 depth=5
             )
     )
+
+    # Define Loss Function
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    # Define optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=Configuration.LR
+    )
+
+    # Define Scheduler
+    scheduler = lr_scheduler.ReduceLROnPlateau(
+        optimizer=optimizer, 
+        mode='min',
+        patience=Configuration.PATIENCE
+    )
+
+    print('Training U-Net Model')
+    print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
+    print('----------------------------------')
+
+    # Generate training session config 
+    session_config = {
+        'model'               : model,
+        'train_dataloader'    : train_loader,
+        'eval_dataloader'     : val_loader,
+        'optimizer'           : optimizer,
+        'scheduler'           : scheduler,
+        'loss_fn'             : loss_fn,
+        'epochs'              : Configuration.EPOCHS,
+        'device'              : Configuration.DEVICE
+    }
+
+    # Execute Training Session
+    unet_session_history = train(**session_config)
 
 
 if __name__ == "__main__":

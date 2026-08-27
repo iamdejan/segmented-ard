@@ -6,10 +6,13 @@ platforms = [{ name = "default", platform = "linux-64", cuda = "12.8" }, { name 
 version = "0.1.0"
 
 [tasks]
-train = "python3 train.py"
 lint-ci = "ruff check ."
 lint-fix = "ruff check . --fix"
 type-check = "mypy ."
+
+[tasks.train]
+args = [{"arg" = "mode", "choices" = ["teacher", "student"]}]
+cmd = "python3 train_{{mode}}.py"
 
 [dependencies]
 python = ">=3.13,<3.14"
