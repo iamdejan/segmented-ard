@@ -24,6 +24,35 @@ from typing import Dict, List
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
 
+# BDD100k color-label palette. The row index is the class id (0-19), matching
+# ``Configuration.NUM_CLASSES``. Predicted class maps are coloured with this
+# same palette so they render side by side with the ground-truth color labels
+# stored on disk. The exact colour per class only needs to be distinct and
+# consistent; it mirrors the default BDD100k colours.
+CLASS_COLORS = np.array([
+    [128,  64, 128],   # 0  - Road
+    [244,  35, 232],   # 1  - Sidewalk
+    [ 70,  70,  70],   # 2  - Building
+    [102, 102, 156],   # 3  - Wall
+    [190, 153, 153],   # 4  - Fence
+    [153, 153, 153],   # 5  - Pole
+    [250, 170,  30],   # 6  - Traffic Light
+    [220, 220,   0],   # 7  - Traffic Sign
+    [107, 142,  35],   # 8  - Vegetation
+    [152, 251, 152],   # 9  - Terrain
+    [ 70, 130, 180],   # 10 - Sky
+    [220,  20,  60],   # 11 - Person
+    [255,   0,   0],   # 12 - Rider
+    [  0,   0, 142],   # 13 - Car
+    [  0,   0,  70],   # 14 - Truck
+    [  0,  60, 100],   # 15 - Bus
+    [  0,  80, 100],   # 16 - Train
+    [  0,   0, 230],   # 17 - Motorcycle
+    [119,  11,  32],   # 18 - Bicycle
+    [  0,   0,   0],   # 19 - Unknown
+], dtype=np.uint8)
+
+
 class Configuration:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_DEVICES = 1
@@ -422,6 +451,135 @@ def compute_metrics(
     return metrics
 
 
+def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map a class-index mask to an RGB image using ``palette``.
+
+    Steps
+    -----
+    1. Cast ``class_mask`` to integer so it can be used as row indices.
+    2. Index ``palette`` with those indices, turning a ``(H, W)`` array of
+       class ids into a ``(H, W, 3)`` image.
+
+    Parameters
+    ----------
+    class_mask : np.ndarray
+        Array of shape ``(H, W)`` whose values are class indices.
+    palette : np.ndarray
+        Array of shape ``(NUM_CLASSES, 3)`` mapping a class id to an RGB
+        colour (the 0-255 range).
+
+    Returns
+    -------
+    np.ndarray
+        RGB image of shape ``(H, W, 3)`` matching the dtype of ``palette``.
+    """
+    return palette[class_mask.astype(np.int64)]
+
+
+def visualize_predictions(
+    model:nn.Module,
+    test_df:pd.DataFrame,
+    device:torch.device,
+    num_samples:int = 4,
+    output_path:str = "./predictions.png",
+) -> None:
+
+    """Render random test samples next to their true and predicted masks.
+
+    A few rows of ``test_df`` are sampled, every image is run through
+    ``model``, and a grid with three columns (image / image + true mask /
+    image + predicted mask) is exported to a PNG file. The model's ``(20, H,
+    W)`` logits are reduced to a single class id per pixel via ``argmax`` so
+    they can be coloured with ``CLASS_COLORS`` and compared to the
+    ground-truth color labels.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained segmentation model returning ``(B, 20, H, W)`` logits.
+    test_df : pd.DataFrame
+        DataFrame carrying the ``image_paths`` and ``mask_paths`` columns.
+    device : torch.device
+        Device used to run inference.
+    num_samples : int, optional
+        Number of random samples to visualise. Defaults to 4.
+    output_path : str, optional
+        Destination of the exported PNG. Defaults to ``"./predictions.png"``.
+
+    Raises
+    ------
+    ValueError
+        If ``test_df`` has no rows to sample.
+    """
+    # Sample a fixed number of random rows (or fewer if the frame is small)
+    # so the visualisation changes with every call while staying reproducible
+    # thanks to the fixed random state.
+    sample_df = test_df.sample(
+        n=min(num_samples, len(test_df)),
+        random_state=Configuration.SEED,
+    ).reset_index(drop=True)
+
+    if sample_df.empty:
+        raise ValueError("test_df has no rows to visualise.")
+
+    num_rows = len(sample_df)
+    fig, axes = plt.subplots(num_rows, 3, figsize=(15, 5 * num_rows))
+
+    # plt.subplots returns a 1D array when there is a single row; promote it
+    # to 2D so the axes[row, col] indexing below is uniform.
+    if num_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    # Reuse the dataset loader so the visual path matches training: this
+    # guarantees the RGB collapse and [0, 1] scaling are identical.
+    sample_ds = BDDSegmentationDataset(sample_df)
+
+    # Switch to inference once for the whole grid; no gradients are needed.
+    model.eval()
+
+    for row in range(num_rows):
+        # Load the raw pair as (H, W, 3) float arrays in [0, 1].
+        image, true_mask = sample_ds.load_sample(row)
+
+        # Replicate the ToTensorV2 conversion: transpose HWC -> CHW, add a
+        # batch dim and move to the device so the model sees the same format
+        # it received during training.
+        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous()
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+
+        # Foward pass, then collapse the 20-class logits to one class id per
+        # pixel so the output can be colourised.
+        with torch.inference_mode():
+            logits = model(image_tensor)
+        pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+
+        # Colour the predicted class map, then bring it back to [0, 1] for
+        # Matplotlib so it can be blended with the RGB image.
+        pred_color = colorize_mask(pred_class, CLASS_COLORS).astype(np.float32) / 255.0
+
+        axes[row, 0].imshow(image)
+        axes[row, 0].set_title("Image")
+
+        axes[row, 1].imshow(image)
+        axes[row, 1].imshow(true_mask, alpha=0.5)
+        axes[row, 1].set_title("Image + True Mask")
+
+        axes[row, 2].imshow(image)
+        axes[row, 2].imshow(pred_color, alpha=0.5)
+        axes[row, 2].set_title("Image + Predicted Mask")
+
+        # Remove axis ticks/labels so only the pixels are shown.
+        for ax in axes[row]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     # Print current Torch package versions
     print('Package versions:')
@@ -479,7 +637,7 @@ def main() -> None:
     )
 
     # Define Loss Function
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn = nn.CrossEntropyLoss()
 
     # Define optimizer
     optimizer = torch.optim.AdamW(
@@ -547,6 +705,14 @@ def main() -> None:
 
     # View df
     print(unet_test_df[:5])
+
+    # Export a grid of random test samples (image / image+true mask /
+    # image+predicted mask) so the model output can be inspected visually.
+    visualize_predictions(
+        model,
+        test_df,
+        torch.device(Configuration.DEVICE)
+    )
 
 
 if __name__ == "__main__":
