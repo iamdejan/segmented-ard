@@ -24,7 +24,7 @@ from typing import Dict, List, cast
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
 
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Float, UInt8, jaxtyped
 from beartype import beartype
 
 
@@ -35,13 +35,14 @@ from beartype import beartype
 # ``jaxtyped`` + ``beartype``, so a shape mismatch raises a ``TypeCheckError``
 # instead of a confusing downstream broadcast error.
 ImageTensor = Float[Tensor, "3 h w"]  # single image, channel-first layout
-MaskTensor = Float[Tensor, "3 h w"]  # single RGB color-label mask
+MaskTensor = Float[Tensor, "c h w"]  # one-hot mask, ``c == NUM_CLASSES``
 BatchImage = Float[Tensor, "b 3 h w"]  # collated batch of images
-BatchMask = Float[Tensor, "b 3 h w"]  # collated batch of masks
+BatchMask = Float[Tensor, "b c h w"]  # collated batch of one-hot masks
 Logits = Float[Tensor, "b c h w"]  # model output, ``c == NUM_CLASSES``
-ClassMask = Float[Tensor, "c h w"]  # per-sample mask/prediction, ``c`` channels
+ClassMask = Float[Tensor, "c h w"]  # per-sample probability/binary mask, ``c`` channels
 Scalar = Float[Tensor, ""]  # scalar (0-dim) tensor
-NumpyImage = Float[np.ndarray, "h w 3"]  # single image/mask, channels-last layout
+NumpyImage = Float[np.ndarray, "h w 3"]  # single image, channels-last layout
+ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class id map (numpy)
 
 
 # BDD100k color-label palette. The row index is the class id (0-19), matching
@@ -73,6 +74,52 @@ CLASS_COLORS = np.array([
 ], dtype=np.uint8)
 
 
+def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
+    """Map an RGB color-label image to a per-pixel class-index map.
+
+    BDD100k stores segmentation masks as RGB PNGs whose colours are exactly
+    the entries of ``CLASS_COLORS``. Semantic segmentation needs the class id
+    per pixel (shape ``(H, W)``) rather than the RGB representation (shape
+    ``(H, W, 3)``), so this conversion must happen before the mask is turned
+    into a tensor and one-hot encoded.
+
+    Steps
+    -----
+    1. Initialise the output with the id of the last palette entry so that any
+       unknown colour degrades to ``Unknown`` instead of producing an invalid
+       index.
+    2. For each palette colour, boolean-mask the pixels whose RGB values match
+       it exactly and assign the corresponding class id. The loop is over only
+       ``NUM_CLASSES`` colours and each iteration is fully vectorised.
+
+    Parameters
+    ----------
+    label : np.ndarray
+        RGB color-label array of shape ``(H, W, 3)`` with integer values.
+
+    Returns
+    -------
+    np.ndarray
+        Class-index array of shape ``(H, W)`` and dtype ``uint8``, whose values
+        are in ``[0, NUM_CLASSES)``.
+    """
+    # Default to the last class id so unknown colours fall back gracefully
+    # instead of indexing the palette out of bounds later.
+    class_ids = np.full(label.shape[:2], CLASS_COLORS.shape[0] - 1, dtype=np.uint8)
+
+    # Match each palette colour via exact RGB equality. This stays fast because
+    # every comparison operates on the whole image at once.
+    for class_id, (red, green, blue) in enumerate(CLASS_COLORS):
+        match = (
+            (label[..., 0] == red)
+            & (label[..., 1] == green)
+            & (label[..., 2] == blue)
+        )
+        class_ids[match] = class_id
+
+    return class_ids
+
+
 class Configuration:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = 1
@@ -89,8 +136,12 @@ class Configuration:
 
     APPLY_SHUFFLE=True
     SEED = 768
-    HEIGHT = 1280
-    WIDTH = 720
+    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the spatial extent of a sample.
+    # The BDD100k images used here are 720 rows (height) by 1280 columns
+    # (width); note the previous names were swapped, which made shape code
+    # downstream ambiguous even though the numbers happened to line up.
+    IMAGE_HEIGHT = 720
+    IMAGE_WIDTH = 1280
     CHANNELS = 3 # RGB
 
 
@@ -114,14 +165,21 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
 
 
     @jaxtyped(typechecker=beartype)
-    def load_sample(self, index: int) -> tuple[NumpyImage, NumpyImage]:
-        """Load and normalise the image/mask pair at position ``index``.
+    def load_sample(self, index: int) -> tuple[NumpyImage, ClassIndexArray]:
+        """Load the image and its per-pixel class-index mask at ``index``.
 
-        Both files are opened as RGB before being converted to NumPy arrays.
-        Forcing RGB ensures that sources carrying an alpha channel (some
-        BDD100k color-label PNGs are RGBA) are collapsed to 3 channels, which
-        keeps every sample the same shape and prevents the DataLoader from
-        failing to collate a batch.
+        The image is opened as RGB and normalised to ``[0, 1]``. The mask PNG
+        is likewise forced to RGB (some BDD100k color-labels carry an alpha
+        channel) before being collapsed from the RGB color-label format to a
+        single class id per pixel via :func:`color_label_to_class_index`. This
+        class-index representation is what the one-hot encoder and Dice loss
+        expect downstream.
+
+        Steps
+        -----
+        1. Open both files as RGB and convert them to NumPy arrays.
+        2. Normalise the image pixels to ``[0, 1]``.
+        3. Map the mask's RGB colours to class indices.
 
         Parameters
         ----------
@@ -130,9 +188,10 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
 
         Returns
         -------
-        tuple[NumpyImage, NumpyImage]
-            The ``(image, mask)`` pair as float32 arrays scaled to ``[0, 1]``.
-            Both arrays have shape ``(H, W, 3)`` after the RGB conversion.
+        tuple[NumpyImage, ClassIndexArray]
+            The ``(image, mask)`` pair where ``image`` has shape ``(H, W, 3)``
+            with float32 values in ``[0, 1]`` and ``mask`` has shape ``(H, W)``
+            with uint8 class ids.
 
         Raises
         ------
@@ -142,17 +201,15 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
         image_path = self.image_paths[index]
         mask_path = self.mask_paths[index]
 
-        # Force RGB so that RGBA images (e.g. some BDD100k color-label
-        # PNGs carry an alpha channel) are reduced to 3 channels. Without
-        # this, mixed RGB/RGBA sources produce inconsistent channel counts
-        # that later break batch collation in the DataLoader.
+        # Force RGB so that RGBA sources (e.g. some BDD100k color-label PNGs
+        # carry an alpha channel) are reduced to 3 channels.
         image_pil = Image.open(image_path).convert("RGB")
         mask_pil = Image.open(mask_path).convert("RGB")
 
         image = np.array(image_pil).astype(np.float32) / 255.0
-        mask = np.array(mask_pil).astype(np.float32) / 255.0
+        class_mask = color_label_to_class_index(np.array(mask_pil))
 
-        return image, mask
+        return image, class_mask
 
 
     def __len__(self) -> int:
@@ -163,11 +220,11 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
     def __getitem__(self, index: int) -> tuple[ImageTensor, MaskTensor]:
         """Return the transformed ``(image, mask)`` pair at position ``index``.
 
-        ``ToTensorV2`` already converts each array from ``(H, W, C)`` to the
-        channel-first layout ``(C, H, W)`` that PyTorch expects. The DataLoader
-        adds the batch dimension when collating samples, so no extra
-        ``unsqueeze`` is applied here; doing so would yield a 5-D mask that no
-        longer matches the 4-D model output.
+        ``ToTensorV2`` converts the image from ``(H, W, 3)`` to ``(3, H, W)``
+        and leaves the 2-D class-index mask as ``(H, W)``. The mask is then
+        one-hot encoded to ``(NUM_CLASSES, H, W)`` so that its channel axis
+        lines up with the model logits and the Dice loss. The DataLoader adds
+        the batch dimension when collating samples.
 
         Parameters
         ----------
@@ -177,16 +234,26 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
         Returns
         -------
         tuple[ImageTensor, MaskTensor]
-            The ``(image, mask)`` pair as tensors of shape ``(3, H, W)``.
+            The ``(image, mask)`` pair where ``image`` has shape ``(3, H, W)``
+            and ``mask`` is a one-hot tensor of shape ``(NUM_CLASSES, H, W)``.
         """
-        image, mask = self.load_sample(index)
+        image, class_mask = self.load_sample(index)
 
-        # Transform if necessary
+        # Transform if necessary. The mask is a 2-D class map, so no channel
+        # transposition is needed for it.
         if self.transform:
-            transformed = self.transform(image=image, mask=mask)
+            transformed = self.transform(image=image, mask=class_mask)
         else:
-            transformed = ToTensorV2(image=image, mask=mask)
-        return transformed["image"], transformed["mask"]
+            transformed = ToTensorV2()(image=image, mask=class_mask)
+
+        # One-hot encode the (H, W) class ids into (NUM_CLASSES, H, W) floats
+        # so the mask matches the model's (B, NUM_CLASSES, H, W) output and the
+        # Dice loss. ``one_hot`` needs int64 input, hence the cast.
+        mask_one_hot = torch.nn.functional.one_hot(
+            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
+        ).permute(2, 0, 1).float()
+
+        return transformed["image"], mask_one_hot
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
@@ -251,12 +318,66 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
     return cast(Logits, model(x))
 
 
+class DiceLoss(nn.Module):
+    """Multi-class soft Dice loss for semantic segmentation.
+
+    ``nn.CrossEntropyLoss`` expects integer class-id targets of shape ``(B, H,
+    W)``, which is incompatible with a segmentation pipeline that wishes to use
+    a Dice objective over per-class probabilities. This module instead takes
+    raw ``(B, C, H, W)`` logits and one-hot ``(B, C, H, W)`` targets, applies a
+    softmax over the class axis and returns ``1 - mean(Dice)`` averaged over
+    classes and the batch.
+
+    Parameters
+    ----------
+    smooth : float, optional
+        Additive smoothing applied to the Dice numerator and denominator to
+        avoid division by zero. Defaults to 1.0.
+    """
+
+    def __init__(self, smooth: float = 1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, logits: Logits, target: BatchMask) -> Scalar:
+        """Compute the loss value.
+
+        Parameters
+        ----------
+        logits : Logits
+            Raw model output of shape ``(B, C, H, W)``.
+        target : BatchMask
+            One-hot ground-truth mask of shape ``(B, C, H, W)``.
+
+        Returns
+        -------
+        Scalar
+            The scalar loss value (1 - mean Dice), differentiable w.r.t.
+            ``logits``.
+        """
+        # Softmax over the class axis yields per-pixel probabilities that sum
+        # to 1 across classes, matching the one-hot target distribution.
+        probs = torch.softmax(logits, dim=1)
+
+        # Reduce the spatial axes to get a Dice coefficient per (sample, class)
+        # before averaging: this treats every class equally regardless of the
+        # number of pixels it occupies, which prevents the road/sky classes
+        # from dominating the loss.
+        intersection = (probs * target).sum(dim=(2, 3))
+        cardinality = probs.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
+
+        dice = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
+        return 1.0 - dice.mean()
+
+
+@jaxtyped(typechecker=beartype)
 def execute_epoch(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
-    device: torch.device) -> tuple[float, float]:
+    device: torch.device
+) -> tuple[float, float]:
 
     # Set model into training mode
     model.train()
@@ -282,13 +403,15 @@ def execute_epoch(
         optimizer.step()
 
         # Compute Batch Metrics
-        predicted_class = torch.sigmoid(y_pred)
-        predicted_class = (predicted_class > 0.5).float()
+        # ``y`` is one-hot and ``y_pred`` holds raw logits, so run a softmax
+        # over the class axis to obtain per-class probabilities in the same
+        # (B, NUM_CLASSES, H, W) space before computing soft Dice.
+        predicted = torch.softmax(y_pred, dim=1)
 
         eps = 1e-8
         train_dice += (
-            (2 * (y * predicted_class).sum() + eps) /
-            ((y + predicted_class).sum() + eps)
+            (2 * (y * predicted).sum() + eps) /
+            ((y + predicted).sum() + eps)
         ).cpu().item()
 
 
@@ -299,11 +422,13 @@ def execute_epoch(
     return train_loss, train_dice
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     loss_fn: nn.Module,
-    device: torch.device) -> tuple[float, float]:
+    device: torch.device
+) -> tuple[float, float]:
 
     # Set model into eval mode
     model.eval()
@@ -324,13 +449,14 @@ def evaluate(
             eval_loss += loss.item()
 
             # Compute Batch Metrics
-            predicted_class = torch.sigmoid(y_pred)
-            predicted_class = (predicted_class > 0.5).float()
+            # Softmax gives per-class probabilities over the class axis, matching
+            # the one-hot ``y`` shape so soft Dice is well-defined.
+            predicted = torch.softmax(y_pred, dim=1)
 
             eps = 1e-8
             eval_dice += (
-                (2 * (y * predicted_class).sum() + eps) /
-                ((y + predicted_class).sum() + eps)
+                (2 * (y * predicted).sum() + eps) /
+                ((y + predicted).sum() + eps)
             ).cpu().item()
 
     # Compute Step Metrics
@@ -340,6 +466,7 @@ def evaluate(
     return eval_loss, eval_dice
 
 
+@jaxtyped(typechecker=beartype)
 def train(
     model: nn.Module,
     train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
@@ -348,7 +475,8 @@ def train(
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
     loss_fn: nn.Module,
     epochs: int,
-    device: torch.device) -> Dict[str, List[float]]:
+    device: torch.device
+) -> Dict[str, List[float]]:
 
     # Initialize training session
     session: Dict[str, List[float]] = {
@@ -575,11 +703,12 @@ def compute_metrics(
             y_pred = forward(model, X)
 
             # Generate Predicted Masks
-            predicted_class = torch.sigmoid(y_pred)
-            predicted_class = (predicted_class > 0.3).float()
+            # Softmax yields per-class probabilities matching the one-hot ``y``;
+            # these are passed straight to the soft Dice/IoU helpers.
+            predicted = torch.softmax(y_pred, dim=1)
 
             # Compute Batch Metrics For Each Mask
-            for true_mask, pred_mask in zip(y, predicted_class, strict=True):
+            for true_mask, pred_mask in zip(y, predicted, strict=True):
                 iou = jaccard_index(true_mask, pred_mask).cpu().item()
                 dice = dice_score(true_mask, pred_mask).cpu().item()
 
@@ -677,8 +806,9 @@ def visualize_predictions(
     model.eval()
 
     for row in range(num_rows):
-        # Load the raw pair as (H, W, 3) float arrays in [0, 1].
-        image, true_mask = sample_ds.load_sample(row)
+        # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
+        # and the mask as an (H, W) class-index array.
+        image, class_mask = sample_ds.load_sample(row)
 
         # Replicate the ToTensorV2 conversion: transpose HWC -> CHW, add a
         # batch dim and move to the device so the model sees the same format
@@ -696,11 +826,15 @@ def visualize_predictions(
         # Matplotlib so it can be blended with the RGB image.
         pred_color = colorize_mask(pred_class, CLASS_COLORS).astype(np.float32) / 255.0
 
+        # Colour the ground-truth class map the same way so the two overlays
+        # are directly comparable.
+        true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+
         axes[row, 0].imshow(image)
         axes[row, 0].set_title("Image")
 
         axes[row, 1].imshow(image)
-        axes[row, 1].imshow(true_mask, alpha=0.5)
+        axes[row, 1].imshow(true_mask_color, alpha=0.5)
         axes[row, 1].set_title("Image + True Mask")
 
         axes[row, 2].imshow(image)
@@ -731,6 +865,9 @@ def main() -> None:
     train_transforms = A.Compose([
         A.RandomBrightnessContrast(p=0.2),
         A.HorizontalFlip(p=0.5),
+        # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
+        # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
+        # the image to (C, H, W).
         ToTensorV2(),
     ])
 
@@ -767,7 +904,7 @@ def main() -> None:
     print(
         summary(
                 model=model,
-                input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.WIDTH, Configuration.HEIGHT),
+                input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
                 col_names=["output_size", "num_params", "trainable"],
                 col_width=30,
                 row_settings=["var_names"],
@@ -776,7 +913,10 @@ def main() -> None:
     )
 
     # Define Loss Function
-    loss_fn = nn.CrossEntropyLoss()
+    # Dice loss operates on (B, NUM_CLASSES, H, W) logits vs one-hot masks,
+    # which matches the multi-class semantic segmentation task. CrossEntropyLoss
+    # would require integer class-id targets of shape (B, H, W).
+    loss_fn = DiceLoss()
 
     # Define optimizer
     optimizer = torch.optim.AdamW(
