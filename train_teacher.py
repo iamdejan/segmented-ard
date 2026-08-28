@@ -15,7 +15,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 from typing import Dict, List
 
 from sklearn.model_selection import train_test_split
@@ -26,7 +26,7 @@ class Configuration:
     NUM_DEVICES = 1
     NUM_WORKERS= 2
 
-    NUM_CLASSES = 2
+    NUM_CLASSES = 20
     EPOCHS = 20
     BATCH_SIZE = (
         32 if torch.cuda.device_count() < 2
@@ -62,11 +62,39 @@ class BDDSegmentationDataset(Dataset):
 
 
     def load_sample(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        """Load and normalise the image/mask pair at position ``index``.
+
+        Both files are opened as RGB before being converted to NumPy arrays.
+        Forcing RGB ensures that sources carrying an alpha channel (some
+        BDD100k color-label PNGs are RGBA) are collapsed to 3 channels, which
+        keeps every sample the same shape and prevents the DataLoader from
+        failing to collate a batch.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based position of the sample to load.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            The ``(image, mask)`` pair as float32 arrays scaled to ``[0, 1]``.
+            Both arrays have shape ``(H, W, 3)`` after the RGB conversion.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is out of the range of the dataset lists.
+        """
         image_path = self.image_paths[index]
         mask_path = self.mask_paths[index]
 
-        image = Image.open(image_path)
-        mask = Image.open(mask_path)
+        # Force RGB so that RGBA images (e.g. some BDD100k color-label
+        # PNGs carry an alpha channel) are reduced to 3 channels. Without
+        # this, mixed RGB/RGBA sources produce inconsistent channel counts
+        # that later break batch collation in the DataLoader.
+        image = Image.open(image_path).convert("RGB")
+        mask = Image.open(mask_path).convert("RGB")
 
         image = np.array(image).astype(np.float32) / 255.0
         mask = np.array(mask).astype(np.float32) / 255.0
@@ -111,8 +139,8 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
 
     train_test_df = pd.DataFrame({
-        "image_paths": train_mask_paths,
-        "mask_paths": train_image_paths,
+        "image_paths": train_image_paths,
+        "mask_paths": train_mask_paths,
     })
     train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
 
@@ -351,7 +379,7 @@ def main() -> None:
         encoder_name="resnet18",
         encoder_weights="imagenet",
         in_channels=Configuration.CHANNELS,
-        classes=20
+        classes=Configuration.NUM_CLASSES
     )
 
     print(
