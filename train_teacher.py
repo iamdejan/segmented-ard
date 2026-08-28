@@ -110,6 +110,24 @@ class BDDSegmentationDataset(Dataset):
 
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the transformed ``(image, mask)`` pair at position ``index``.
+
+        ``ToTensorV2`` already converts each array from ``(H, W, C)`` to the
+        channel-first layout ``(C, H, W)`` that PyTorch expects. The DataLoader
+        adds the batch dimension when collating samples, so no extra
+        ``unsqueeze`` is applied here; doing so would yield a 5-D mask that no
+        longer matches the 4-D model output.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based position of the sample to load.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            The ``(image, mask)`` pair as tensors of shape ``(3, H, W)``.
+        """
         image, mask = self.load_sample(index)
 
         # Transform if necessary
@@ -117,7 +135,7 @@ class BDDSegmentationDataset(Dataset):
             transformed = self.transform(image=image, mask=mask)
         else:
             transformed = ToTensorV2(image=image, mask=mask)
-        return transformed["image"], transformed["mask"].unsqueeze_(0)
+        return transformed["image"], transformed["mask"]
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
@@ -479,7 +497,7 @@ def main() -> None:
     )
 
     # Define Loss Function
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn = nn.CrossEntropyLoss()
 
     # Define optimizer
     optimizer = torch.optim.AdamW(
