@@ -30,6 +30,8 @@ matplotlib = ">=3.11.1,<4"
 seaborn = ">=0.13.2,<0.14"
 graphviz = ">=14.1.2,<15"
 segmentation-models-pytorch = ">=0.5.0,<0.6"
+jaxtyping = ">=0.3.11,<0.4"
+beartype = ">=0.22.9,<0.23"
 
 [target.default.dependencies]
 pytorch-gpu = "=2.10.0"

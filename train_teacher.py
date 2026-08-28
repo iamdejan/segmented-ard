@@ -10,8 +10,8 @@ import torch
 import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
 
-from torch import nn
-from torch.utils.data import (Dataset, DataLoader)
+from torch import Tensor, nn
+from torch.utils.data import DataLoader, Dataset
 from torchinfo import summary
 
 import albumentations as A
@@ -19,13 +19,33 @@ from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
 from tqdm import tqdm
-from typing import Dict, List
+from typing import Dict, List, cast
 
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
 
+from jaxtyping import Float, jaxtyped
+from beartype import beartype
+
+
+# Shape aliases that document the tensor layout at each stage of the pipeline.
+#
+# ``h``/``w`` are the spatial dimensions, ``b`` is the batch size and ``c`` is
+# the number of channels/classes. These aliases are enforced at runtime by
+# ``jaxtyped`` + ``beartype``, so a shape mismatch raises a ``TypeCheckError``
+# instead of a confusing downstream broadcast error.
+ImageTensor = Float[Tensor, "3 h w"]  # single image, channel-first layout
+MaskTensor = Float[Tensor, "3 h w"]  # single RGB color-label mask
+BatchImage = Float[Tensor, "b 3 h w"]  # collated batch of images
+BatchMask = Float[Tensor, "b 3 h w"]  # collated batch of masks
+Logits = Float[Tensor, "b c h w"]  # model output, ``c == NUM_CLASSES``
+ClassMask = Float[Tensor, "c h w"]  # per-sample mask/prediction, ``c`` channels
+Scalar = Float[Tensor, ""]  # scalar (0-dim) tensor
+NumpyImage = Float[np.ndarray, "h w 3"]  # single image/mask, channels-last layout
+
+
 class Configuration:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = 1
     NUM_WORKERS= 2
 
@@ -55,16 +75,17 @@ class ImagePath:
     IMAGE_VAL_PATH = BASE + "/images_10k/val"
 
 
-class BDDSegmentationDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, transform=None):
+class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
+    def __init__(self, df: pd.DataFrame, transform: A.Compose | None = None):
         super(BDDSegmentationDataset, self).__init__()
 
-        self.image_paths = df["image_paths"].to_list()
-        self.mask_paths = df["mask_paths"].to_list()
+        self.image_paths: List[str] = df["image_paths"].to_list()
+        self.mask_paths: List[str] = df["mask_paths"].to_list()
         self.transform = transform
 
 
-    def load_sample(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+    @jaxtyped(typechecker=beartype)
+    def load_sample(self, index: int) -> tuple[NumpyImage, NumpyImage]:
         """Load and normalise the image/mask pair at position ``index``.
 
         Both files are opened as RGB before being converted to NumPy arrays.
@@ -80,7 +101,7 @@ class BDDSegmentationDataset(Dataset):
 
         Returns
         -------
-        tuple[np.ndarray, np.ndarray]
+        tuple[NumpyImage, NumpyImage]
             The ``(image, mask)`` pair as float32 arrays scaled to ``[0, 1]``.
             Both arrays have shape ``(H, W, 3)`` after the RGB conversion.
 
@@ -96,20 +117,21 @@ class BDDSegmentationDataset(Dataset):
         # PNGs carry an alpha channel) are reduced to 3 channels. Without
         # this, mixed RGB/RGBA sources produce inconsistent channel counts
         # that later break batch collation in the DataLoader.
-        image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("RGB")
+        image_pil = Image.open(image_path).convert("RGB")
+        mask_pil = Image.open(mask_path).convert("RGB")
 
-        image = np.array(image).astype(np.float32) / 255.0
-        mask = np.array(mask).astype(np.float32) / 255.0
+        image = np.array(image_pil).astype(np.float32) / 255.0
+        mask = np.array(mask_pil).astype(np.float32) / 255.0
 
         return image, mask
 
 
     def __len__(self) -> int:
-        return self.image_paths.__len__()
+        return len(self.image_paths)
 
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    @jaxtyped(typechecker=beartype)
+    def __getitem__(self, index: int) -> tuple[ImageTensor, MaskTensor]:
         """Return the transformed ``(image, mask)`` pair at position ``index``.
 
         ``ToTensorV2`` already converts each array from ``(H, W, C)`` to the
@@ -125,7 +147,7 @@ class BDDSegmentationDataset(Dataset):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor]
+        tuple[ImageTensor, MaskTensor]
             The ``(image, mask)`` pair as tensors of shape ``(3, H, W)``.
         """
         image, mask = self.load_sample(index)
@@ -176,18 +198,42 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     return train_df, val_df, test_df
 
 
+@jaxtyped(typechecker=beartype)
+def forward(model: nn.Module, x: BatchImage) -> Logits:
+    """Run a single forward pass and assert the input/output shapes.
+
+    Centralising the forward pass here lets ``jaxtyping`` verify that the
+    input batch is always ``(B, 3, H, W)`` and that the model produces
+    ``(B, NUM_CLASSES, H, W)`` logits, which is where shape confusion most
+    often arises.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The segmentation model to run.
+    x : BatchImage
+        Input batch of images with shape ``(B, 3, H, W)``.
+
+    Returns
+    -------
+    Logits
+        Raw model logits with shape ``(B, NUM_CLASSES, H, W)``.
+    """
+    return cast(Logits, model(x))
+
+
 def execute_epoch(
-    model:torch.nn.Module,
-    dataloader:torch.utils.data.DataLoader,
-    optimizer:torch.optim.Optimizer,
-    loss_fn:torch.nn.Module,
-    device:torch.device) -> tuple[float, float]:
+    model: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module,
+    device: torch.device) -> tuple[float, float]:
 
     # Set model into training mode
     model.train()
 
     # Initialize train loss & accuracy
-    train_loss, train_dice = 0, 0
+    train_loss, train_dice = 0.0, 0.0
 
     # Execute training loop over train dataloader
     for _, (X, y) in enumerate(dataloader):
@@ -195,7 +241,7 @@ def execute_epoch(
         X, y = X.to(device), y.to(device)
 
         # Feed-forward and compute metrics
-        y_pred = model(X)
+        y_pred = forward(model, X)
         loss = loss_fn(y_pred, y)
         train_loss += loss.item()
 
@@ -225,16 +271,16 @@ def execute_epoch(
 
 
 def evaluate(
-    model:torch.nn.Module,
-    dataloader:torch.utils.data.DataLoader,
-    loss_fn:torch.nn.Module,
-    device:torch.device) -> tuple[float, float]:
+    model: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    loss_fn: nn.Module,
+    device: torch.device) -> tuple[float, float]:
 
     # Set model into eval mode
     model.eval()
 
     # Initialize eval loss & accuracy
-    eval_loss, eval_dice = 0, 0
+    eval_loss, eval_dice = 0.0, 0.0
 
     # Active inferene context manager
     with torch.inference_mode():
@@ -244,7 +290,7 @@ def evaluate(
             X, y = X.to(device), y.to(device)
 
             # Feed-forward and compute metrics
-            y_pred = model(X)
+            y_pred = forward(model, X)
             loss = loss_fn(y_pred, y)
             eval_loss += loss.item()
 
@@ -266,17 +312,17 @@ def evaluate(
 
 
 def train(
-    model:torch.nn.Module,
-    train_dataloader:torch.utils.data.DataLoader,
-    eval_dataloader:torch.utils.data.DataLoader,
-    optimizer:torch.optim.Optimizer,
-    scheduler:torch.optim.lr_scheduler,
-    loss_fn:torch.nn.Module,
-    epochs:int,
-    device:torch.device) -> Dict[str, List]:
+    model: nn.Module,
+    train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    optimizer: torch.optim.Optimizer,
+    scheduler: lr_scheduler.ReduceLROnPlateau | None,
+    loss_fn: nn.Module,
+    epochs: int,
+    device: torch.device) -> Dict[str, List[float]]:
 
     # Initialize training session
-    session = {
+    session: Dict[str, List[float]] = {
         'loss'            : [],
         'dice_score'      : [],
         'eval_loss'       : [],
@@ -327,7 +373,10 @@ def train(
     return session
 
 
-def plot_training_curves(history, fig_size=(20, 10)):
+def plot_training_curves(
+    history: Dict[str, List[float]],
+    fig_size: tuple[int, int] = (20, 10)
+) -> None:
 
     loss = np.array(history['loss'])
     val_loss = np.array(history['eval_loss'])
@@ -371,19 +420,73 @@ def plot_training_curves(history, fig_size=(20, 10)):
     sns.despine()
 
 
-def precision_(y_true, y_pred):
+@jaxtyped(typechecker=beartype)
+def precision_(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
+    """Compute mean precision (intersection over predicted positives).
+
+    Both operands must share the same ``(C, H, W)`` shape; the axis ``C`` is
+    reduced by the summation and the result is a scalar.
+
+    Parameters
+    ----------
+    y_true : ClassMask
+        Ground-truth mask with shape ``(C, H, W)``.
+    y_pred : ClassMask
+        Predicted mask with shape ``(C, H, W)``.
+
+    Returns
+    -------
+    Scalar
+        Mean precision across the class dimension.
+    """
     intersection = (y_true * y_pred).sum()
     total_predicted_pixels = y_pred.sum()
     return (intersection / total_predicted_pixels).mean()
 
 
-def recall_(y_true, y_pred):
+@jaxtyped(typechecker=beartype)
+def recall_(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
+    """Compute mean recall (intersection over true positives).
+
+    Both operands must share the same ``(C, H, W)`` shape; the axis ``C`` is
+    reduced by the summation and the result is a scalar.
+
+    Parameters
+    ----------
+    y_true : ClassMask
+        Ground-truth mask with shape ``(C, H, W)``.
+    y_pred : ClassMask
+        Predicted mask with shape ``(C, H, W)``.
+
+    Returns
+    -------
+    Scalar
+        Mean recall across the class dimension.
+    """
     intersection = (y_true * y_pred).sum()
     total_true_pixels = y_true.sum()
     return (intersection / total_true_pixels).mean()
 
 
-def dice_score(y_true, y_pred):
+@jaxtyped(typechecker=beartype)
+def dice_score(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
+    """Compute the Sorensen-Dice coefficient for a single mask pair.
+
+    Both operands must share the same ``(C, H, W)`` shape, which ``jaxtyped``
+    enforces at runtime before the element-wise product is evaluated.
+
+    Parameters
+    ----------
+    y_true : ClassMask
+        Ground-truth mask with shape ``(C, H, W)``.
+    y_pred : ClassMask
+        Predicted mask with shape ``(C, H, W)``.
+
+    Returns
+    -------
+    Scalar
+        Scalar Dice coefficient, smoothed by ``eps`` to avoid division by zero.
+    """
     eps = 1e-8
     intersection = (y_true * y_pred).sum()
     summation = (y_true + y_pred).sum()
@@ -391,7 +494,25 @@ def dice_score(y_true, y_pred):
     return ((2 * intersection) / (summation + eps))
 
 
-def jaccard_index(y_true, y_pred):
+@jaxtyped(typechecker=beartype)
+def jaccard_index(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
+    """Compute the Jaccard index (IoU) for a single mask pair.
+
+    Both operands must share the same ``(C, H, W)`` shape, which ``jaxtyped``
+    enforces at runtime before the element-wise product is evaluated.
+
+    Parameters
+    ----------
+    y_true : ClassMask
+        Ground-truth mask with shape ``(C, H, W)``.
+    y_pred : ClassMask
+        Predicted mask with shape ``(C, H, W)``.
+
+    Returns
+    -------
+    Scalar
+        Scalar IoU, smoothed by ``eps`` to avoid division by zero.
+    """
     eps = 1e-8
     intersection = (y_true * y_pred).sum()
     union = (y_true + y_pred).sum() - intersection
@@ -400,13 +521,13 @@ def jaccard_index(y_true, y_pred):
 
 
 def compute_metrics(
-    model:nn.Module,
-    sample_loader:torch.utils.data.DataLoader,
-    device:torch.device
-) -> np.ndarray:
+    model: nn.Module,
+    sample_loader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    device: torch.device
+) -> Dict[str, List[float]]:
 
     # Initiate Metrics Dict
-    metrics = {
+    metrics: Dict[str, List[float]] = {
         'IoU'           : [],
         'dice_score'    : [],
     }
@@ -422,7 +543,7 @@ def compute_metrics(
             X, y = X.to(device), y.to(device)
 
             # Feed-forward Input
-            y_pred = model(X)
+            y_pred = forward(model, X)
 
             # Generate Predicted Masks
             predicted_class = torch.sigmoid(y_pred)
