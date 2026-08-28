@@ -1,7 +1,10 @@
 import glob
+import os
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 import torch
 import torchvision
@@ -161,45 +164,45 @@ def execute_epoch(
     optimizer:torch.optim.Optimizer,
     loss_fn:torch.nn.Module,
     device:torch.device) -> tuple[float, float]:
-    
+
     # Set model into training mode
     model.train()
-    
+
     # Initialize train loss & accuracy
     train_loss, train_dice = 0, 0
-    
+
     # Execute training loop over train dataloader
     for _, (X, y) in enumerate(dataloader):
         # Load data onto target device
         X, y = X.to(device), y.to(device)
-        
+
         # Feed-forward and compute metrics
         y_pred = model(X)
         loss = loss_fn(y_pred, y)
-        train_loss += loss.item() 
-        
+        train_loss += loss.item()
+
         # Reset Gradients & Backpropagate Loss
         optimizer.zero_grad()
         loss.backward()
-        
+
         # Update Model Gradients
         optimizer.step()
-        
+
         # Compute Batch Metrics
         predicted_class = torch.sigmoid(y_pred)
         predicted_class = (predicted_class > 0.5).float()
-        
+
         eps = 1e-8
         train_dice += (
-            (2 * (y * predicted_class).sum() + eps) / 
+            (2 * (y * predicted_class).sum() + eps) /
             ((y + predicted_class).sum() + eps)
         ).cpu().item()
-        
-        
+
+
     # Compute Step Metrics
     train_loss = train_loss / len(dataloader)
     train_dice = train_dice / len(dataloader)
-    
+
     return train_loss, train_dice
 
 
@@ -208,13 +211,13 @@ def evaluate(
     dataloader:torch.utils.data.DataLoader,
     loss_fn:torch.nn.Module,
     device:torch.device) -> tuple[float, float]:
-    
+
     # Set model into eval mode
     model.eval()
-    
+
     # Initialize eval loss & accuracy
     eval_loss, eval_dice = 0, 0
-    
+
     # Active inferene context manager
     with torch.inference_mode():
         # Execute eval loop over dataloader
@@ -225,22 +228,22 @@ def evaluate(
             # Feed-forward and compute metrics
             y_pred = model(X)
             loss = loss_fn(y_pred, y)
-            eval_loss += loss.item() 
+            eval_loss += loss.item()
 
             # Compute Batch Metrics
             predicted_class = torch.sigmoid(y_pred)
             predicted_class = (predicted_class > 0.5).float()
-            
+
             eps = 1e-8
             eval_dice += (
-                (2 * (y * predicted_class).sum() + eps) / 
+                (2 * (y * predicted_class).sum() + eps) /
                 ((y + predicted_class).sum() + eps)
             ).cpu().item()
-            
+
     # Compute Step Metrics
     eval_loss = eval_loss / len(dataloader)
     eval_dice = eval_dice / len(dataloader)
-    
+
     return eval_loss, eval_dice
 
 
@@ -253,7 +256,7 @@ def train(
     loss_fn:torch.nn.Module,
     epochs:int,
     device:torch.device) -> Dict[str, List]:
-    
+
     # Initialize training session
     session = {
         'loss'            : [],
@@ -261,62 +264,138 @@ def train(
         'eval_loss'       : [],
         'eval_dice_score' : []
     }
-    
+
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
         train_loss, train_dice = execute_epoch(
-            model, 
-            train_dataloader, 
-            optimizer, 
-            loss_fn, 
+            model,
+            train_dataloader,
+            optimizer,
+            loss_fn,
             device
         )
-        
+
         # Evaluate Model
         eval_loss, eval_dice = evaluate(
-            model, 
+            model,
             eval_dataloader,
-            loss_fn, 
+            loss_fn,
             device
         )
-        
+
         # Execute schedular step
         current_lr = 0
-        if scheduler: 
+        if scheduler:
             scheduler.step(eval_loss)
             current_lr = optimizer.param_groups[0]['lr']
-        
+
         # Log Epoch Metrics
         log_text = f'loss: {train_loss:.4f} - dice_score: {train_dice:.4f} - eval_loss: {eval_loss:.4f} - eval_dice_score: {eval_dice:.4f}'
-        
-        if scheduler: 
+
+        if scheduler:
             print(log_text + f' - lr: {current_lr}')
         else:
             print(log_text)
-            
+
         # Record Epoch Metrics
         session['loss'].append(train_loss)
         session['dice_score'].append(train_dice)
         session['eval_loss'].append(eval_loss)
         session['eval_dice_score'].append(eval_dice)
-        
+
     # Return Session Metrics
     return session
 
 
-def predict(
-    model:nn.Module, 
+def plot_training_curves(history, fig_size=(20, 10)):
+
+    loss = np.array(history['loss'])
+    val_loss = np.array(history['eval_loss'])
+
+    dice_coeff = np.array(history['dice_score'])
+    val_dice_coeff = np.array(history['eval_dice_score'])
+
+    epochs = range(len(history['loss']))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=fig_size)
+
+    # Plot loss
+    ax1.plot(epochs, loss, label='training_loss', marker='o', color='C5')
+    ax1.plot(epochs, val_loss, label='eval_loss', marker='o', color='C6')
+
+    # Fill area between losses
+    ax1.fill_between(epochs, loss, val_loss, where=(loss > val_loss), color='C5', alpha=0.4, interpolate=True)
+    ax1.fill_between(epochs, loss, val_loss, where=(loss < val_loss), color='C6', alpha=0.4, interpolate=True)
+
+    # Add Text & Formats
+    ax1.set_title('Loss (Lower Means Better)', fontsize=22)
+    ax1.set_xlabel('Epochs', fontsize=18)
+    ax1.set_ylabel('Loss', fontsize=18)
+    ax1.tick_params(axis='both', which='major', labelsize=14)
+    ax1.legend(fontsize=14)
+
+    # Plot metric
+    ax2.plot(epochs, dice_coeff, label='training_dice_score', marker='o', color='C5')
+    ax2.plot(epochs, val_dice_coeff, label='eval_dice_score', marker='o', color='C6')
+
+    # Fill area between metrics
+    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff > val_dice_coeff), color='C5', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff < val_dice_coeff), color='C6', alpha=0.4, interpolate=True)
+
+    # Add Text & Formats
+    ax2.set_title('Dice Score (Higher Means Better)', fontsize=22)
+    ax2.set_xlabel('Epochs', fontsize=18)
+    ax2.set_ylabel('Dice Score', fontsize=18)
+    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.legend(fontsize=14)
+    sns.despine()
+
+
+def precision_(y_true, y_pred):
+    intersection = (y_true * y_pred).sum()
+    total_predicted_pixels = y_pred.sum()
+    return (intersection / total_predicted_pixels).mean()
+
+
+def recall_(y_true, y_pred):
+    intersection = (y_true * y_pred).sum()
+    total_true_pixels = y_true.sum()
+    return (intersection / total_true_pixels).mean()
+
+
+def dice_score(y_true, y_pred):
+    eps = 1e-8
+    intersection = (y_true * y_pred).sum()
+    summation = (y_true + y_pred).sum()
+
+    return ((2 * intersection) / (summation + eps))
+
+
+def jaccard_index(y_true, y_pred):
+    eps = 1e-8
+    intersection = (y_true * y_pred).sum()
+    union = (y_true + y_pred).sum() - intersection
+
+    return (intersection / (union + eps))
+
+
+def compute_metrics(
+    model:nn.Module,
     sample_loader:torch.utils.data.DataLoader,
-    device:torch.device,
-    threshold:float=0.5) -> np.ndarray:
-    
+    device:torch.device
+) -> np.ndarray:
+
+    # Initiate Metrics Dict
+    metrics = {
+        'IoU'           : [],
+        'dice_score'    : [],
+    }
+
     # Set model into eval mode
     model.eval()
-    
-    predictions = []
-    
+
     # Active inferene context manager
     with torch.inference_mode():
         # Execute eval loop over dataloader
@@ -324,17 +403,23 @@ def predict(
             # Load data onto target device
             X, y = X.to(device), y.to(device)
 
-            # Feed-forward and compute metrics
-            y_pred = model(X) 
+            # Feed-forward Input
+            y_pred = model(X)
 
-            # Compute Batch Metrics
+            # Generate Predicted Masks
             predicted_class = torch.sigmoid(y_pred)
-            predicted_class = (predicted_class >= threshold).float()
+            predicted_class = (predicted_class > 0.3).float()
 
-            # Record prediction
-            predictions.append(predicted_class.cpu().numpy())
-        
-    return np.vstack(predictions)
+            # Compute Batch Metrics For Each Mask
+            for true_mask, pred_mask in zip(y, predicted_class, strict=True):
+                iou = jaccard_index(true_mask, pred_mask).cpu().item()
+                dice = dice_score(true_mask, pred_mask).cpu().item()
+
+                # Record metrics
+                metrics['dice_score'].append(dice)
+                metrics['IoU'].append(iou)
+
+    return metrics
 
 
 def main() -> None:
@@ -384,7 +469,7 @@ def main() -> None:
 
     print(
         summary(
-                model=model, 
+                model=model,
                 input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.WIDTH, Configuration.HEIGHT),
                 col_names=["output_size", "num_params", "trainable"],
                 col_width=30,
@@ -404,7 +489,7 @@ def main() -> None:
 
     # Define Scheduler
     scheduler = lr_scheduler.ReduceLROnPlateau(
-        optimizer=optimizer, 
+        optimizer=optimizer,
         mode='min',
         patience=Configuration.PATIENCE
     )
@@ -413,7 +498,7 @@ def main() -> None:
     print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
     print('----------------------------------')
 
-    # Generate training session config 
+    # Generate training session config
     session_config = {
         'model'               : model,
         'train_dataloader'    : train_loader,
@@ -427,6 +512,41 @@ def main() -> None:
 
     # Execute Training Session
     unet_session_history = train(**session_config)
+
+    # Create Model directory
+    model_name = 'teacher'
+    model_path = './model/'
+    os.mkdir(model_path)
+
+    # Save Model
+    torch.save(model, model_path + model_name + '.pt')
+
+    # Convert U-Net history dict to DataFrame
+    unet_session_history_df = pd.DataFrame(unet_session_history)
+    print(unet_session_history_df[:5])
+
+    # Plot U-Net Session Training History
+    plot_training_curves(
+        unet_session_history,
+        fig_size=(20, 20)
+    )
+
+    # Generate Segmentation Metrics
+    unet_metrics = compute_metrics(
+        model, test_loader, Configuration.DEVICE
+    )
+
+    # Create copy of test df
+    unet_test_df = test_df.copy()
+
+    # Concatenate Metrics onto copied df
+    unet_test_df = pd.concat(
+        (unet_test_df, pd.DataFrame(unet_metrics)),
+        axis=1
+    )
+
+    # View df
+    print(unet_test_df[:5])
 
 
 if __name__ == "__main__":
