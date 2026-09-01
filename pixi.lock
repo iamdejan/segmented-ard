@@ -223,6 +223,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/adwaita-icon-theme-49.0-unix_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/anyio-4.14.2-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/beartype-0.22.9-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/certifi-2026.7.22-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cfgv-3.5.0-pyhd8ed1ab_0.conda
@@ -254,6 +255,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.19-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/importlib-metadata-9.0.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/iniconfig-2.3.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.11-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jinja2-3.1.6-pyhcf101f3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/joblib-1.5.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mpmath-1.3.0-pyhd8ed1ab_1.conda
@@ -299,6 +301,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/virtualenv-21.7.4-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/04/2c/9e69d73c4297508be9e3b64a970ea3971b3eb8db64ffc5802d40bd25981f/jsonschema_path-0.5.0-py3-none-any.whl
@@ -335,7 +338,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6e/70/eb3ba922b8e2b8687723892fa8eaa321a916d740d76b5a827d3c05f23b5b/mcp_pypi-3.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/71/43/1947f06babed6b3f1d7f38b0c767f52df66bfb2bc10b468c4a7de9eceff2/aiohappyeyeballs-2.7.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7b/e0/fe1c760abd9e9cb5dfbce057b6582cb1ac36dfd8b5ce202e1445605c922d/fakeredis-2.37.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7f/66/b15ce62552d84bbfcec9a4873ab79d993a1dd4edb922cbfccae192bd5b5f/jaraco.classes-3.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/db/e655086b7f3a705df045bf0933bdd9c2f79bb3c97bfef1384598bb79a217/keyring-25.7.0-py3-none-any.whl
@@ -559,6 +561,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/adwaita-icon-theme-49.0-unix_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/anyio-4.14.2-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/beartype-0.22.9-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.2.25-hbd8a1cb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/certifi-2026.7.22-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cfgv-3.5.0-pyhd8ed1ab_0.conda
@@ -588,6 +591,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.19-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/importlib-metadata-8.7.0-pyhe01879c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/iniconfig-2.3.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.11-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jinja2-3.1.6-pyhcf101f3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/joblib-1.5.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mpmath-1.3.0-pyhd8ed1ab_1.conda
@@ -633,6 +637,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.15.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/virtualenv-21.1.0-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.0-pyhcf101f3_1.conda
       - pypi: https://files.pythonhosted.org/packages/00/4b/ccc026168948fec4f7555b9164c724cf4125eac006e176541483d2c959be/pydantic_settings-2.13.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
@@ -676,7 +681,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/e7/237155ae19a9023de7e30ec64e5d99a9431a567407ac21170a046d22a5a3/cryptography-46.0.5-cp311-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/6e/70/eb3ba922b8e2b8687723892fa8eaa321a916d740d76b5a827d3c05f23b5b/mcp_pypi-3.0.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/74/c3/24a2f845e3917201628ecaba4f18bab4d18a337834c1df2a159ee9d22a42/prometheus_client-0.24.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7c/24/75d274228acf35ceeb2850b8ce04de9dd7355ff7a0b49d607ee60c29c518/aiohttp-3.13.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/66/b15ce62552d84bbfcec9a4873ab79d993a1dd4edb922cbfccae192bd5b5f/jaraco.classes-3.4.0-py3-none-any.whl
@@ -5121,6 +5125,18 @@ packages:
   run_exports: {}
   size: 164465
   timestamp: 1783889660383
+- conda: https://conda.anaconda.org/conda-forge/noarch/beartype-0.22.9-pyhd8ed1ab_0.conda
+  sha256: 29f6670a04b299d6dc871f6bcc881282cd276d46fb970771c858d0cade5e3924
+  md5: c69efc0c283c897a3d79868454b823a8
+  depends:
+  - python >=3.10
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/beartype?source=hash-mapping
+  run_exports: {}
+  size: 1063520
+  timestamp: 1765715830980
 - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.2.25-hbd8a1cb_0.conda
   sha256: 67cc7101b36421c5913a1687ef1b99f85b5d6868da3abbf6ec1a4181e79782fc
   md5: 4492fd26db29495f0ba23f146cd5638d
@@ -5564,6 +5580,19 @@ packages:
   run_exports: {}
   size: 13387
   timestamp: 1760831448842
+- conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.11-pyhd8ed1ab_0.conda
+  sha256: e0c861f192c9640ffdc74c6c813012d1cce48038e456a16fcf464b99b77feae1
+  md5: d2fa6995ffc3e55ea22e70c6582489ab
+  depends:
+  - python >=3.11
+  - wadler-lindig >=0.1.3
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/jaxtyping?source=hash-mapping
+  run_exports: {}
+  size: 49623
+  timestamp: 1782331952975
 - conda: https://conda.anaconda.org/conda-forge/noarch/jinja2-3.1.6-pyhcf101f3_1.conda
   sha256: fc9ca7348a4f25fed2079f2153ecdcf5f9cf2a0bc36c4172420ca09e1849df7b
   md5: 04558c96691bed63104678757beb4f8d
@@ -6370,6 +6399,19 @@ packages:
   run_exports: {}
   size: 3894937
   timestamp: 1786427893830
+- conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
+  sha256: af400decd8578d521c752594bb9380eb4d1e1e53e919c18dd2d65429f032e36c
+  md5: d93a6a7cf86ac0c6c2f00c287c3a030c
+  depends:
+  - python >=3.10
+  - python
+  license: Apache-2.0
+  license_family: APACHE
+  purls:
+  - pkg:pypi/wadler-lindig?source=hash-mapping
+  run_exports: {}
+  size: 28051
+  timestamp: 1752728420929
 - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.0-pyhcf101f3_1.conda
   sha256: b4533f7d9efc976511a73ef7d4a2473406d7f4c750884be8e8620b0ce70f4dae
   md5: 30cd29cb87d819caead4d55184c1d115
@@ -7038,111 +7080,6 @@ packages:
   name: aiohappyeyeballs
   version: 2.7.1
   sha256: 9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
-  requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl
-  name: beartype
-  version: 0.22.9
-  sha256: d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2
-  requires_dist:
-  - autoapi>=0.9.0 ; extra == 'dev'
-  - celery ; extra == 'dev'
-  - click ; extra == 'dev'
-  - coverage>=5.5 ; extra == 'dev'
-  - docutils>=0.22.0 ; extra == 'dev'
-  - equinox ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'dev'
-  - fastmcp ; python_full_version < '3.14' and extra == 'dev'
-  - jax[cpu] ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'dev'
-  - jaxtyping ; sys_platform == 'linux' and extra == 'dev'
-  - langchain ; python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'dev'
-  - mypy>=0.800 ; platform_python_implementation != 'PyPy' and extra == 'dev'
-  - nuitka>=1.2.6 ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'dev'
-  - numba ; python_full_version < '3.14' and extra == 'dev'
-  - numpy ; python_full_version < '3.15' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'dev'
-  - pandera>=0.26.0 ; python_full_version < '3.14' and extra == 'dev'
-  - poetry ; extra == 'dev'
-  - polars ; python_full_version < '3.14' and extra == 'dev'
-  - pydata-sphinx-theme<=0.7.2 ; extra == 'dev'
-  - pygments ; extra == 'dev'
-  - pyinstaller ; extra == 'dev'
-  - pyright>=1.1.370 ; extra == 'dev'
-  - pytest>=6.2.0 ; extra == 'dev'
-  - redis ; extra == 'dev'
-  - rich-click ; extra == 'dev'
-  - setuptools ; extra == 'dev'
-  - sphinx ; extra == 'dev'
-  - sphinx>=4.2.0,<6.0.0 ; extra == 'dev'
-  - sphinxext-opengraph>=0.7.5 ; extra == 'dev'
-  - sqlalchemy ; extra == 'dev'
-  - torch ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'dev'
-  - tox>=3.20.1 ; extra == 'dev'
-  - typer ; extra == 'dev'
-  - typing-extensions>=3.10.0.0 ; extra == 'dev'
-  - xarray ; python_full_version < '3.15' and extra == 'dev'
-  - mkdocs-material[imaging]>=9.6.0 ; extra == 'doc-ghp'
-  - mkdocstrings-python-xref>=1.16.0 ; extra == 'doc-ghp'
-  - mkdocstrings-python>=1.16.0 ; extra == 'doc-ghp'
-  - autoapi>=0.9.0 ; extra == 'doc-rtd'
-  - pydata-sphinx-theme<=0.7.2 ; extra == 'doc-rtd'
-  - setuptools ; extra == 'doc-rtd'
-  - sphinx>=4.2.0,<6.0.0 ; extra == 'doc-rtd'
-  - sphinxext-opengraph>=0.7.5 ; extra == 'doc-rtd'
-  - celery ; extra == 'test'
-  - click ; extra == 'test'
-  - coverage>=5.5 ; extra == 'test'
-  - docutils>=0.22.0 ; extra == 'test'
-  - equinox ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'test'
-  - fastmcp ; python_full_version < '3.14' and extra == 'test'
-  - jax[cpu] ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'test'
-  - jaxtyping ; sys_platform == 'linux' and extra == 'test'
-  - langchain ; python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'test'
-  - mypy>=0.800 ; platform_python_implementation != 'PyPy' and extra == 'test'
-  - nuitka>=1.2.6 ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'test'
-  - numba ; python_full_version < '3.14' and extra == 'test'
-  - numpy ; python_full_version < '3.15' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'test'
-  - pandera>=0.26.0 ; python_full_version < '3.14' and extra == 'test'
-  - poetry ; extra == 'test'
-  - polars ; python_full_version < '3.14' and extra == 'test'
-  - pygments ; extra == 'test'
-  - pyinstaller ; extra == 'test'
-  - pyright>=1.1.370 ; extra == 'test'
-  - pytest>=6.2.0 ; extra == 'test'
-  - redis ; extra == 'test'
-  - rich-click ; extra == 'test'
-  - sphinx ; extra == 'test'
-  - sqlalchemy ; extra == 'test'
-  - torch ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'test'
-  - tox>=3.20.1 ; extra == 'test'
-  - typer ; extra == 'test'
-  - typing-extensions>=3.10.0.0 ; extra == 'test'
-  - xarray ; python_full_version < '3.15' and extra == 'test'
-  - celery ; extra == 'test-tox'
-  - click ; extra == 'test-tox'
-  - docutils>=0.22.0 ; extra == 'test-tox'
-  - equinox ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'test-tox'
-  - fastmcp ; python_full_version < '3.14' and extra == 'test-tox'
-  - jax[cpu] ; python_full_version < '3.15' and sys_platform == 'linux' and extra == 'test-tox'
-  - jaxtyping ; sys_platform == 'linux' and extra == 'test-tox'
-  - langchain ; python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'test-tox'
-  - mypy>=0.800 ; platform_python_implementation != 'PyPy' and extra == 'test-tox'
-  - nuitka>=1.2.6 ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'test-tox'
-  - numba ; python_full_version < '3.14' and extra == 'test-tox'
-  - numpy ; python_full_version < '3.15' and platform_python_implementation != 'PyPy' and sys_platform != 'darwin' and extra == 'test-tox'
-  - pandera>=0.26.0 ; python_full_version < '3.14' and extra == 'test-tox'
-  - poetry ; extra == 'test-tox'
-  - polars ; python_full_version < '3.14' and extra == 'test-tox'
-  - pygments ; extra == 'test-tox'
-  - pyinstaller ; extra == 'test-tox'
-  - pyright>=1.1.370 ; extra == 'test-tox'
-  - pytest>=6.2.0 ; extra == 'test-tox'
-  - redis ; extra == 'test-tox'
-  - rich-click ; extra == 'test-tox'
-  - sphinx ; extra == 'test-tox'
-  - sqlalchemy ; extra == 'test-tox'
-  - torch ; python_full_version < '3.14' and sys_platform == 'linux' and extra == 'test-tox'
-  - typer ; extra == 'test-tox'
-  - typing-extensions>=3.10.0.0 ; extra == 'test-tox'
-  - xarray ; python_full_version < '3.15' and extra == 'test-tox'
-  - coverage>=5.5 ; extra == 'test-tox-coverage'
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/74/c3/24a2f845e3917201628ecaba4f18bab4d18a337834c1df2a159ee9d22a42/prometheus_client-0.24.1-py3-none-any.whl
   name: prometheus-client
