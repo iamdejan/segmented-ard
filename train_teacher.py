@@ -128,8 +128,8 @@ class Configuration:
     NUM_CLASSES = 20
     EPOCHS = 20
     BATCH_SIZE = (
-        4 if torch.cuda.device_count() < 2
-        else (4 * torch.cuda.device_count())
+        16 if torch.cuda.device_count() < 2
+        else (16 * torch.cuda.device_count())
     )
     LR = 1e-4
     PATIENCE = 8
