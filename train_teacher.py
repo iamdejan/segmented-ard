@@ -9,6 +9,7 @@ import seaborn as sns
 import torch
 import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
+from torch.amp.grad_scaler import GradScaler
 
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
@@ -121,16 +122,34 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
+    """Central place for all training hyper-parameters and constants.
+
+    Keeping these values here (instead of inline in ``main``) makes the memory
+    footprint and training schedule easy to tune. ``BATCH_SIZE`` is the number
+    of samples processed per forward/backward pass, while
+    ``GRADIENT_ACCUMULATION_STEPS`` lets the effective batch size grow without
+    increasing GPU memory.
+    """
+
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = 1
-    NUM_WORKERS= 2
+    NUM_WORKERS = 2
 
     NUM_CLASSES = 20
     EPOCHS = 20
+    # Number of samples per forward/backward pass. Lowered from 16 to 4 so a
+    # 720x1280 x 20-class U-Net fits in 8 GiB of GPU memory.
     BATCH_SIZE = (
-        32 if torch.cuda.device_count() < 2
-        else (32 * torch.cuda.device_count())
+        4 if torch.cuda.device_count() < 2
+        else (4 * torch.cuda.device_count())
     )
+    # Gradients from ``GRADIENT_ACCUMULATION_STEPS`` mini-batches are summed
+    # before a single optimizer step, giving an effective batch size of
+    # ``BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS`` without extra memory.
+    GRADIENT_ACCUMULATION_STEPS = 4
+    # Mixed precision roughly halves activation memory on CUDA and enables
+    # faster tensor-core math during training.
+    USE_AMP = True
     LR = 1e-4
     PATIENCE = 8
 
@@ -376,8 +395,61 @@ def execute_epoch(
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
-    device: torch.device
+    device: torch.device,
+    scaler: GradScaler | None = None,
+    accumulation_steps: int = 1
 ) -> tuple[float, float]:
+    """Train ``model`` for one full pass over ``dataloader``.
+
+    Runs the forward/backward pass in automatic mixed precision (AMP) when a
+    ``scaler`` is supplied, which halves the memory used by activations. The
+    gradient is divided by ``accumulation_steps`` and the optimizer only steps
+    every ``accumulation_steps`` batches, so the effective batch size becomes
+    ``batch_size * accumulation_steps`` without increasing GPU memory.
+
+    Steps
+    -----
+    1. Put the model in training mode and reset the running accumulators.
+    2. For each batch, move data to ``device`` and compute logits + loss under
+       ``torch.autocast`` (when AMP is enabled).
+    3. Scale the loss by ``1 / accumulation_steps`` and backpropagate, through
+       the gradient scaler if AMP is on.
+    4. Step the optimizer and zero gradients only once every
+       ``accumulation_steps`` batches.
+    5. Accumulate a soft-Dice score under ``torch.no_grad`` so the metric does
+       not allocate a gradient graph.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The segmentation model to train.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Iterator over ``(image, mask)`` training batches.
+    optimizer : torch.optim.Optimizer
+        Optimizer used to update the model parameters.
+    loss_fn : nn.Module
+        Loss function mapping ``(logits, target)`` to a scalar.
+    device : torch.device
+        Device the tensors are moved to before the forward pass.
+    scaler : torch.amp.GradScaler or None, optional
+        Gradient scaler enabling mixed-precision training. ``None`` (the
+        default) runs plain fp32 training.
+    accumulation_steps : int, optional
+        Number of batches whose gradients are accumulated before a single
+        optimizer step. Defaults to ``1`` (no accumulation).
+
+    Returns
+    -------
+    tuple[float, float]
+        The mean loss and mean soft-Dice score across the epoch.
+
+    Raises
+    ------
+    ZeroDivisionError
+        If ``accumulation_steps`` is zero.
+    """
+    if accumulation_steps <= 0:
+        raise ZeroDivisionError("accumulation_steps must be a positive integer.")
 
     # Set model into training mode
     model.train()
@@ -385,34 +457,63 @@ def execute_epoch(
     # Initialize train loss & accuracy
     train_loss, train_dice = 0.0, 0.0
 
+    # Whether to use mixed precision. Autocast is only meaningful on CUDA, so
+    # a scaler is created for CUDA devices only (see ``train``).
+    use_amp = scaler is not None
+
+    # Clear any partial gradients left over from the previous epoch. This can
+    # happen when the number of batches is not a multiple of
+    # ``accumulation_steps``, so the final group never triggered a step.
+    optimizer.zero_grad(set_to_none=True)
+
     # Execute training loop over train dataloader
-    for _, (X, y) in enumerate(dataloader):
+    for batch_idx, (X, y) in enumerate(dataloader):
         # Load data onto target device
         X, y = X.to(device), y.to(device)
 
-        # Feed-forward and compute metrics
-        y_pred = forward(model, X)
-        loss = loss_fn(y_pred, y)
-        train_loss += loss.item()
+        # Feed-forward and compute loss. Autocast keeps the heavy convolutions
+        # in fp16 while leaving the loss/softmax in fp32, which cuts activation
+        # memory roughly in half without changing the training objective.
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            y_pred = forward(model, X)
+            loss = loss_fn(y_pred, y)
 
-        # Reset Gradients & Backpropagate Loss
-        optimizer.zero_grad()
-        loss.backward()
+        # Normalise the loss before backprop so that summing gradients over
+        # ``accumulation_steps`` batches equals the gradient of one large batch.
+        loss = loss / accumulation_steps
+        train_loss += loss.item() * accumulation_steps
 
-        # Update Model Gradients
-        optimizer.step()
+        # Reset Gradients & Backpropagate Loss. The scaler scales the loss up
+        # to keep small fp16 gradients from underflowing to zero.
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        # Compute Batch Metrics
-        # ``y`` is one-hot and ``y_pred`` holds raw logits, so run a softmax
-        # over the class axis to obtain per-class probabilities in the same
-        # (B, NUM_CLASSES, H, W) space before computing soft Dice.
-        predicted = torch.softmax(y_pred, dim=1)
+        # Update the model parameters only after the desired number of gradient
+        # contributions have accumulated; otherwise the partial gradients stay
+        # buffered for the next batch.
+        if (batch_idx + 1) % accumulation_steps == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
-        eps = 1e-8
-        train_dice += (
-            (2 * (y * predicted).sum() + eps) /
-            ((y + predicted).sum() + eps)
-        ).cpu().item()
+        # Compute Batch Metrics without a gradient graph so the softmax and
+        # element-wise products do not retain extra memory. ``y`` is one-hot and
+        # ``y_pred`` holds raw logits, so run a softmax over the class axis to
+        # obtain per-class probabilities in the same (B, NUM_CLASSES, H, W)
+        # space before computing soft Dice.
+        with torch.no_grad():
+            predicted = torch.softmax(y_pred, dim=1)
+
+            eps = 1e-8
+            train_dice += (
+                (2 * (y * predicted).sum() + eps) /
+                ((y + predicted).sum() + eps)
+            ).cpu().item()
 
 
     # Compute Step Metrics
@@ -427,9 +528,39 @@ def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     loss_fn: nn.Module,
-    device: torch.device
+    device: torch.device,
+    use_amp: bool = False
 ) -> tuple[float, float]:
+    """Evaluate ``model`` on ``dataloader`` without updating parameters.
 
+    Gradients are disabled via ``torch.inference_mode`` so no activation memory
+    is retained for backpropagation. Mixed precision is optional and mirrors the
+    training dtype when ``use_amp`` is set.
+
+    Steps
+    -----
+    1. Put the model in eval mode and reset the running accumulators.
+    2. Under ``torch.inference_mode``, compute logits + loss (optionally under
+       ``torch.autocast``) and accumulate the loss and soft-Dice score.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The segmentation model to evaluate.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Iterator over ``(image, mask)`` evaluation batches.
+    loss_fn : nn.Module
+        Loss function mapping ``(logits, target)`` to a scalar.
+    device : torch.device
+        Device the tensors are moved to before the forward pass.
+    use_amp : bool, optional
+        Run the forward pass in mixed precision. Defaults to ``False``.
+
+    Returns
+    -------
+    tuple[float, float]
+        The mean loss and mean soft-Dice score across the dataset.
+    """
     # Set model into eval mode
     model.eval()
 
@@ -443,9 +574,11 @@ def evaluate(
             # Load data onto target device
             X, y = X.to(device), y.to(device)
 
-            # Feed-forward and compute metrics
-            y_pred = forward(model, X)
-            loss = loss_fn(y_pred, y)
+            # Feed-forward and compute loss. Autocast matches the training dtype
+            # when AMP is enabled, halving activation memory during validation.
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                y_pred = forward(model, X)
+                loss = loss_fn(y_pred, y)
             eval_loss += loss.item()
 
             # Compute Batch Metrics
@@ -475,9 +608,53 @@ def train(
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
     loss_fn: nn.Module,
     epochs: int,
-    device: torch.device
+    device: torch.device,
+    use_amp: bool = False,
+    accumulation_steps: int = 1
 ) -> Dict[str, List[float]]:
+    """Run the training/validation loop and record per-epoch metrics.
 
+    The gradient scaler is created once here and reused for every epoch, which
+    is required for AMP because the scaler's internal scale factor must persist
+    across batches and epochs to track gradient overflow correctly.
+
+    Steps
+    -----
+    1. Initialise a history dict keyed by metric name.
+    2. Create a ``GradScaler`` when ``use_amp`` is requested on a CUDA device.
+    3. For each epoch, train via :func:`execute_epoch`, evaluate via
+       :func:`evaluate`, step the scheduler, and log/record the metrics.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The segmentation model to train.
+    train_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Iterator over training batches.
+    eval_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Iterator over validation batches.
+    optimizer : torch.optim.Optimizer
+        Optimizer used to update the model parameters.
+    scheduler : lr_scheduler.ReduceLROnPlateau or None
+        Learning-rate scheduler stepped with the validation loss.
+    loss_fn : nn.Module
+        Loss function mapping ``(logits, target)`` to a scalar.
+    epochs : int
+        Number of full passes over the training set.
+    device : torch.device
+        Device the tensors are moved to.
+    use_amp : bool, optional
+        Enable automatic mixed precision. Defaults to ``False``.
+    accumulation_steps : int, optional
+        Number of batches whose gradients are accumulated per optimizer step.
+        Defaults to ``1``.
+
+    Returns
+    -------
+    Dict[str, List[float]]
+        History mapping ``'loss'``, ``'dice_score'``, ``'eval_loss'`` and
+        ``'eval_dice_score'`` to per-epoch lists of floats.
+    """
     # Initialize training session
     session: Dict[str, List[float]] = {
         'loss'            : [],
@@ -485,6 +662,17 @@ def train(
         'eval_loss'       : [],
         'eval_dice_score' : []
     }
+
+    # AMP is only supported on CUDA, so on CPU (or when disabled) we fall back
+    # to plain fp32 training and pass ``scaler=None`` downstream.
+    scaler: GradScaler | None = None
+    if use_amp and device.type == "cuda":
+        scaler = GradScaler(device.type)
+        # Use the same fp16 autocast for validation as for training so eval
+        # metrics are computed in the same numerical regime.
+        eval_use_amp = True
+    else:
+        eval_use_amp = False
 
     # Training loop
     for epoch in tqdm(range(epochs)):
@@ -495,7 +683,9 @@ def train(
             train_dataloader,
             optimizer,
             loss_fn,
-            device
+            device,
+            scaler,
+            accumulation_steps
         )
 
         # Evaluate Model
@@ -503,7 +693,8 @@ def train(
             model,
             eval_dataloader,
             loss_fn,
-            device
+            device,
+            eval_use_amp
         )
 
         # Execute schedular step
@@ -944,7 +1135,9 @@ def main() -> None:
         'scheduler'           : scheduler,
         'loss_fn'             : loss_fn,
         'epochs'              : Configuration.EPOCHS,
-        'device'              : Configuration.DEVICE
+        'device'              : Configuration.DEVICE,
+        'use_amp'             : Configuration.USE_AMP,
+        'accumulation_steps'  : Configuration.GRADIENT_ACCUMULATION_STEPS
     }
 
     # Execute Training Session
