@@ -150,12 +150,14 @@ class Configuration:
 
 class ImagePath:
     BASE = "./data/bdd100k"
+
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
     SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
     SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
 
-    IMAGE_TRAIN_PATH = BASE + "/images_10k/train"
-    IMAGE_VAL_PATH = BASE + "/images_10k/val"
+    IMAGE_FOLDER = BASE + "/images_10k"
+    IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
+    IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
 
 
 class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
@@ -275,6 +277,22 @@ def find_val_image_path_from_mask(complete_mask_path: str) -> str:
     return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_VAL_PATH)
 
 
+def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
+    file_path_split = complete_image_path.split("/")
+    mask_file_name = file_path_split[-1].split("_")[0]
+
+    mask_path = base_mask_path + "/" + mask_file_name + ".png"
+    return mask_path
+
+
+def find_train_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_TRAIN_PATH)
+
+
+def find_val_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_VAL_PATH)
+
+
 def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # load train, then split into train-test
     train_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
@@ -295,6 +313,7 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
                 train_image_paths.remove(complete_image_path)
+                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
     print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
@@ -322,6 +341,7 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             if width != 1280 or height != 720:
                 problematic_val_images.append(complete_image_path)
                 val_image_paths.remove(complete_image_path)
+                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
     print(f"Problematic val images: {problematic_val_images}")
 
     val_df = pd.DataFrame({
