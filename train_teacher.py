@@ -128,8 +128,8 @@ class Configuration:
     NUM_CLASSES = 20
     EPOCHS = 20
     BATCH_SIZE = (
-        32 if torch.cuda.device_count() < 2
-        else (32 * torch.cuda.device_count())
+        4 if torch.cuda.device_count() < 2
+        else (4 * torch.cuda.device_count())
     )
     LR = 1e-4
     PATIENCE = 8
@@ -140,8 +140,9 @@ class Configuration:
     # The BDD100k images used here are 720 rows (height) by 1280 columns
     # (width); note the previous names were swapped, which made shape code
     # downstream ambiguous even though the numbers happened to line up.
-    IMAGE_HEIGHT = 720
-    IMAGE_WIDTH = 1280
+    # However, we're going to downscale the images.
+    IMAGE_HEIGHT = 360
+    IMAGE_WIDTH = 640
     CHANNELS = 3 # RGB
 
 
@@ -863,6 +864,7 @@ def main() -> None:
     train_df, val_df, test_df = load_dataset_from_files()
 
     train_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         A.RandomBrightnessContrast(p=0.2),
         A.HorizontalFlip(p=0.5),
         # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
