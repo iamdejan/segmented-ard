@@ -279,9 +279,9 @@ def find_val_image_path_from_mask(complete_mask_path: str) -> str:
 
 def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
     file_path_split = complete_image_path.split("/")
-    mask_file_name = file_path_split[-1].split("_")[0]
+    mask_file_name = file_path_split[-1].split(".")[0]
 
-    mask_path = base_mask_path + "/" + mask_file_name + ".png"
+    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
     return mask_path
 
 
