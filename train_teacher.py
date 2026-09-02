@@ -136,11 +136,13 @@ class Configuration:
 
     APPLY_SHUFFLE=True
     SEED = 768
-    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the spatial extent of a sample.
+    # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
     # The BDD100k images used here are 720 rows (height) by 1280 columns
-    # (width); note the previous names were swapped, which made shape code
-    # downstream ambiguous even though the numbers happened to line up.
-    # However, we're going to downscale the images.
+    # (width)
+    ORIGINAL_IMAGE_HEIGHT = 720
+    ORIGINAL_IMAGE_WIDTH = 1280
+
+    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the resolution after downscale the images.
     IMAGE_HEIGHT = 360
     IMAGE_WIDTH = 640
     CHANNELS = 3 # RGB
@@ -276,7 +278,24 @@ def find_val_image_path_from_mask(complete_mask_path: str) -> str:
 def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # load train, then split into train-test
     train_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    problematic_masks = []
+    for complete_mask_path in train_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_masks.append(complete_mask_path)
+                train_mask_paths.remove(complete_mask_path)
+    print(f"Problematic masks: {problematic_masks}")
+
     train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    problematic_images = []
+    for complete_image_path in train_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_images.append(complete_image_path)
+                train_image_paths.remove(complete_image_path)
+    print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
         "image_paths": train_image_paths,
@@ -286,7 +305,25 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
     # load val
     val_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    problematic_val_masks = []
+    for complete_mask_path in val_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_masks.append(complete_mask_path)
+                val_mask_paths.remove(complete_mask_path)
+    print(f"Problematic val masks: {problematic_val_masks}")
+
     val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    problematic_val_images = []
+    for complete_image_path in val_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_images.append(complete_image_path)
+                val_image_paths.remove(complete_image_path)
+    print(f"Problematic val images: {problematic_val_images}")
+
     val_df = pd.DataFrame({
         "image_paths": val_image_paths,
         "mask_paths": val_mask_paths,
