@@ -128,31 +128,36 @@ class Configuration:
     NUM_CLASSES = 20
     EPOCHS = 20
     BATCH_SIZE = (
-        32 if torch.cuda.device_count() < 2
-        else (32 * torch.cuda.device_count())
+        16 if torch.cuda.device_count() < 2
+        else (16 * torch.cuda.device_count())
     )
     LR = 1e-4
     PATIENCE = 8
 
     APPLY_SHUFFLE=True
     SEED = 768
-    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the spatial extent of a sample.
+    # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
     # The BDD100k images used here are 720 rows (height) by 1280 columns
-    # (width); note the previous names were swapped, which made shape code
-    # downstream ambiguous even though the numbers happened to line up.
-    IMAGE_HEIGHT = 720
-    IMAGE_WIDTH = 1280
+    # (width)
+    ORIGINAL_IMAGE_HEIGHT = 720
+    ORIGINAL_IMAGE_WIDTH = 1280
+
+    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the resolution after downscale the images.
+    IMAGE_HEIGHT = 360
+    IMAGE_WIDTH = 640
     CHANNELS = 3 # RGB
 
 
 class ImagePath:
     BASE = "./data/bdd100k"
+
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
     SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
     SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
 
-    IMAGE_TRAIN_PATH = BASE + "/images_10k/train"
-    IMAGE_VAL_PATH = BASE + "/images_10k/val"
+    IMAGE_FOLDER = BASE + "/images_10k"
+    IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
+    IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
 
 
 class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
@@ -272,10 +277,44 @@ def find_val_image_path_from_mask(complete_mask_path: str) -> str:
     return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_VAL_PATH)
 
 
+def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
+    file_path_split = complete_image_path.split("/")
+    mask_file_name = file_path_split[-1].split(".")[0]
+
+    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
+    return mask_path
+
+
+def find_train_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_TRAIN_PATH)
+
+
+def find_val_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_VAL_PATH)
+
+
 def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # load train, then split into train-test
     train_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    problematic_masks = []
+    for complete_mask_path in train_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_masks.append(complete_mask_path)
+                train_mask_paths.remove(complete_mask_path)
+    print(f"Problematic masks: {problematic_masks}")
+
     train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    problematic_images = []
+    for complete_image_path in train_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_images.append(complete_image_path)
+                train_image_paths.remove(complete_image_path)
+                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+    print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
         "image_paths": train_image_paths,
@@ -285,7 +324,26 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
     # load val
     val_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    problematic_val_masks = []
+    for complete_mask_path in val_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_masks.append(complete_mask_path)
+                val_mask_paths.remove(complete_mask_path)
+    print(f"Problematic val masks: {problematic_val_masks}")
+
     val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    problematic_val_images = []
+    for complete_image_path in val_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_images.append(complete_image_path)
+                val_image_paths.remove(complete_image_path)
+                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+    print(f"Problematic val images: {problematic_val_images}")
+
     val_df = pd.DataFrame({
         "image_paths": val_image_paths,
         "mask_paths": val_mask_paths,
@@ -863,6 +921,7 @@ def main() -> None:
     train_df, val_df, test_df = load_dataset_from_files()
 
     train_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         A.RandomBrightnessContrast(p=0.2),
         A.HorizontalFlip(p=0.5),
         # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
