@@ -123,7 +123,7 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 class Configuration:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = 1
-    NUM_WORKERS= 2
+    NUM_WORKERS = 2
 
     NUM_CLASSES = 20
     EPOCHS = 20
@@ -533,7 +533,8 @@ def train(
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
     loss_fn: nn.Module,
     epochs: int,
-    device: torch.device
+    train_device: torch.device,
+    eval_device: torch.device
 ) -> Dict[str, List[float]]:
 
     # Initialize training session
@@ -553,7 +554,7 @@ def train(
             train_dataloader,
             optimizer,
             loss_fn,
-            device
+            train_device
         )
 
         # Evaluate Model
@@ -561,7 +562,7 @@ def train(
             model,
             eval_dataloader,
             loss_fn,
-            device
+            eval_device
         )
 
         # Execute schedular step
@@ -1003,7 +1004,8 @@ def main() -> None:
         'scheduler'           : scheduler,
         'loss_fn'             : loss_fn,
         'epochs'              : Configuration.EPOCHS,
-        'device'              : Configuration.DEVICE
+        'train_device'        : Configuration.DEVICE,
+        'eval_device'         : Configuration.DEVICE,
     }
 
     # Execute Training Session
