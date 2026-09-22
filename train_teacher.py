@@ -932,6 +932,7 @@ def main() -> None:
     ])
 
     inference_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         ToTensorV2(),
     ])
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
@@ -1021,7 +1022,7 @@ def main() -> None:
 
     # Convert U-Net history dict to DataFrame
     unet_session_history_df = pd.DataFrame(unet_session_history)
-    print(unet_session_history_df[:5])
+    print(unet_session_history_df)
 
     # Plot U-Net Session Training History
     plot_training_curves(

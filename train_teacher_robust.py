@@ -428,122 +428,204 @@ class DiceLoss(nn.Module):
         return 1.0 - dice.mean()
 
 
-class DistillationLoss(nn.Module):
-    """Combined hard (Dice) and soft (KL) loss for segmentation distillation.
+@jaxtyped(typechecker=beartype)
+def kl_divergence(probs: Logits, adv_probs: Logits, eps: float = 1e-8) -> Scalar:
+    """Compute the mean per-pixel Kullback-Leibler divergence ``KL(p || q)``.
 
-    Following "Distilling the Knowledge in a Neural Network" (Hinton et al.),
-    the student is trained against two signals at once: a hard signal from the
-    one-hot ground-truth mask via a soft Dice loss, and a soft signal from the
-    frozen teacher's temperature-softened distribution via a KL-divergence
-    term. The KL term is multiplied by ``temperature ** 2`` as recommended in
-    the paper so its gradients stay on the same scale as the hard loss, and the
-    two terms are blended with ``alpha``.
+    TRADES measures robustness as the divergence between the model's clean
+    prediction ``p`` and its prediction on a perturbed input ``q``. Because a
+    segmentation model outputs a per-pixel class distribution, the KL
+    divergence is evaluated independently at every pixel and then averaged over
+    the batch and spatial dimensions, so every pixel contributes equally to the
+    regulariser regardless of the image resolution.
 
-    Because segmentation logits are ``(B, C, H, W)`` rather than a plain
-    classification vector, the softmax and log-softmax are taken over the class
-    axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
+    Steps
+    -----
+    1. Add ``eps`` to both distributions so the logarithm never sees a zero
+       probability (which would otherwise produce ``-inf``).
+    2. Sum ``p * (log p - log q)`` over the class axis, yielding one KL value
+       per pixel of shape ``(B, H, W)``.
+    3. Average those per-pixel KL values into a single scalar.
 
     Parameters
     ----------
-    temperature : float, optional
-        Softening temperature applied to both distributions. Defaults to 3.0.
+    probs : Logits
+        Clean class probabilities of shape ``(B, C, H, W)``.
+    adv_probs : Logits
+        Adversarial class probabilities of shape ``(B, C, H, W)``.
+    eps : float, optional
+        Smoothing term added before the logarithm to avoid ``log(0)``.
+        Defaults to ``1e-8``.
+
+    Returns
+    -------
+    Scalar
+        Mean KL divergence, differentiable w.r.t. ``adv_probs``.
+    """
+    # ``eps`` keeps the log well-defined when a class probability is exactly
+    # zero after softmax (which happens for confident, wrong predictions).
+    kl_per_pixel = (probs * (torch.log(probs + eps) - torch.log(adv_probs + eps))).sum(dim=1)
+
+    # Average over batch and spatial axes so the regulariser is resolution
+    # independent and directly comparable to the natural loss magnitude.
+    return kl_per_pixel.mean()
+
+
+class TradesLoss(nn.Module):
+    """TRADES adversarial loss for semantic segmentation.
+
+    Combines a natural (clean) loss with a KL-divergence robustness term, as
+    proposed by Zhang et al. (2019) "Theoretically Principled Trade-off between
+    Robustness and Accuracy". The natural loss encourages accurate clean
+    predictions, while the robustness term pushes the model to keep its output
+    stable for adversarial inputs inside an ``epsilon`` ball around each sample.
+
+    The adversarial input is crafted with projected gradient descent (PGD): for
+    ``num_steps`` iterations the perturbation is moved by ``alpha`` in the
+    direction of the signed gradient of ``KL(clean || adversarial)`` and then
+    projected back onto the ``L_inf`` ball of radius ``epsilon``. The final
+    loss is ``natural_loss(clean) + beta * KL(clean || adversarial)``.
+
+    Parameters
+    ----------
+    natural_loss : nn.Module
+        Loss applied to clean logits, e.g. :class:`DiceLoss`.
+    epsilon : float, optional
+        Radius of the ``L_inf`` adversarial perturbation ball. Defaults to 0.03.
     alpha : float, optional
-        Weight of the hard Dice loss; ``1 - alpha`` weights the KL term.
-        Defaults to 0.5.
+        PGD step size. Defaults to 0.01.
+    num_steps : int, optional
+        Number of PGD iterations used to craft the perturbation. Defaults to 10.
+    beta : float, optional
+        Weight of the robustness term relative to the natural loss. Defaults to
+        6.0.
+
+    Notes
+    -----
+    The ``model`` is passed to :meth:`forward` rather than stored on the
+    instance, so the loss object stays independent of any particular network
+    checkpoint and can be reused across runs.
     """
 
-    def __init__(self, temperature: float = 3.0, alpha: float = 0.5):
-        super().__init__()
-        self.temperature = temperature
-        self.alpha = alpha
-        self.dice_loss = DiceLoss()
-
-    def forward(
+    def __init__(
         self,
-        student_logits: Logits,
-        target: BatchMask,
-        teacher_logits: Logits,
-    ) -> Scalar:
-        """Compute the blended distillation loss.
+        natural_loss: nn.Module,
+        epsilon: float = 0.03,
+        alpha: float = 0.01,
+        num_steps: int = 10,
+        beta: float = 6.0,
+    ) -> None:
+        super().__init__()
+        self.natural_loss = natural_loss
+        self.epsilon = epsilon
+        self.alpha = alpha
+        self.num_steps = num_steps
+        self.beta = beta
+
+    def forward(self, model: nn.Module, x: BatchImage, y: BatchMask) -> Scalar:
+        """Compute the combined natural + robustness TRADES loss.
+
+        Steps
+        -----
+        1. Run the clean image through the model to obtain clean logits, the
+           natural loss, and the clean class probabilities.
+        2. Craft an adversarial image with PGD, maximising
+           ``KL(clean || adversarial)`` at every step.
+        3. Evaluate the KL robustness term on the final adversarial image and
+           return ``natural + beta * robust``.
 
         Parameters
         ----------
-        student_logits : Logits
-            Raw student output of shape ``(B, C, H, W)``.
-        target : BatchMask
-            One-hot ground-truth mask of shape ``(B, C, H, W)``.
-        teacher_logits : Logits
-            Raw teacher output of shape ``(B, C, H, W)``.
+        model : nn.Module
+            Segmentation model that maps ``(B, 3, H, W)`` images to
+            ``(B, C, H, W)`` logits.
+        x : BatchImage
+            Clean images of shape ``(B, 3, H, W)``.
+        y : BatchMask
+            One-hot ground-truth masks of shape ``(B, C, H, W)``.
 
         Returns
         -------
         Scalar
-            Weighted sum of the Dice loss and the temperature-scaled KL loss.
+            Differentiable scalar loss value.
         """
-        # Soften the teacher logits into probabilities and the student logits
-        # into log-probabilities over the class axis (dim=1). The paper uses
-        # dim=-1 for a classification vector; segmentation uses dim=1 because
-        # the class axis of (B, C, H, W) logits is the channel axis.
-        soft_targets = torch.softmax(teacher_logits / self.temperature, dim=1)
-        soft_prob = torch.log_softmax(student_logits / self.temperature, dim=1)
+        # Clean branch: it provides the natural supervision signal and anchors
+        # the KL regulariser used by the inner and outer robustness terms.
+        clean_logits = forward(model, x)
+        natural = cast(Scalar, self.natural_loss(clean_logits, y))
 
-        # KL(soft_targets || soft_prob), summed over classes per pixel and then
-        # averaged over the batch and spatial positions. Scaled by T**2 as
-        # suggested by the authors of the paper.
-        kl_loss = torch.sum(
-            soft_targets * (soft_targets.log() - soft_prob), dim=1
-        ).mean() * (self.temperature ** 2)
+        # Detach the clean probabilities so the maximisation and the robustness
+        # term only propagate gradients through the adversarial branch, matching
+        # the original TRADES surrogate loss.
+        clean_probs = torch.softmax(clean_logits, dim=1).detach()
 
-        # Hard supervision keeps the student tied to the ground truth rather
-        # than drifting toward whatever mistakes the teacher makes. ``forward``
-        # is called directly so the return type stays ``Scalar`` instead of the
-        # ``Any`` that ``nn.Module.__call__`` declares.
-        hard_loss = self.dice_loss.forward(student_logits, target)
+        # PGD attack: increase the KL divergence between clean and adversarial
+        # predictions while staying inside the epsilon L_inf ball.
+        x_adv = x.clone().detach()
+        for _ in range(self.num_steps):
+            # Re-enable autograd on the current adversarial image so the step
+            # walks the loss surface of the robustness term.
+            x_adv = x_adv.clone().detach().requires_grad_(True)
 
-        return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
+            adv_logits = forward(model, x_adv)
+            adv_probs = torch.softmax(adv_logits, dim=1)
+            kl = kl_divergence(clean_probs, adv_probs)
+
+            # dKL/dx_adv; stepping along its sign is the standard PGD update.
+            grad = torch.autograd.grad(kl, x_adv)[0]
+
+            # Apply the step, then project onto the intersection of the L_inf
+            # ball and the valid [0, 1] pixel range.
+            perturbation = x_adv.detach() + self.alpha * grad.sign() - x
+            perturbation = torch.clamp(perturbation, -self.epsilon, self.epsilon)
+            x_adv = torch.clamp(x + perturbation, 0.0, 1.0).detach()
+
+        # Robustness term: penalise how much the final adversarial input moved
+        # the model's prediction away from the clean prediction.
+        adv_logits = forward(model, x_adv)
+        adv_probs = torch.softmax(adv_logits, dim=1)
+        robust = kl_divergence(clean_probs, adv_probs)
+
+        return natural + self.beta * robust
 
 
 @jaxtyped(typechecker=beartype)
 def execute_epoch(
-    teacher: nn.Module,
-    student: nn.Module,
+    model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
-    loss_fn: nn.Module,
+    loss_fn: TradesLoss,
     device: torch.device
 ) -> tuple[float, float]:
-    """Run one distillation training epoch.
+    """Run one adversarial training epoch and return its average metrics.
 
-    The teacher stays in eval mode and its logits are computed under
-    ``torch.no_grad`` so they act as fixed soft targets; only the student
-    accumulates gradients. ``loss_fn`` is expected to be callable as
-    ``loss_fn(student_logits, target, teacher_logits)``.
+    Each batch is passed to :class:`TradesLoss`, which produces the natural
+    Dice loss plus the TRADES KL robustness term. Gradient descent is applied
+    to that combined loss, while the per-batch soft Dice on clean predictions
+    is accumulated as a quality metric alongside the loss.
 
     Parameters
     ----------
-    teacher : nn.Module
-        Pre-trained model whose softened outputs supervise the student.
-    student : nn.Module
-        Model being trained.
-    dataloader : DataLoader
-        Training data loader yielding ``(image, one_hot_mask)`` pairs.
+    model : nn.Module
+        Segmentation model being trained.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched training data.
     optimizer : torch.optim.Optimizer
-        Optimizer that updates the student's parameters.
-    loss_fn : nn.Module
-        Distillation loss combining Dice and KL divergence.
+        Optimiser used for the parameter update.
+    loss_fn : TradesLoss
+        Adversarial TRADES loss that carries both the natural and robustness
+        terms.
     device : torch.device
-        Device the tensors are moved to before the forward pass.
+        Device the training runs on.
 
     Returns
     -------
     tuple[float, float]
         Mean training loss and mean soft Dice over the epoch.
     """
-    # Set teacher model into eval mode
-    teacher.eval()
 
-    # Set student model into training mode
-    student.train()
+    # Set model into training mode
+    model.train()
 
     # Initialize train loss & accuracy
     train_loss, train_dice = 0.0, 0.0
@@ -553,16 +635,12 @@ def execute_epoch(
         # Load data onto target device
         X, y = X.to(device), y.to(device)
 
-        # The teacher's outputs are constant soft targets, so no gradient must
-        # ever flow into it.
-        with torch.no_grad():
-            teacher_logits = forward(teacher, X)
-
-        # Student forward pass with gradient tracking enabled.
-        student_logits = forward(student, X)
-
-        # Combined hard (Dice) + soft (KL) distillation loss.
-        loss = loss_fn(student_logits, y, teacher_logits)
+        # Compute clean logits for the soft-Dice metric, then ask the TRADES
+        # loss to build the adversary and produce the combined loss. The loss
+        # function re-runs the model internally for its clean and adversarial
+        # branches.
+        y_pred = forward(model, X)
+        loss = loss_fn(model, X, y)
         train_loss += loss.item()
 
         # Reset Gradients & Backpropagate Loss
@@ -573,10 +651,10 @@ def execute_epoch(
         optimizer.step()
 
         # Compute Batch Metrics
-        # ``y`` is one-hot and ``student_logits`` holds raw logits, so run a
-        # softmax over the class axis to obtain per-class probabilities in the
-        # same (B, NUM_CLASSES, H, W) space before computing soft Dice.
-        predicted = torch.softmax(student_logits, dim=1)
+        # ``y`` is one-hot and ``y_pred`` holds raw logits, so run a softmax
+        # over the class axis to obtain per-class probabilities in the same
+        # (B, NUM_CLASSES, H, W) space before computing soft Dice.
+        predicted = torch.softmax(y_pred, dim=1)
 
         eps = 1e-8
         train_dice += (
@@ -638,52 +716,52 @@ def evaluate(
 
 @jaxtyped(typechecker=beartype)
 def train(
-    teacher: nn.Module,
-    student: nn.Module,
+    model: nn.Module,
     train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
-    loss_fn: nn.Module,
+    loss_fn: TradesLoss,
+    eval_loss_fn: nn.Module,
     epochs: int,
     train_device: torch.device,
     eval_device: torch.device
 ) -> Dict[str, List[float]]:
-    """Train the student via knowledge distillation from the teacher.
+    """Run full TRADES training with periodic clean validation.
 
-    Each epoch runs a distillation pass (``loss_fn``) to update the student and
-    then evaluates the student against the hard ground-truth masks with a plain
-    Dice loss. The teacher is used only as the source of soft targets and is
-    never updated.
+    Training epochs use the adversarial :class:`TradesLoss`, while validation
+    is measured with the clean ``eval_loss_fn`` (no adversary) so the reported
+    evaluation metrics reflect real-world, unperturbed performance.
 
     Parameters
     ----------
-    teacher : nn.Module
-        Pre-trained model producing the soft targets.
-    student : nn.Module
-        Model being trained.
-    train_dataloader : DataLoader
-        Training data loader.
-    eval_dataloader : DataLoader
-        Validation data loader.
+    model : nn.Module
+        Segmentation model being trained.
+    train_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched training data.
+    eval_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched validation data.
     optimizer : torch.optim.Optimizer
-        Optimizer updating the student.
+        Optimiser used for the parameter update.
     scheduler : lr_scheduler.ReduceLROnPlateau | None
-        Optional learning-rate scheduler stepped on the eval loss.
-    loss_fn : nn.Module
-        Distillation loss combining Dice and KL divergence.
+        Optional learning-rate scheduler stepped on the validation loss.
+    loss_fn : TradesLoss
+        Adversarial loss used for gradient updates during training.
+    eval_loss_fn : nn.Module
+        Clean loss used to compute the validation loss.
     epochs : int
-        Number of training epochs.
+        Number of passes over the training data.
     train_device : torch.device
         Device used for training.
     eval_device : torch.device
-        Device used for evaluation.
+        Device used for validation.
 
     Returns
     -------
     Dict[str, List[float]]
-        Per-epoch history of training/eval losses and Dice scores.
+        Per-epoch lists of training/eval loss and Dice score.
     """
+
     # Initialize training session
     session: Dict[str, List[float]] = {
         'loss'            : [],
@@ -692,17 +770,12 @@ def train(
         'eval_dice_score' : []
     }
 
-    # The student is scored against hard targets alone, so evaluation uses a
-    # plain Dice loss rather than the combined distillation objective.
-    eval_loss_fn = DiceLoss()
-
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
         train_loss, train_dice = execute_epoch(
-            teacher,
-            student,
+            model,
             train_dataloader,
             optimizer,
             loss_fn,
@@ -711,7 +784,7 @@ def train(
 
         # Evaluate Model
         eval_loss, eval_dice = evaluate(
-            student,
+            model,
             eval_dataloader,
             eval_loss_fn,
             eval_device
@@ -1107,33 +1180,16 @@ def main() -> None:
         shuffle=Configuration.APPLY_SHUFFLE
     )
 
-    # Load the pre-trained teacher from disk (saved by ``train_teacher.py``) and
-    # freeze it. The teacher only produces soft targets, so its parameters must
-    # not receive gradient updates.
-    teacher_path = "./model/teacher.pt"
-    teacher = cast(
-        nn.Module,
-        torch.load(teacher_path, map_location=Configuration.DEVICE, weights_only=False),
-    )
-    teacher = teacher.to(Configuration.DEVICE)
-    teacher.eval()
-    for param in teacher.parameters():
-        param.requires_grad = False
-
-    # Build a smaller student network that learns to mimic the teacher's
-    # softened predictions. ``mobilenet_v2`` is a lighter backbone than the
-    # teacher's ``resnet18``.
-    student = smp.Unet(
-        encoder_name="mobilenet_v2",
+    model = smp.Unet(
+        encoder_name="resnet18",
         encoder_weights="imagenet",
         in_channels=Configuration.CHANNELS,
         classes=Configuration.NUM_CLASSES
     )
-    student = student.to(Configuration.DEVICE)
 
     print(
         summary(
-                model=student,
+                model=model,
                 input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
                 col_names=["output_size", "num_params", "trainable"],
                 col_width=30,
@@ -1143,14 +1199,17 @@ def main() -> None:
     )
 
     # Define Loss Function
-    # Distillation loss combines a hard Dice loss over the one-hot masks with a
-    # temperature-scaled KL divergence against the teacher's softened logits.
-    loss_fn = DistillationLoss(temperature=3.0, alpha=0.5)
+    # Dice loss operates on (B, NUM_CLASSES, H, W) logits vs one-hot masks,
+    # which matches the multi-class semantic segmentation task. CrossEntropyLoss
+    # would require integer class-id targets of shape (B, H, W). TRADES wraps
+    # this natural loss with an adversarial KL regulariser for robust training,
+    # while the same natural loss is reused for clean validation.
+    natural_loss_fn = DiceLoss()
+    loss_fn = TradesLoss(natural_loss=natural_loss_fn)
 
-    # Define optimizer over the student's parameters only; the teacher is
-    # frozen and must stay out of the optimizer.
+    # Define optimizer
     optimizer = torch.optim.AdamW(
-        student.parameters(),
+        model.parameters(),
         lr=Configuration.LR
     )
 
@@ -1161,69 +1220,68 @@ def main() -> None:
         patience=Configuration.PATIENCE
     )
 
-    print('Distilling Knowledge From Teacher To Student')
+    print('Training U-Net Model')
     print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
     print('----------------------------------')
 
     # Generate training session config
     session_config = {
-        'teacher'             : teacher,
-        'student'             : student,
+        'model'               : model,
         'train_dataloader'    : train_loader,
         'eval_dataloader'     : val_loader,
         'optimizer'           : optimizer,
         'scheduler'           : scheduler,
         'loss_fn'             : loss_fn,
+        'eval_loss_fn'        : natural_loss_fn,
         'epochs'              : Configuration.EPOCHS,
         'train_device'        : Configuration.DEVICE,
         'eval_device'         : Configuration.DEVICE,
     }
 
     # Execute Training Session
-    student_session_history = train(**session_config)
+    unet_session_history = train(**session_config)
 
-    # Create Model directory if it does not already exist (it is created by the
-    # teacher run, but this script should still work standalone).
-    model_name = 'student'
+    # Create Model directory
+    model_name = 'teacher'
     model_path = './model/'
-    os.makedirs(model_path, exist_ok=True)
+    os.mkdir(model_path)
 
     # Save Model
-    torch.save(student, model_path + model_name + '.pt')
+    torch.save(model, model_path + model_name + '.pt')
 
-    # Convert student history dict to DataFrame
-    student_session_history_df = pd.DataFrame(student_session_history)
-    print(student_session_history_df)
+    # Convert U-Net history dict to DataFrame
+    unet_session_history_df = pd.DataFrame(unet_session_history)
+    print(unet_session_history_df)
 
-    # Plot student Session Training History
+    # Plot U-Net Session Training History
     plot_training_curves(
-        student_session_history,
+        unet_session_history,
         fig_size=(20, 20)
     )
 
     # Generate Segmentation Metrics
-    student_metrics = compute_metrics(
-        student, test_loader, Configuration.DEVICE
+    unet_metrics = compute_metrics(
+        model, test_loader, Configuration.DEVICE
     )
 
     # Create copy of test df
-    student_test_df = test_df.copy()
+    unet_test_df = test_df.copy()
 
     # Concatenate Metrics onto copied df
-    student_test_df = pd.concat(
-        (student_test_df, pd.DataFrame(student_metrics)),
+    unet_test_df = pd.concat(
+        (unet_test_df, pd.DataFrame(unet_metrics)),
         axis=1
     )
 
     # View df
-    print(student_test_df[:5])
+    print(unet_test_df[:5])
 
     # Export a grid of random test samples (image / image+true mask /
     # image+predicted mask) so the model output can be inspected visually.
     visualize_predictions(
-        student,
+        model,
         test_df,
-        Configuration.DEVICE
+        torch.device(Configuration.DEVICE)
     )
 
 
