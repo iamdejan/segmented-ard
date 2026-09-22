@@ -74,11 +74,21 @@ CLASS_COLORS = np.array([
 ], dtype=np.uint8)
 
 
-# Class ids that are systematically under-represented in BDD100k: sidewalk,
-# person and rider. ``compute_class_aware_sample_weights`` oversamples masks
-# that contain any of these ids so the model keeps seeing minority-class
-# boundaries instead of collapsing every region to road.
-MINORITY_CLASS_IDS = [1, 11, 12]
+# Human-readable names for each palette row, kept in lock-step with
+# ``CLASS_COLORS`` so class ids can be logged without consulting the palette
+# comments by hand.
+CLASS_NAMES = [
+    "road", "sidewalk", "building", "wall", "fence", "pole",
+    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
+    "bicycle", "unknown",
+]
+
+# Boundary-critical classes that are forced into the minority set regardless of
+# their pixel prevalence. Sidewalk is common in urban frames, so a pure
+# frequency threshold can miss it, but the road/sidewalk boundary is exactly
+# where the model over-predicts road and needs the most corrective sampling.
+BOUNDARY_CLASS_IDS = [1]  # Sidewalk
 
 
 def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
@@ -359,39 +369,153 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     return train_df, val_df, test_df
 
 
-def compute_class_aware_sample_weights(
+def compute_class_statistics(
     df: pd.DataFrame,
-    minority_class_ids: List[int],
-    eps: float = 1e-6,
-) -> np.ndarray:
-    """Precompute per-sample weights that oversample minority-class images.
+) -> tuple[np.ndarray, np.ndarray, List[set[int]]]:
+    """Scan every train mask and aggregate per-class statistics.
 
-    BDD100k's train split is dominated by highway scenes, so classes such as
-    sidewalk, person and rider appear in only a fraction of the masks. A
-    uniformly shuffled loader therefore shows the model minority-class
-    boundaries far too rarely. This function scans every mask once, counts how
-    many masks contain each minority class, and converts those occurrence
-    counts into inverse-frequency weights that
-    :class:`torch.utils.data.WeightedRandomSampler` uses to draw minority-class
-    images more often.
+    The bias correction needs two pieces of information: which classes are
+    under-represented (decided from pixel prevalence) and how to weight each
+    image (decided from image-level occurrence). Both are produced by a single
+    pass over the masks, so the potentially slow PNG decoding happens only once
+    and is kept independent of the online augmentation pipeline.
 
     Steps
     -----
     1. Load each mask in ``df`` and collapse its RGB color-label to a per-pixel
        class-index map via :func:`color_label_to_class_index`.
-    2. Record the set of class ids present per mask and accumulate a global
-       occurrence count per class.
-    3. Turn each minority class's occurrence count into a boost factor
-       (``num_masks / count``), so rarer classes contribute a larger weight.
-    4. Build a per-sample weight that starts at ``1.0`` and adds the boost
-       factor of every minority class present in that mask.
+    2. Record the set of class ids present per mask and, for each present class,
+       add one to its occurrence count and its pixel area to its pixel count.
 
     Parameters
     ----------
     df : pd.DataFrame
         DataFrame carrying the ``mask_paths`` column used to locate each mask.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, List[set[int]]]
+        ``(pixel_counts, occurrence_counts, present_classes)``. ``pixel_counts``
+        and ``occurrence_counts`` are float arrays of shape ``(NUM_CLASSES,)``;
+        ``present_classes[i]`` is the set of class ids present in mask ``i``.
+    """
+    mask_paths = df["mask_paths"].to_list()
+
+    pixel_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
+    occurrence_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
+    present_classes: List[set[int]] = []
+
+    for mask_path in mask_paths:
+        mask_pil = Image.open(mask_path).convert("RGB")
+        class_index = color_label_to_class_index(np.array(mask_pil))
+
+        # ``return_counts`` yields the pixel area per class in one pass, which
+        # feeds both the occurrence count (presence) and the pixel count
+        # (prevalence) used downstream.
+        class_ids, areas = np.unique(class_index, return_counts=True)
+        present_classes.append(set(class_ids.tolist()))
+        for class_id, area in zip(class_ids, areas, strict=True):
+            occurrence_counts[class_id] += 1
+            pixel_counts[class_id] += float(area)
+
+    return pixel_counts, occurrence_counts, present_classes
+
+
+def find_minority_classes(
+    pixel_counts: np.ndarray,
+    method: str = "relative_to_max",
+    threshold: float = 0.05,
+) -> List[int]:
+    """Derive under-represented class ids from pixel-prevalence statistics.
+
+    Instead of hardcoding which classes are rare, this function ranks classes by
+    the fraction of pixels they occupy and flags everything below a relative
+    cutoff. Pixel prevalence (rather than image occurrence) is the right signal
+    for segmentation because a bias is caused by class area, not mere presence:
+    road dominates the bottom half of highway frames precisely because it
+    occupies the largest area.
+
+    Steps
+    -----
+    1. Normalise ``pixel_counts`` by the total pixel count to obtain per-class
+       prevalence fractions.
+    2. Pick a cutoff fraction using ``method``: the median prevalence, or a
+       ``threshold`` fraction of the most prevalent class.
+    3. Return every class id below the cutoff, excluding the ``Unknown`` class.
+
+    Parameters
+    ----------
+    pixel_counts : np.ndarray
+        Per-class pixel counts of shape ``(NUM_CLASSES,)``.
+    method : str, optional
+        ``"relative_to_max"`` uses ``threshold * max(prevalence)`` as the
+        cutoff; ``"below_median"`` uses the median prevalence. Defaults to
+        ``"relative_to_max"``.
+    threshold : float, optional
+        Fraction of the most prevalent class to use as cutoff when
+        ``method == "relative_to_max"``. Defaults to ``0.05``.
+
+    Returns
+    -------
+    List[int]
+        Class ids whose prevalence falls below the cutoff, sorted ascending.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not one of ``"relative_to_max"`` or ``"below_median"``.
+    """
+    total_pixels = pixel_counts.sum()
+    fractions = pixel_counts / total_pixels
+
+    if method == "below_median":
+        cutoff = float(np.median(fractions))
+    elif method == "relative_to_max":
+        cutoff = float(fractions.max()) * threshold
+    else:
+        raise ValueError(
+            f"Unknown minority selection method: {method!r}. "
+            "Use 'relative_to_max' or 'below_median'."
+        )
+
+    # The last class (Unknown) is excluded: it is not a real object class and
+    # would otherwise always be flagged as rare.
+    minority_ids = [
+        int(class_id)
+        for class_id in range(Configuration.NUM_CLASSES - 1)
+        if fractions[class_id] < cutoff
+    ]
+    return minority_ids
+
+
+def compute_sample_weights(
+    present_classes: List[set[int]],
+    occurrence_counts: np.ndarray,
+    minority_class_ids: List[int],
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Build per-sample weights that oversample minority-class images.
+
+    Each sample starts with a base weight of ``1.0`` and gains an inverse-
+    frequency boost for every minority class it contains. A class that appears
+    in few masks therefore contributes a larger boost, which
+    :class:`torch.utils.data.WeightedRandomSampler` uses to draw minority-class
+    images more often while still keeping majority images in the mix.
+
+    Steps
+    -----
+    1. Start from a unit weight for every sample.
+    2. For each sample, add ``num_masks / occurrence_count`` for every minority
+       class present in that sample's mask.
+
+    Parameters
+    ----------
+    present_classes : List[set[int]]
+        Per-sample set of class ids present in each mask.
+    occurrence_counts : np.ndarray
+        Per-class image occurrence counts of shape ``(NUM_CLASSES,)``.
     minority_class_ids : List[int]
-        Class ids to oversample (e.g. sidewalk, person and rider).
+        Class ids to oversample.
     eps : float, optional
         Small constant guarding against a zero occurrence count. Defaults to
         ``1e-6``.
@@ -399,26 +523,10 @@ def compute_class_aware_sample_weights(
     Returns
     -------
     np.ndarray
-        Float array of shape ``(len(df),)``; higher values correspond to samples
-        the sampler should draw more frequently.
+        Float array of shape ``(num_samples,)``; higher values correspond to
+        samples the sampler should draw more frequently.
     """
-    mask_paths = df["mask_paths"].to_list()
-    num_masks = len(mask_paths)
-
-    # One pass over the masks builds both the per-class occurrence counts and a
-    # per-mask record of which classes are present. Doing this up front keeps
-    # the sampling independent of the online augmentation pipeline, so weights
-    # are computed exactly once before training.
-    occurrence_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
-    present_classes: List[set[int]] = []
-
-    for mask_path in mask_paths:
-        mask_pil = Image.open(mask_path).convert("RGB")
-        class_index = color_label_to_class_index(np.array(mask_pil))
-        present = set(np.unique(class_index).tolist())
-        present_classes.append(present)
-        for class_id in present:
-            occurrence_counts[class_id] += 1
+    num_masks = len(present_classes)
 
     # A class that appears in few masks gets a large boost, while an
     # always-present class gets roughly ``num_masks / num_masks == 1``. The base
@@ -1045,12 +1153,41 @@ def main() -> None:
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
-    # Precompute per-sample weights that oversample masks containing the
-    # minority classes (sidewalk, person, rider). ``WeightedRandomSampler``
-    # draws from these weights with replacement, so rare-class boundaries keep
-    # appearing in every batch instead of being swamped by highway-only frames.
-    train_sample_weights = compute_class_aware_sample_weights(
-        train_df, MINORITY_CLASS_IDS
+    # Scan the train masks once to measure per-class pixel prevalence and image
+    # occurrence. These statistics drive both the choice of minority classes and
+    # the per-sample sampling weights, so the masks are decoded exactly once and
+    # independently of the online augmentation pipeline.
+    pixel_counts, occurrence_counts, present_classes = compute_class_statistics(
+        train_df
+    )
+
+    # Derive the minority classes from pixel prevalence instead of hardcoding
+    # them, then force in the boundary-critical classes (sidewalk) that a pure
+    # frequency threshold would miss.
+    minority_class_ids = find_minority_classes(pixel_counts)
+    minority_class_ids = sorted(
+        set(minority_class_ids) | set(BOUNDARY_CLASS_IDS)
+    )
+
+    # Log which classes are being oversampled and how rare they are, so the
+    # automatic selection can be sanity-checked against the BDD100k labels.
+    total_pixels = pixel_counts.sum()
+    print("Oversampling the following minority classes:")
+    for class_id in minority_class_ids:
+        prevalence = 100.0 * pixel_counts[class_id] / total_pixels
+        print(
+            f"  {class_id:>2} {CLASS_NAMES[class_id]:<14} "
+            f"({prevalence:6.3f}% of pixels)"
+        )
+
+    # Build weights that oversample images containing the selected minority
+    # classes. ``WeightedRandomSampler`` draws from these weights with
+    # replacement, so rare-class boundaries keep appearing in every batch
+    # instead of being swamped by highway-only frames.
+    train_sample_weights = compute_sample_weights(
+        present_classes=present_classes,
+        occurrence_counts=occurrence_counts,
+        minority_class_ids=minority_class_ids,
     )
 
     train_sampler = WeightedRandomSampler(
