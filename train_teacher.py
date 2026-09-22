@@ -11,7 +11,7 @@ import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
 
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchinfo import summary
 
 import albumentations as A
@@ -72,6 +72,13 @@ CLASS_COLORS = np.array([
     [119,  11,  32],   # 18 - Bicycle
     [  0,   0,   0],   # 19 - Unknown
 ], dtype=np.uint8)
+
+
+# Class ids that are systematically under-represented in BDD100k: sidewalk,
+# person and rider. ``compute_class_aware_sample_weights`` oversamples masks
+# that contain any of these ids so the model keeps seeing minority-class
+# boundaries instead of collapsing every region to road.
+MINORITY_CLASS_IDS = [1, 11, 12]
 
 
 def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
@@ -352,6 +359,81 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     return train_df, val_df, test_df
 
 
+def compute_class_aware_sample_weights(
+    df: pd.DataFrame,
+    minority_class_ids: List[int],
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Precompute per-sample weights that oversample minority-class images.
+
+    BDD100k's train split is dominated by highway scenes, so classes such as
+    sidewalk, person and rider appear in only a fraction of the masks. A
+    uniformly shuffled loader therefore shows the model minority-class
+    boundaries far too rarely. This function scans every mask once, counts how
+    many masks contain each minority class, and converts those occurrence
+    counts into inverse-frequency weights that
+    :class:`torch.utils.data.WeightedRandomSampler` uses to draw minority-class
+    images more often.
+
+    Steps
+    -----
+    1. Load each mask in ``df`` and collapse its RGB color-label to a per-pixel
+       class-index map via :func:`color_label_to_class_index`.
+    2. Record the set of class ids present per mask and accumulate a global
+       occurrence count per class.
+    3. Turn each minority class's occurrence count into a boost factor
+       (``num_masks / count``), so rarer classes contribute a larger weight.
+    4. Build a per-sample weight that starts at ``1.0`` and adds the boost
+       factor of every minority class present in that mask.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame carrying the ``mask_paths`` column used to locate each mask.
+    minority_class_ids : List[int]
+        Class ids to oversample (e.g. sidewalk, person and rider).
+    eps : float, optional
+        Small constant guarding against a zero occurrence count. Defaults to
+        ``1e-6``.
+
+    Returns
+    -------
+    np.ndarray
+        Float array of shape ``(len(df),)``; higher values correspond to samples
+        the sampler should draw more frequently.
+    """
+    mask_paths = df["mask_paths"].to_list()
+    num_masks = len(mask_paths)
+
+    # One pass over the masks builds both the per-class occurrence counts and a
+    # per-mask record of which classes are present. Doing this up front keeps
+    # the sampling independent of the online augmentation pipeline, so weights
+    # are computed exactly once before training.
+    occurrence_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
+    present_classes: List[set[int]] = []
+
+    for mask_path in mask_paths:
+        mask_pil = Image.open(mask_path).convert("RGB")
+        class_index = color_label_to_class_index(np.array(mask_pil))
+        present = set(np.unique(class_index).tolist())
+        present_classes.append(present)
+        for class_id in present:
+            occurrence_counts[class_id] += 1
+
+    # A class that appears in few masks gets a large boost, while an
+    # always-present class gets roughly ``num_masks / num_masks == 1``. The base
+    # weight of ``1.0`` keeps highway-only frames in the mix so the model still
+    # sees the majority class, just not exclusively.
+    weights = np.ones(num_masks, dtype=np.float64)
+    for sample_index, present in enumerate(present_classes):
+        for class_id in minority_class_ids:
+            if class_id in present:
+                count = occurrence_counts[class_id]
+                weights[sample_index] += num_masks / (count + eps)
+
+    return weights
+
+
 @jaxtyped(typechecker=beartype)
 def forward(model: nn.Module, x: BatchImage) -> Logits:
     """Run a single forward pass and assert the input/output shapes.
@@ -383,6 +465,40 @@ def compute_batch_macro_iou(
     num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
     eps: float = 1e-7,
 ) -> float:
+    """Compute the mean macro IoU over a batch, excluding ignored classes.
+
+    The model outputs raw logits while the ground truth is one-hot, so both are
+    first reduced to a single class id per pixel via ``argmax``. IoU is then
+    computed class by class and averaged only over the classes that actually
+    occur in either the prediction or the ground truth; empty classes are
+    skipped rather than counted as zero, which would otherwise drag the mean
+    down on batches dominated by a few classes.
+
+    Steps
+    -----
+    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
+    2. For each class in ``[0, num_classes)``, compute intersection over union.
+    3. Average the IoU of every class whose union is non-zero.
+
+    Parameters
+    ----------
+    y_pred : torch.Tensor
+        Model logits of shape ``(B, C, H, W)``.
+    y_true : torch.Tensor
+        One-hot targets of shape ``(B, C, H, W)``.
+    num_classes : int, optional
+        Number of classes to score, excluding the ``Unknown`` class. Defaults
+        to ``19`` (classes 0-18).
+    eps : float, optional
+        Smoothing constant added to intersection and union to avoid division by
+        zero. Defaults to ``1e-7``.
+
+    Returns
+    -------
+    float
+        Mean IoU over the classes present in the batch, or ``0.0`` if no class
+        has a non-empty union.
+    """
     preds = y_pred.argmax(dim=1)  # (B, H, W)
     targets = y_true.argmax(dim=1)  # (B, H, W)
 
@@ -409,6 +525,40 @@ def execute_epoch(
     loss_fn: nn.Module,
     device: torch.device
 ) -> tuple[float, float]:
+    """Run one training epoch and return the mean loss and macro IoU.
+
+    This method iterates over ``dataloader`` once, keeping the model in train
+    mode and performing a forward pass, backward pass and optimizer step for
+    every batch. The returned values are normalised by the number of batches,
+    not samples, so they represent per-batch averages.
+
+    Steps
+    -----
+    1. Set the model to training mode.
+    2. For each batch, move the data to ``device``, run :func:`forward`, and
+       compute the loss.
+    3. Backpropagate the loss and step the optimizer.
+    4. Accumulate the batch loss and macro IoU.
+    5. Return the per-batch mean loss and macro IoU.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model to train.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Loader yielding ``(image, one-hot mask)`` batches.
+    optimizer : torch.optim.Optimizer
+        Optimizer used to update model parameters.
+    loss_fn : nn.Module
+        Loss callable that consumes ``(logits, targets)``.
+    device : torch.device
+        Device to run the forward and backward passes on.
+
+    Returns
+    -------
+    tuple[float, float]
+        The ``(mean_loss, mean_macro_iou)`` averaged over batches.
+    """
 
     # Set model into training mode
     model.train()
@@ -895,10 +1045,26 @@ def main() -> None:
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
+    # Precompute per-sample weights that oversample masks containing the
+    # minority classes (sidewalk, person, rider). ``WeightedRandomSampler``
+    # draws from these weights with replacement, so rare-class boundaries keep
+    # appearing in every batch instead of being swamped by highway-only frames.
+    train_sample_weights = compute_class_aware_sample_weights(
+        train_df, MINORITY_CLASS_IDS
+    )
+
+    train_sampler = WeightedRandomSampler(
+        weights=train_sample_weights.tolist(),
+        num_samples=len(train_ds),
+        replacement=True,
+    )
+
+    # ``shuffle`` and ``sampler`` are mutually exclusive in ``DataLoader``; the
+    # sampler already provides the weighted random ordering.
     train_loader = DataLoader(
         dataset=train_ds,
         batch_size=Configuration.BATCH_SIZE,
-        shuffle=Configuration.APPLY_SHUFFLE
+        sampler=train_sampler,
     )
     val_loader = DataLoader(
             dataset=val_ds,
