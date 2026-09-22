@@ -1157,6 +1157,7 @@ def main() -> None:
     ])
 
     inference_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         ToTensorV2(),
     ])
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
