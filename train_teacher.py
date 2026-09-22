@@ -709,6 +709,28 @@ def evaluate(
     loss_fn: nn.Module,
     device: torch.device
 ) -> tuple[float, float]:
+    """Evaluate the model on a dataloader and return mean loss and macro IoU.
+
+    The model is placed in eval mode and run under ``torch.inference_mode`` so
+    that no gradients are tracked. Each batch's clean loss and macro IoU are
+    accumulated and normalised by the number of batches.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model being evaluated.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched validation data.
+    loss_fn : nn.Module
+        Clean loss callable that consumes ``(logits, one-hot targets)``.
+    device : torch.device
+        Device the evaluation runs on.
+
+    Returns
+    -------
+    tuple[float, float]
+        Mean evaluation loss and mean macro IoU over the epoch.
+    """
 
     # Set model into eval mode
     model.eval()
