@@ -1192,7 +1192,7 @@ def main() -> None:
 
     # Convert student history dict to DataFrame
     student_session_history_df = pd.DataFrame(student_session_history)
-    print(student_session_history_df[:5])
+    print(student_session_history_df)
 
     # Plot student Session Training History
     plot_training_curves(

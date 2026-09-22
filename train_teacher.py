@@ -1021,7 +1021,7 @@ def main() -> None:
 
     # Convert U-Net history dict to DataFrame
     unet_session_history_df = pd.DataFrame(unet_session_history)
-    print(unet_session_history_df[:5])
+    print(unet_session_history_df)
 
     # Plot U-Net Session Training History
     plot_training_curves(
