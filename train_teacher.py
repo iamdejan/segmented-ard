@@ -376,56 +376,29 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
     return cast(Logits, model(x))
 
 
-class DiceLoss(nn.Module):
-    """Multi-class soft Dice loss for semantic segmentation.
+@torch.no_grad()
+def compute_batch_macro_iou(
+    y_pred: torch.Tensor,      # (B, C, H, W) logits
+    y_true: torch.Tensor,      # (B, C, H, W) one-hot
+    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    eps: float = 1e-7,
+) -> float:
+    preds = y_pred.argmax(dim=1)  # (B, H, W)
+    targets = y_true.argmax(dim=1)  # (B, H, W)
 
-    ``nn.CrossEntropyLoss`` expects integer class-id targets of shape ``(B, H,
-    W)``, which is incompatible with a segmentation pipeline that wishes to use
-    a Dice objective over per-class probabilities. This module instead takes
-    raw ``(B, C, H, W)`` logits and one-hot ``(B, C, H, W)`` targets, applies a
-    softmax over the class axis and returns ``1 - mean(Dice)`` averaged over
-    classes and the batch.
+    iou_per_class = []
+    for cls in range(num_classes):
+        pred_mask = preds == cls
+        true_mask = targets == cls
 
-    Parameters
-    ----------
-    smooth : float, optional
-        Additive smoothing applied to the Dice numerator and denominator to
-        avoid division by zero. Defaults to 1.0.
-    """
+        intersection = (pred_mask & true_mask).sum().float().item()
+        union = (pred_mask | true_mask).sum().float().item()
 
-    def __init__(self, smooth: float = 1.0):
-        super().__init__()
-        self.smooth = smooth
+        # Only include the class in the mean if it exists in GT or Prediction
+        if union > 0:
+            iou_per_class.append((intersection + eps) / (union + eps))
 
-    def forward(self, logits: Logits, target: BatchMask) -> Scalar:
-        """Compute the loss value.
-
-        Parameters
-        ----------
-        logits : Logits
-            Raw model output of shape ``(B, C, H, W)``.
-        target : BatchMask
-            One-hot ground-truth mask of shape ``(B, C, H, W)``.
-
-        Returns
-        -------
-        Scalar
-            The scalar loss value (1 - mean Dice), differentiable w.r.t.
-            ``logits``.
-        """
-        # Softmax over the class axis yields per-pixel probabilities that sum
-        # to 1 across classes, matching the one-hot target distribution.
-        probs = torch.softmax(logits, dim=1)
-
-        # Reduce the spatial axes to get a Dice coefficient per (sample, class)
-        # before averaging: this treats every class equally regardless of the
-        # number of pixels it occupies, which prevents the road/sky classes
-        # from dominating the loss.
-        intersection = (probs * target).sum(dim=(2, 3))
-        cardinality = probs.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-
-        dice = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
-        return 1.0 - dice.mean()
+    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
 
 
 @jaxtyped(typechecker=beartype)
@@ -441,7 +414,7 @@ def execute_epoch(
     model.train()
 
     # Initialize train loss & accuracy
-    train_loss, train_dice = 0.0, 0.0
+    train_loss, train_iou = 0.0, 0.0
 
     # Execute training loop over train dataloader
     for _, (X, y) in enumerate(dataloader):
@@ -460,24 +433,15 @@ def execute_epoch(
         # Update Model Gradients
         optimizer.step()
 
-        # Compute Batch Metrics
-        # ``y`` is one-hot and ``y_pred`` holds raw logits, so run a softmax
-        # over the class axis to obtain per-class probabilities in the same
-        # (B, NUM_CLASSES, H, W) space before computing soft Dice.
-        predicted = torch.softmax(y_pred, dim=1)
-
-        eps = 1e-8
-        train_dice += (
-            (2 * (y * predicted).sum() + eps) /
-            ((y + predicted).sum() + eps)
-        ).cpu().item()
+        # Compute Macro IoU for the batch (excluding class 19)
+        train_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
 
 
     # Compute Step Metrics
     train_loss = train_loss / len(dataloader)
-    train_dice = train_dice / len(dataloader)
+    train_iou = train_iou / len(dataloader)
 
-    return train_loss, train_dice
+    return train_loss, train_iou
 
 
 @jaxtyped(typechecker=beartype)
@@ -492,7 +456,7 @@ def evaluate(
     model.eval()
 
     # Initialize eval loss & accuracy
-    eval_loss, eval_dice = 0.0, 0.0
+    eval_loss, eval_iou = 0.0, 0.0
 
     # Active inferene context manager
     with torch.inference_mode():
@@ -506,22 +470,14 @@ def evaluate(
             loss = loss_fn(y_pred, y)
             eval_loss += loss.item()
 
-            # Compute Batch Metrics
-            # Softmax gives per-class probabilities over the class axis, matching
-            # the one-hot ``y`` shape so soft Dice is well-defined.
-            predicted = torch.softmax(y_pred, dim=1)
-
-            eps = 1e-8
-            eval_dice += (
-                (2 * (y * predicted).sum() + eps) /
-                ((y + predicted).sum() + eps)
-            ).cpu().item()
+            # Compute Macro IoU for the batch (excluding class 19)
+            eval_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
 
     # Compute Step Metrics
     eval_loss = eval_loss / len(dataloader)
-    eval_dice = eval_dice / len(dataloader)
+    eval_iou = eval_iou / len(dataloader)
 
-    return eval_loss, eval_dice
+    return eval_loss, eval_iou
 
 
 @jaxtyped(typechecker=beartype)
@@ -549,7 +505,7 @@ def train(
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
-        train_loss, train_dice = execute_epoch(
+        train_loss, train_macro_iou = execute_epoch(
             model,
             train_dataloader,
             optimizer,
@@ -558,7 +514,7 @@ def train(
         )
 
         # Evaluate Model
-        eval_loss, eval_dice = evaluate(
+        eval_loss, eval_macro_iou = evaluate(
             model,
             eval_dataloader,
             loss_fn,
@@ -572,7 +528,7 @@ def train(
             current_lr = optimizer.param_groups[0]['lr']
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - dice_score: {train_dice:.4f} - eval_loss: {eval_loss:.4f} - eval_dice_score: {eval_dice:.4f}'
+        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
 
         if scheduler:
             print(log_text + f' - lr: {current_lr}')
@@ -581,9 +537,9 @@ def train(
 
         # Record Epoch Metrics
         session['loss'].append(train_loss)
-        session['dice_score'].append(train_dice)
+        session['macro_iou_score'].append(train_macro_iou)
         session['eval_loss'].append(eval_loss)
-        session['eval_dice_score'].append(eval_dice)
+        session['eval_macro_iou_score'].append(eval_macro_iou)
 
     # Return Session Metrics
     return session
@@ -973,11 +929,20 @@ def main() -> None:
             )
     )
 
-    # Define Loss Function
-    # Dice loss operates on (B, NUM_CLASSES, H, W) logits vs one-hot masks,
-    # which matches the multi-class semantic segmentation task. CrossEntropyLoss
-    # would require integer class-id targets of shape (B, H, W).
-    loss_fn = DiceLoss()
+    # Define Loss Functions
+    dice_loss = smp.losses.DiceLoss(
+        mode=smp.losses.MULTICLASS_MODE,
+        from_logits=True,
+        ignore_index=19
+    )
+    focal_loss = smp.losses.FocalLoss(
+        mode=smp.losses.MULTICLASS_MODE,
+        ignore_index=19
+    )
+
+    def compound_loss(logits, targets):
+        # targets: (B, H, W) integer class indices rather than one-hot
+        return 0.5 * dice_loss(logits, targets) + focal_loss(logits, targets)
 
     # Define optimizer
     optimizer = torch.optim.AdamW(
@@ -1003,7 +968,7 @@ def main() -> None:
         'eval_dataloader'     : val_loader,
         'optimizer'           : optimizer,
         'scheduler'           : scheduler,
-        'loss_fn'             : loss_fn,
+        'loss_fn'             : compound_loss,
         'epochs'              : Configuration.EPOCHS,
         'train_device'        : Configuration.DEVICE,
         'eval_device'         : Configuration.DEVICE,
