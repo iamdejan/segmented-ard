@@ -19,7 +19,7 @@ from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
 from tqdm import tqdm
-from typing import Dict, List, cast
+from typing import Callable, Dict, List, cast
 
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
@@ -626,15 +626,16 @@ def compute_batch_macro_iou(
 
 
 class DistillationLoss(nn.Module):
-    """Combined hard (Dice) and soft (KL) loss for segmentation distillation.
+    """Combined hard (Dice + Focal) and soft (KL) loss for segmentation distillation.
 
     Following "Distilling the Knowledge in a Neural Network" (Hinton et al.),
     the student is trained against two signals at once: a hard signal from the
-    one-hot ground-truth mask via a soft Dice loss, and a soft signal from the
-    frozen teacher's temperature-softened distribution via a KL-divergence
-    term. The KL term is multiplied by ``temperature ** 2`` as recommended in
-    the paper so its gradients stay on the same scale as the hard loss, and the
-    two terms are blended with ``alpha``.
+    one-hot ground-truth mask via a compound Dice+Focal loss (the same clean
+    loss the teacher was trained with), and a soft signal from the frozen
+    teacher's temperature-softened distribution via a KL-divergence term. The
+    KL term is multiplied by ``temperature ** 2`` as recommended in the paper
+    so its gradients stay on the same scale as the hard loss, and the two terms
+    are blended with ``alpha``.
 
     Because segmentation logits are ``(B, C, H, W)`` rather than a plain
     classification vector, the softmax and log-softmax are taken over the class
@@ -642,18 +643,26 @@ class DistillationLoss(nn.Module):
 
     Parameters
     ----------
+    hard_loss : Callable[[Logits, BatchMask], Scalar]
+        Clean supervision loss evaluated against the ground-truth masks, e.g.
+        the compound Dice + Focal loss used to train the teacher.
     temperature : float, optional
         Softening temperature applied to both distributions. Defaults to 3.0.
     alpha : float, optional
-        Weight of the hard Dice loss; ``1 - alpha`` weights the KL term.
+        Weight of the hard loss; ``1 - alpha`` weights the KL term.
         Defaults to 0.5.
     """
 
-    def __init__(self, dice_loss: smp.losses.DiceLoss, temperature: float = 3.0, alpha: float = 0.5):
+    def __init__(
+        self,
+        hard_loss: Callable[[Logits, BatchMask], Scalar],
+        temperature: float = 3.0,
+        alpha: float = 0.5,
+    ):
         super().__init__()
         self.temperature = temperature
         self.alpha = alpha
-        self.dice_loss = dice_loss
+        self.hard_loss = hard_loss
 
     def forward(
         self,
@@ -692,10 +701,11 @@ class DistillationLoss(nn.Module):
         ).mean() * (self.temperature ** 2)
 
         # Hard supervision keeps the student tied to the ground truth rather
-        # than drifting toward whatever mistakes the teacher makes. ``forward``
-        # is called directly so the return type stays ``Scalar`` instead of the
-        # ``Any`` that ``nn.Module.__call__`` declares.
-        hard_loss = self.dice_loss.forward(student_logits, target)
+        # than drifting toward whatever mistakes the teacher makes. ``self.
+        # hard_loss`` is the compound Dice+Focal loss the teacher was trained
+        # with, so the student starts from the same clean objective as the
+        # teacher before the KL term is blended in.
+        hard_loss = self.hard_loss(student_logits, target)
 
         return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
 
@@ -734,7 +744,7 @@ def execute_epoch(
     Returns
     -------
     tuple[float, float]
-        Mean training loss and mean soft Dice over the epoch.
+        Mean training loss and mean macro IoU over the epoch.
     """
     # Set teacher model into eval mode
     teacher.eval()
@@ -784,7 +794,7 @@ def execute_epoch(
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    loss_fn: nn.Module,
+    loss_fn: Callable[[Logits, BatchMask], Scalar],
     device: torch.device
 ) -> tuple[float, float]:
     """Evaluate the model on a dataloader and return mean loss and macro IoU.
@@ -799,7 +809,7 @@ def evaluate(
         Segmentation model being evaluated.
     dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
         Batched validation data.
-    loss_fn : nn.Module
+    loss_fn : Callable[[Logits, BatchMask], Scalar]
         Clean loss callable that consumes ``(logits, one-hot targets)``.
     device : torch.device
         Device the evaluation runs on.
@@ -884,25 +894,26 @@ def train(
     Returns
     -------
     Dict[str, List[float]]
-        Per-epoch history of training/eval losses and Dice scores.
+        Per-epoch history of training/eval losses and macro IoU scores.
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
-        'loss'            : [],
-        'dice_score'      : [],
-        'eval_loss'       : [],
-        'eval_dice_score' : []
+        'loss'                 : [],
+        'macro_iou_score'      : [],
+        'eval_loss'            : [],
+        'eval_macro_iou_score' : []
     }
 
-    # The student is scored against hard targets alone, so evaluation uses a
-    # plain Dice loss rather than the combined distillation objective.
-    eval_loss_fn = loss_fn.dice_loss
+    # The student is scored against hard targets alone, so evaluation uses the
+    # clean compound loss (without the teacher's soft targets) rather than the
+    # combined distillation objective.
+    eval_loss_fn = loss_fn.hard_loss
 
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
-        train_loss, train_dice = execute_epoch(
+        train_loss, train_macro_iou = execute_epoch(
             teacher,
             student,
             train_dataloader,
@@ -912,7 +923,7 @@ def train(
         )
 
         # Evaluate Model
-        eval_loss, eval_dice = evaluate(
+        eval_loss, eval_macro_iou = evaluate(
             student,
             eval_dataloader,
             eval_loss_fn,
@@ -926,7 +937,7 @@ def train(
             current_lr = optimizer.param_groups[0]['lr']
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - dice_score: {train_dice:.4f} - eval_loss: {eval_loss:.4f} - eval_dice_score: {eval_dice:.4f}'
+        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
 
         if scheduler:
             print(log_text + f' - lr: {current_lr}')
@@ -935,9 +946,9 @@ def train(
 
         # Record Epoch Metrics
         session['loss'].append(train_loss)
-        session['dice_score'].append(train_dice)
+        session['macro_iou_score'].append(train_macro_iou)
         session['eval_loss'].append(eval_loss)
-        session['eval_dice_score'].append(eval_dice)
+        session['eval_macro_iou_score'].append(eval_macro_iou)
 
     # Return Session Metrics
     return session
@@ -951,8 +962,8 @@ def plot_training_curves(
     loss = np.array(history['loss'])
     val_loss = np.array(history['eval_loss'])
 
-    dice_coeff = np.array(history['dice_score'])
-    val_dice_coeff = np.array(history['eval_dice_score'])
+    iou = np.array(history['macro_iou_score'])
+    val_iou = np.array(history['eval_macro_iou_score'])
 
     epochs = range(len(history['loss']))
 
@@ -974,17 +985,17 @@ def plot_training_curves(
     ax1.legend(fontsize=14)
 
     # Plot metric
-    ax2.plot(epochs, dice_coeff, label='training_dice_score', marker='o', color='C5')
-    ax2.plot(epochs, val_dice_coeff, label='eval_dice_score', marker='o', color='C6')
+    ax2.plot(epochs, iou, label='training_macro_iou', marker='o', color='C5')
+    ax2.plot(epochs, val_iou, label='eval_macro_iou', marker='o', color='C6')
 
     # Fill area between metrics
-    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff > val_dice_coeff), color='C5', alpha=0.4, interpolate=True)
-    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff < val_dice_coeff), color='C6', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, iou, val_iou, where=(iou > val_iou), color='C5', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, iou, val_iou, where=(iou < val_iou), color='C6', alpha=0.4, interpolate=True)
 
     # Add Text & Formats
-    ax2.set_title('Dice Score (Higher Means Better)', fontsize=22)
+    ax2.set_title('Macro IoU (Higher Means Better)', fontsize=22)
     ax2.set_xlabel('Epochs', fontsize=18)
-    ax2.set_ylabel('Dice Score', fontsize=18)
+    ax2.set_ylabel('Macro IoU', fontsize=18)
     ax2.tick_params(axis='both', which='major', labelsize=14)
     ax2.legend(fontsize=14)
     sns.despine()
@@ -1390,14 +1401,25 @@ def main() -> None:
     )
 
     # Define Loss Function
-    # Distillation loss combines a hard Dice loss over the one-hot masks with a
-    # temperature-scaled KL divergence against the teacher's softened logits.
+    # Mirror the teacher's clean loss: a compound Dice + Focal loss. This is
+    # the hard signal inside :class:`DistillationLoss`, so the student starts
+    # from the same clean objective the teacher was trained with before the
+    # soft KL-distillation term is blended in.
     dice_loss = smp.losses.DiceLoss(
         mode=smp.losses.MULTICLASS_MODE,
         from_logits=True,
         ignore_index=19
     )
-    loss_fn = DistillationLoss(dice_loss, temperature=3.0, alpha=0.5)
+    focal_loss = smp.losses.FocalLoss(
+        mode=smp.losses.MULTICLASS_MODE,
+        ignore_index=19
+    )
+
+    def compound_loss(logits: Logits, targets: BatchMask) -> Scalar:
+        # targets: (B, H, W) integer class indices rather than one-hot
+        return cast(Scalar, 0.5 * dice_loss(logits, targets) + focal_loss(logits, targets))
+
+    loss_fn = DistillationLoss(hard_loss=compound_loss, temperature=3.0, alpha=0.5)
 
     # Define optimizer over the student's parameters only; the teacher is
     # frozen and must stay out of the optimizer.
