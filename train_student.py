@@ -625,6 +625,133 @@ def compute_batch_macro_iou(
     return float(np.mean(iou_per_class)) if iou_per_class else 0.0
 
 
+def evaluate_segmentation_metrics(
+    model: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    device: torch.device,
+    num_classes: int = 19,
+    ignore_index: int = -1,
+    ignored_class: int = 19,
+) -> Dict[str, float | List[float]]:
+    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
+
+    The metrics are derived from per-class true/false positive/negative pixel
+    counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
+    then reduced once at the end. Accumulating the raw counts rather than
+    averaging per-batch values guarantees the metrics stay correct even when
+    batches are class-imbalanced. The ``smp`` implementations are reused
+    wherever possible:
+
+    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
+      yields a single scalar.
+    * Class-wise pixel accuracy scores each class independently, so it uses no
+      reduction and returns one accuracy value per class.
+    * IoU (Jaccard) and Dice (F1) are macro-averaged over classes into single
+      scalars.
+
+    The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
+    ``ignore_index`` so those pixels never influence any metric. This mirrors
+    the ``ignore_index=19`` used by the training losses, but is required
+    because :func:`smp.metrics.get_stats` only accepts an ``ignore_index`` that
+    lies *outside* the ``[0, num_classes)`` range.
+
+    Steps
+    -----
+    1. Run the model over every batch under ``torch.inference_mode``.
+    2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
+       remap ``ignored_class`` to ``ignore_index`` on both.
+    3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
+    4. Reduce the accumulated counts into the requested metrics.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model to evaluate.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched data to evaluate over (typically the test set).
+    device : torch.device
+        Device the evaluation runs on.
+    num_classes : int, optional
+        Number of classes to score, excluding the ignored class. Defaults to
+        ``19``.
+    ignore_index : int, optional
+        Sentinel class id excluded from every metric. Defaults to ``-1``.
+    ignored_class : int, optional
+        Original class id to exclude (``Unknown``). Defaults to ``19``.
+
+    Returns
+    -------
+    Dict[str, float | List[float]]
+        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
+        ``dice`` are scalars, while ``class_pixel_accuracy`` is a list whose
+        index ``i`` holds the accuracy of class ``i`` (classes ``0..18``).
+    """
+    model.eval()
+
+    # Per-class confusion counts summed over the whole dataset. ``get_stats``
+    # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
+    # one count per class.
+    tp_total: torch.Tensor | None = None
+    fp_total: torch.Tensor | None = None
+    fn_total: torch.Tensor | None = None
+    tn_total: torch.Tensor | None = None
+
+    with torch.inference_mode():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+
+            # Feed-forward and reduce model logits to one class id per pixel.
+            y_pred = forward(model, X)
+            output = y_pred.argmax(dim=1)  # (B, H, W)
+            target = y.argmax(dim=1)  # (B, H, W)
+
+            # ``smp`` requires ``ignore_index`` outside the valid class range,
+            # so the ``Unknown`` class (id 19) is relabelled to ``-1``.
+            output = torch.where(
+                output == ignored_class, torch.full_like(output, ignore_index), output
+            )
+            target = torch.where(
+                target == ignored_class, torch.full_like(target, ignore_index), target
+            )
+
+            tp, fp, fn, tn = smp.metrics.functional.get_stats(
+                output,
+                target,
+                mode="multiclass",
+                ignore_index=ignore_index,
+                num_classes=num_classes,
+            )
+
+            # Accumulate the ``(N, C)`` counts into per-class running sums.
+            tp_total = tp.sum(dim=0) if tp_total is None else tp_total + tp.sum(dim=0)
+            fp_total = fp.sum(dim=0) if fp_total is None else fp_total + fp.sum(dim=0)
+            fn_total = fn.sum(dim=0) if fn_total is None else fn_total + fn.sum(dim=0)
+            tn_total = tn.sum(dim=0) if tn_total is None else tn_total + tn.sum(dim=0)
+
+    # Guard against an empty dataloader producing no counts at all.
+    if tp_total is None:
+        raise ValueError("The evaluation dataloader yielded no batches.")
+
+    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
+    pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
+    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
+    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
+    # is the accuracy of class ``i``.
+    class_pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total).tolist()
+
+    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
+    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    return {
+        "pixel_accuracy": float(pixel_accuracy),
+        "class_pixel_accuracy": list(class_pixel_accuracy),
+        "iou": float(iou),
+        "dice": float(dice),
+    }
+
+
 class DistillationLoss(nn.Module):
     """Combined hard (Dice + Focal) and soft (KL) loss for segmentation distillation.
 
@@ -909,6 +1036,11 @@ def train(
     # combined distillation objective.
     eval_loss_fn = loss_fn.hard_loss
 
+    # Track the checkpoint with the lowest validation loss so the final student
+    # can be reverted to the best-seen weights instead of the last epoch's.
+    best_eval_loss = float('inf')
+    best_model_state: Dict[str, Tensor] | None = None
+
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
@@ -930,6 +1062,15 @@ def train(
             eval_device
         )
 
+        # Keep a snapshot whenever the validation loss improves so the best
+        # checkpoint is available for the final test evaluation.
+        if eval_loss < best_eval_loss:
+            best_eval_loss = eval_loss
+            best_model_state = {
+                name: param.detach().cpu().clone()
+                for name, param in student.state_dict().items()
+            }
+
         # Execute schedular step
         current_lr = 0
         if scheduler:
@@ -949,6 +1090,12 @@ def train(
         session['macro_iou_score'].append(train_macro_iou)
         session['eval_loss'].append(eval_loss)
         session['eval_macro_iou_score'].append(eval_macro_iou)
+
+    # Restore the best checkpoint so the student returned to the caller (and
+    # the one evaluated on the test set downstream) reflects the lowest eval
+    # loss.
+    if best_model_state is not None:
+        student.load_state_dict(best_model_state)
 
     # Return Session Metrics
     return session
@@ -1474,6 +1621,19 @@ def main() -> None:
         student_session_history,
         fig_size=(20, 20)
     )
+
+    # Evaluate the best checkpoint (``train`` restores it into ``student``) on
+    # the test set and report the segmentation metrics once.
+    test_metrics = evaluate_segmentation_metrics(
+        student, test_loader, Configuration.DEVICE
+    )
+    print('\nFinal test-set metrics (best checkpoint):')
+    print(f'  Pixel Accuracy : {test_metrics["pixel_accuracy"]:.4f}')
+    print(f'  IoU (macro)    : {test_metrics["iou"]:.4f}')
+    print(f'  Dice (macro)   : {test_metrics["dice"]:.4f}')
+    print('  Class-wise Pixel Accuracy:')
+    for class_id, acc in enumerate(cast(List[float], test_metrics["class_pixel_accuracy"])):
+        print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {acc:.4f}')
 
     # Generate Segmentation Metrics
     student_metrics = compute_metrics(
