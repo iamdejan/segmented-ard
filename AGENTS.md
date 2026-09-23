@@ -20,7 +20,7 @@ The consequence is that every Python command you want to run should be run under
 
 ## Code Validation
 
-Make sure you validate the code you generated.
+Make sure you validate the code you generated. Remove unused imports, unused variables, unused functions, and unused classes.
 
 ### Steps to Validate
 

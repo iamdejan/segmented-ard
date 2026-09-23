@@ -1210,54 +1210,6 @@ def plot_training_curves(
 
 
 @jaxtyped(typechecker=beartype)
-def precision_(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
-    """Compute mean precision (intersection over predicted positives).
-
-    Both operands must share the same ``(C, H, W)`` shape; the axis ``C`` is
-    reduced by the summation and the result is a scalar.
-
-    Parameters
-    ----------
-    y_true : ClassMask
-        Ground-truth mask with shape ``(C, H, W)``.
-    y_pred : ClassMask
-        Predicted mask with shape ``(C, H, W)``.
-
-    Returns
-    -------
-    Scalar
-        Mean precision across the class dimension.
-    """
-    intersection = (y_true * y_pred).sum()
-    total_predicted_pixels = y_pred.sum()
-    return (intersection / total_predicted_pixels).mean()
-
-
-@jaxtyped(typechecker=beartype)
-def recall_(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
-    """Compute mean recall (intersection over true positives).
-
-    Both operands must share the same ``(C, H, W)`` shape; the axis ``C`` is
-    reduced by the summation and the result is a scalar.
-
-    Parameters
-    ----------
-    y_true : ClassMask
-        Ground-truth mask with shape ``(C, H, W)``.
-    y_pred : ClassMask
-        Predicted mask with shape ``(C, H, W)``.
-
-    Returns
-    -------
-    Scalar
-        Mean recall across the class dimension.
-    """
-    intersection = (y_true * y_pred).sum()
-    total_true_pixels = y_true.sum()
-    return (intersection / total_true_pixels).mean()
-
-
-@jaxtyped(typechecker=beartype)
 def dice_score(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
     """Compute the Sorensen-Dice coefficient for a single mask pair.
 
