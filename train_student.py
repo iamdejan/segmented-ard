@@ -11,7 +11,7 @@ import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
 
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchinfo import summary
 
 import albumentations as A
@@ -19,7 +19,7 @@ from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
 from tqdm import tqdm
-from typing import Dict, List, cast
+from typing import Callable, Dict, List, cast
 
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
@@ -72,6 +72,23 @@ CLASS_COLORS = np.array([
     [119,  11,  32],   # 18 - Bicycle
     [  0,   0,   0],   # 19 - Unknown
 ], dtype=np.uint8)
+
+
+# Human-readable names for each palette row, kept in lock-step with
+# ``CLASS_COLORS`` so class ids can be logged without consulting the palette
+# comments by hand.
+CLASS_NAMES = [
+    "road", "sidewalk", "building", "wall", "fence", "pole",
+    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
+    "bicycle", "unknown",
+]
+
+# Boundary-critical classes that are forced into the minority set regardless of
+# their pixel prevalence. Sidewalk is common in urban frames, so a pure
+# frequency threshold can miss it, but the road/sidewalk boundary is exactly
+# where the model over-predicts road and needs the most corrective sampling.
+BOUNDARY_CLASS_IDS = [1]  # Sidewalk
 
 
 def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
@@ -352,6 +369,179 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     return train_df, val_df, test_df
 
 
+def compute_class_statistics(
+    df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, List[set[int]]]:
+    """Scan every train mask and aggregate per-class statistics.
+
+    The bias correction needs two pieces of information: which classes are
+    under-represented (decided from pixel prevalence) and how to weight each
+    image (decided from image-level occurrence). Both are produced by a single
+    pass over the masks, so the potentially slow PNG decoding happens only once
+    and is kept independent of the online augmentation pipeline.
+
+    Steps
+    -----
+    1. Load each mask in ``df`` and collapse its RGB color-label to a per-pixel
+       class-index map via :func:`color_label_to_class_index`.
+    2. Record the set of class ids present per mask and, for each present class,
+       add one to its occurrence count and its pixel area to its pixel count.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame carrying the ``mask_paths`` column used to locate each mask.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, List[set[int]]]
+        ``(pixel_counts, occurrence_counts, present_classes)``. ``pixel_counts``
+        and ``occurrence_counts`` are float arrays of shape ``(NUM_CLASSES,)``;
+        ``present_classes[i]`` is the set of class ids present in mask ``i``.
+    """
+    mask_paths = df["mask_paths"].to_list()
+
+    pixel_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
+    occurrence_counts = np.zeros(Configuration.NUM_CLASSES, dtype=np.float64)
+    present_classes: List[set[int]] = []
+
+    for mask_path in mask_paths:
+        mask_pil = Image.open(mask_path).convert("RGB")
+        class_index = color_label_to_class_index(np.array(mask_pil))
+
+        # ``return_counts`` yields the pixel area per class in one pass, which
+        # feeds both the occurrence count (presence) and the pixel count
+        # (prevalence) used downstream.
+        class_ids, areas = np.unique(class_index, return_counts=True)
+        present_classes.append(set(class_ids.tolist()))
+        for class_id, area in zip(class_ids, areas, strict=True):
+            occurrence_counts[class_id] += 1
+            pixel_counts[class_id] += float(area)
+
+    return pixel_counts, occurrence_counts, present_classes
+
+
+def find_minority_classes(
+    pixel_counts: np.ndarray,
+    method: str = "relative_to_max",
+    threshold: float = 0.05,
+) -> List[int]:
+    """Derive under-represented class ids from pixel-prevalence statistics.
+
+    Instead of hardcoding which classes are rare, this function ranks classes by
+    the fraction of pixels they occupy and flags everything below a relative
+    cutoff. Pixel prevalence (rather than image occurrence) is the right signal
+    for segmentation because a bias is caused by class area, not mere presence:
+    road dominates the bottom half of highway frames precisely because it
+    occupies the largest area.
+
+    Steps
+    -----
+    1. Normalise ``pixel_counts`` by the total pixel count to obtain per-class
+       prevalence fractions.
+    2. Pick a cutoff fraction using ``method``: the median prevalence, or a
+       ``threshold`` fraction of the most prevalent class.
+    3. Return every class id below the cutoff, excluding the ``Unknown`` class.
+
+    Parameters
+    ----------
+    pixel_counts : np.ndarray
+        Per-class pixel counts of shape ``(NUM_CLASSES,)``.
+    method : str, optional
+        ``"relative_to_max"`` uses ``threshold * max(prevalence)`` as the
+        cutoff; ``"below_median"`` uses the median prevalence. Defaults to
+        ``"relative_to_max"``.
+    threshold : float, optional
+        Fraction of the most prevalent class to use as cutoff when
+        ``method == "relative_to_max"``. Defaults to ``0.05``.
+
+    Returns
+    -------
+    List[int]
+        Class ids whose prevalence falls below the cutoff, sorted ascending.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not one of ``"relative_to_max"`` or ``"below_median"``.
+    """
+    total_pixels = pixel_counts.sum()
+    fractions = pixel_counts / total_pixels
+
+    if method == "below_median":
+        cutoff = float(np.median(fractions))
+    elif method == "relative_to_max":
+        cutoff = float(fractions.max()) * threshold
+    else:
+        raise ValueError(
+            f"Unknown minority selection method: {method!r}. "
+            "Use 'relative_to_max' or 'below_median'."
+        )
+
+    # The last class (Unknown) is excluded: it is not a real object class and
+    # would otherwise always be flagged as rare.
+    minority_ids = [
+        int(class_id)
+        for class_id in range(Configuration.NUM_CLASSES - 1)
+        if fractions[class_id] < cutoff
+    ]
+    return minority_ids
+
+
+def compute_sample_weights(
+    present_classes: List[set[int]],
+    occurrence_counts: np.ndarray,
+    minority_class_ids: List[int],
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Build per-sample weights that oversample minority-class images.
+
+    Each sample starts with a base weight of ``1.0`` and gains an inverse-
+    frequency boost for every minority class it contains. A class that appears
+    in few masks therefore contributes a larger boost, which
+    :class:`torch.utils.data.WeightedRandomSampler` uses to draw minority-class
+    images more often while still keeping majority images in the mix.
+
+    Steps
+    -----
+    1. Start from a unit weight for every sample.
+    2. For each sample, add ``num_masks / occurrence_count`` for every minority
+       class present in that sample's mask.
+
+    Parameters
+    ----------
+    present_classes : List[set[int]]
+        Per-sample set of class ids present in each mask.
+    occurrence_counts : np.ndarray
+        Per-class image occurrence counts of shape ``(NUM_CLASSES,)``.
+    minority_class_ids : List[int]
+        Class ids to oversample.
+    eps : float, optional
+        Small constant guarding against a zero occurrence count. Defaults to
+        ``1e-6``.
+
+    Returns
+    -------
+    np.ndarray
+        Float array of shape ``(num_samples,)``; higher values correspond to
+        samples the sampler should draw more frequently.
+    """
+    num_masks = len(present_classes)
+
+    # A class that appears in few masks gets a large boost, while an
+    # always-present class gets roughly ``num_masks / num_masks == 1``. The base
+    # weight of ``1.0`` keeps highway-only frames in the mix so the model still
+    # sees the majority class, just not exclusively.
+    weights = np.ones(num_masks, dtype=np.float64)
+    for sample_index, present in enumerate(present_classes):
+        for class_id in minority_class_ids:
+            if class_id in present:
+                count = occurrence_counts[class_id]
+                weights[sample_index] += num_masks / (count + eps)
+
+    return weights
+
+
 @jaxtyped(typechecker=beartype)
 def forward(model: nn.Module, x: BatchImage) -> Logits:
     """Run a single forward pass and assert the input/output shapes.
@@ -376,68 +566,76 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
     return cast(Logits, model(x))
 
 
-class DiceLoss(nn.Module):
-    """Multi-class soft Dice loss for semantic segmentation.
+@torch.no_grad()
+def compute_batch_macro_iou(
+    y_pred: torch.Tensor,      # (B, C, H, W) logits
+    y_true: torch.Tensor,      # (B, C, H, W) one-hot
+    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    eps: float = 1e-7,
+) -> float:
+    """Compute the mean macro IoU over a batch, excluding ignored classes.
 
-    ``nn.CrossEntropyLoss`` expects integer class-id targets of shape ``(B, H,
-    W)``, which is incompatible with a segmentation pipeline that wishes to use
-    a Dice objective over per-class probabilities. This module instead takes
-    raw ``(B, C, H, W)`` logits and one-hot ``(B, C, H, W)`` targets, applies a
-    softmax over the class axis and returns ``1 - mean(Dice)`` averaged over
-    classes and the batch.
+    The model outputs raw logits while the ground truth is one-hot, so both are
+    first reduced to a single class id per pixel via ``argmax``. IoU is then
+    computed class by class and averaged only over the classes that actually
+    occur in either the prediction or the ground truth; empty classes are
+    skipped rather than counted as zero, which would otherwise drag the mean
+    down on batches dominated by a few classes.
+
+    Steps
+    -----
+    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
+    2. For each class in ``[0, num_classes)``, compute intersection over union.
+    3. Average the IoU of every class whose union is non-zero.
 
     Parameters
     ----------
-    smooth : float, optional
-        Additive smoothing applied to the Dice numerator and denominator to
-        avoid division by zero. Defaults to 1.0.
+    y_pred : torch.Tensor
+        Model logits of shape ``(B, C, H, W)``.
+    y_true : torch.Tensor
+        One-hot targets of shape ``(B, C, H, W)``.
+    num_classes : int, optional
+        Number of classes to score, excluding the ``Unknown`` class. Defaults
+        to ``19`` (classes 0-18).
+    eps : float, optional
+        Smoothing constant added to intersection and union to avoid division by
+        zero. Defaults to ``1e-7``.
+
+    Returns
+    -------
+    float
+        Mean IoU over the classes present in the batch, or ``0.0`` if no class
+        has a non-empty union.
     """
+    preds = y_pred.argmax(dim=1)  # (B, H, W)
+    targets = y_true.argmax(dim=1)  # (B, H, W)
 
-    def __init__(self, smooth: float = 1.0):
-        super().__init__()
-        self.smooth = smooth
+    iou_per_class = []
+    for cls in range(num_classes):
+        pred_mask = preds == cls
+        true_mask = targets == cls
 
-    def forward(self, logits: Logits, target: BatchMask) -> Scalar:
-        """Compute the loss value.
+        intersection = (pred_mask & true_mask).sum().float().item()
+        union = (pred_mask | true_mask).sum().float().item()
 
-        Parameters
-        ----------
-        logits : Logits
-            Raw model output of shape ``(B, C, H, W)``.
-        target : BatchMask
-            One-hot ground-truth mask of shape ``(B, C, H, W)``.
+        # Only include the class in the mean if it exists in GT or Prediction
+        if union > 0:
+            iou_per_class.append((intersection + eps) / (union + eps))
 
-        Returns
-        -------
-        Scalar
-            The scalar loss value (1 - mean Dice), differentiable w.r.t.
-            ``logits``.
-        """
-        # Softmax over the class axis yields per-pixel probabilities that sum
-        # to 1 across classes, matching the one-hot target distribution.
-        probs = torch.softmax(logits, dim=1)
-
-        # Reduce the spatial axes to get a Dice coefficient per (sample, class)
-        # before averaging: this treats every class equally regardless of the
-        # number of pixels it occupies, which prevents the road/sky classes
-        # from dominating the loss.
-        intersection = (probs * target).sum(dim=(2, 3))
-        cardinality = probs.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-
-        dice = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
-        return 1.0 - dice.mean()
+    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
 
 
 class DistillationLoss(nn.Module):
-    """Combined hard (Dice) and soft (KL) loss for segmentation distillation.
+    """Combined hard (Dice + Focal) and soft (KL) loss for segmentation distillation.
 
     Following "Distilling the Knowledge in a Neural Network" (Hinton et al.),
     the student is trained against two signals at once: a hard signal from the
-    one-hot ground-truth mask via a soft Dice loss, and a soft signal from the
-    frozen teacher's temperature-softened distribution via a KL-divergence
-    term. The KL term is multiplied by ``temperature ** 2`` as recommended in
-    the paper so its gradients stay on the same scale as the hard loss, and the
-    two terms are blended with ``alpha``.
+    one-hot ground-truth mask via a compound Dice+Focal loss (the same clean
+    loss the teacher was trained with), and a soft signal from the frozen
+    teacher's temperature-softened distribution via a KL-divergence term. The
+    KL term is multiplied by ``temperature ** 2`` as recommended in the paper
+    so its gradients stay on the same scale as the hard loss, and the two terms
+    are blended with ``alpha``.
 
     Because segmentation logits are ``(B, C, H, W)`` rather than a plain
     classification vector, the softmax and log-softmax are taken over the class
@@ -445,18 +643,26 @@ class DistillationLoss(nn.Module):
 
     Parameters
     ----------
+    hard_loss : Callable[[Logits, BatchMask], Scalar]
+        Clean supervision loss evaluated against the ground-truth masks, e.g.
+        the compound Dice + Focal loss used to train the teacher.
     temperature : float, optional
         Softening temperature applied to both distributions. Defaults to 3.0.
     alpha : float, optional
-        Weight of the hard Dice loss; ``1 - alpha`` weights the KL term.
+        Weight of the hard loss; ``1 - alpha`` weights the KL term.
         Defaults to 0.5.
     """
 
-    def __init__(self, temperature: float = 3.0, alpha: float = 0.5):
+    def __init__(
+        self,
+        hard_loss: Callable[[Logits, BatchMask], Scalar],
+        temperature: float = 3.0,
+        alpha: float = 0.5,
+    ):
         super().__init__()
         self.temperature = temperature
         self.alpha = alpha
-        self.dice_loss = DiceLoss()
+        self.hard_loss = hard_loss
 
     def forward(
         self,
@@ -495,10 +701,11 @@ class DistillationLoss(nn.Module):
         ).mean() * (self.temperature ** 2)
 
         # Hard supervision keeps the student tied to the ground truth rather
-        # than drifting toward whatever mistakes the teacher makes. ``forward``
-        # is called directly so the return type stays ``Scalar`` instead of the
-        # ``Any`` that ``nn.Module.__call__`` declares.
-        hard_loss = self.dice_loss.forward(student_logits, target)
+        # than drifting toward whatever mistakes the teacher makes. ``self.
+        # hard_loss`` is the compound Dice+Focal loss the teacher was trained
+        # with, so the student starts from the same clean objective as the
+        # teacher before the KL term is blended in.
+        hard_loss = self.hard_loss(student_logits, target)
 
         return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
 
@@ -537,7 +744,7 @@ def execute_epoch(
     Returns
     -------
     tuple[float, float]
-        Mean training loss and mean soft Dice over the epoch.
+        Mean training loss and mean macro IoU over the epoch.
     """
     # Set teacher model into eval mode
     teacher.eval()
@@ -546,7 +753,7 @@ def execute_epoch(
     student.train()
 
     # Initialize train loss & accuracy
-    train_loss, train_dice = 0.0, 0.0
+    train_loss, train_iou = 0.0, 0.0
 
     # Execute training loop over train dataloader
     for _, (X, y) in enumerate(dataloader):
@@ -572,39 +779,52 @@ def execute_epoch(
         # Update Model Gradients
         optimizer.step()
 
-        # Compute Batch Metrics
-        # ``y`` is one-hot and ``student_logits`` holds raw logits, so run a
-        # softmax over the class axis to obtain per-class probabilities in the
-        # same (B, NUM_CLASSES, H, W) space before computing soft Dice.
-        predicted = torch.softmax(student_logits, dim=1)
-
-        eps = 1e-8
-        train_dice += (
-            (2 * (y * predicted).sum() + eps) /
-            ((y + predicted).sum() + eps)
-        ).cpu().item()
+        # Compute Macro IoU for the batch (excluding class 19)
+        train_iou += compute_batch_macro_iou(student_logits, y, num_classes=19)
 
 
     # Compute Step Metrics
     train_loss = train_loss / len(dataloader)
-    train_dice = train_dice / len(dataloader)
+    train_iou = train_iou / len(dataloader)
 
-    return train_loss, train_dice
+    return train_loss, train_iou
 
 
 @jaxtyped(typechecker=beartype)
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    loss_fn: nn.Module,
+    loss_fn: Callable[[Logits, BatchMask], Scalar],
     device: torch.device
 ) -> tuple[float, float]:
+    """Evaluate the model on a dataloader and return mean loss and macro IoU.
+
+    The model is placed in eval mode and run under ``torch.inference_mode`` so
+    that no gradients are tracked. Each batch's clean loss and macro IoU are
+    accumulated and normalised by the number of batches.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model being evaluated.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched validation data.
+    loss_fn : Callable[[Logits, BatchMask], Scalar]
+        Clean loss callable that consumes ``(logits, one-hot targets)``.
+    device : torch.device
+        Device the evaluation runs on.
+
+    Returns
+    -------
+    tuple[float, float]
+        Mean evaluation loss and mean macro IoU over the epoch.
+    """
 
     # Set model into eval mode
     model.eval()
 
     # Initialize eval loss & accuracy
-    eval_loss, eval_dice = 0.0, 0.0
+    eval_loss, eval_iou = 0.0, 0.0
 
     # Active inferene context manager
     with torch.inference_mode():
@@ -618,22 +838,14 @@ def evaluate(
             loss = loss_fn(y_pred, y)
             eval_loss += loss.item()
 
-            # Compute Batch Metrics
-            # Softmax gives per-class probabilities over the class axis, matching
-            # the one-hot ``y`` shape so soft Dice is well-defined.
-            predicted = torch.softmax(y_pred, dim=1)
-
-            eps = 1e-8
-            eval_dice += (
-                (2 * (y * predicted).sum() + eps) /
-                ((y + predicted).sum() + eps)
-            ).cpu().item()
+            # Compute Macro IoU for the batch (excluding class 19)
+            eval_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
 
     # Compute Step Metrics
     eval_loss = eval_loss / len(dataloader)
-    eval_dice = eval_dice / len(dataloader)
+    eval_iou = eval_iou / len(dataloader)
 
-    return eval_loss, eval_dice
+    return eval_loss, eval_iou
 
 
 @jaxtyped(typechecker=beartype)
@@ -644,7 +856,7 @@ def train(
     eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
-    loss_fn: nn.Module,
+    loss_fn: DistillationLoss,
     epochs: int,
     train_device: torch.device,
     eval_device: torch.device
@@ -670,7 +882,7 @@ def train(
         Optimizer updating the student.
     scheduler : lr_scheduler.ReduceLROnPlateau | None
         Optional learning-rate scheduler stepped on the eval loss.
-    loss_fn : nn.Module
+    loss_fn : DistillationLoss
         Distillation loss combining Dice and KL divergence.
     epochs : int
         Number of training epochs.
@@ -682,25 +894,26 @@ def train(
     Returns
     -------
     Dict[str, List[float]]
-        Per-epoch history of training/eval losses and Dice scores.
+        Per-epoch history of training/eval losses and macro IoU scores.
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
-        'loss'            : [],
-        'dice_score'      : [],
-        'eval_loss'       : [],
-        'eval_dice_score' : []
+        'loss'                 : [],
+        'macro_iou_score'      : [],
+        'eval_loss'            : [],
+        'eval_macro_iou_score' : []
     }
 
-    # The student is scored against hard targets alone, so evaluation uses a
-    # plain Dice loss rather than the combined distillation objective.
-    eval_loss_fn = DiceLoss()
+    # The student is scored against hard targets alone, so evaluation uses the
+    # clean compound loss (without the teacher's soft targets) rather than the
+    # combined distillation objective.
+    eval_loss_fn = loss_fn.hard_loss
 
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
-        train_loss, train_dice = execute_epoch(
+        train_loss, train_macro_iou = execute_epoch(
             teacher,
             student,
             train_dataloader,
@@ -710,7 +923,7 @@ def train(
         )
 
         # Evaluate Model
-        eval_loss, eval_dice = evaluate(
+        eval_loss, eval_macro_iou = evaluate(
             student,
             eval_dataloader,
             eval_loss_fn,
@@ -724,7 +937,7 @@ def train(
             current_lr = optimizer.param_groups[0]['lr']
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - dice_score: {train_dice:.4f} - eval_loss: {eval_loss:.4f} - eval_dice_score: {eval_dice:.4f}'
+        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
 
         if scheduler:
             print(log_text + f' - lr: {current_lr}')
@@ -733,9 +946,9 @@ def train(
 
         # Record Epoch Metrics
         session['loss'].append(train_loss)
-        session['dice_score'].append(train_dice)
+        session['macro_iou_score'].append(train_macro_iou)
         session['eval_loss'].append(eval_loss)
-        session['eval_dice_score'].append(eval_dice)
+        session['eval_macro_iou_score'].append(eval_macro_iou)
 
     # Return Session Metrics
     return session
@@ -749,8 +962,8 @@ def plot_training_curves(
     loss = np.array(history['loss'])
     val_loss = np.array(history['eval_loss'])
 
-    dice_coeff = np.array(history['dice_score'])
-    val_dice_coeff = np.array(history['eval_dice_score'])
+    iou = np.array(history['macro_iou_score'])
+    val_iou = np.array(history['eval_macro_iou_score'])
 
     epochs = range(len(history['loss']))
 
@@ -772,17 +985,17 @@ def plot_training_curves(
     ax1.legend(fontsize=14)
 
     # Plot metric
-    ax2.plot(epochs, dice_coeff, label='training_dice_score', marker='o', color='C5')
-    ax2.plot(epochs, val_dice_coeff, label='eval_dice_score', marker='o', color='C6')
+    ax2.plot(epochs, iou, label='training_macro_iou', marker='o', color='C5')
+    ax2.plot(epochs, val_iou, label='eval_macro_iou', marker='o', color='C6')
 
     # Fill area between metrics
-    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff > val_dice_coeff), color='C5', alpha=0.4, interpolate=True)
-    ax2.fill_between(epochs, dice_coeff, val_dice_coeff, where=(dice_coeff < val_dice_coeff), color='C6', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, iou, val_iou, where=(iou > val_iou), color='C5', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, iou, val_iou, where=(iou < val_iou), color='C6', alpha=0.4, interpolate=True)
 
     # Add Text & Formats
-    ax2.set_title('Dice Score (Higher Means Better)', fontsize=22)
+    ax2.set_title('Macro IoU (Higher Means Better)', fontsize=22)
     ax2.set_xlabel('Epochs', fontsize=18)
-    ax2.set_ylabel('Dice Score', fontsize=18)
+    ax2.set_ylabel('Macro IoU', fontsize=18)
     ax2.tick_params(axis='both', which='major', labelsize=14)
     ax2.legend(fontsize=14)
     sns.despine()
@@ -1091,10 +1304,55 @@ def main() -> None:
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
+    # Scan the train masks once to measure per-class pixel prevalence and image
+    # occurrence. These statistics drive both the choice of minority classes and
+    # the per-sample sampling weights, so the masks are decoded exactly once and
+    # independently of the online augmentation pipeline.
+    pixel_counts, occurrence_counts, present_classes = compute_class_statistics(
+        train_df
+    )
+
+    # Derive the minority classes from pixel prevalence instead of hardcoding
+    # them, then force in the boundary-critical classes (sidewalk) that a pure
+    # frequency threshold would miss.
+    minority_class_ids = find_minority_classes(pixel_counts)
+    minority_class_ids = sorted(
+        set(minority_class_ids) | set(BOUNDARY_CLASS_IDS)
+    )
+
+    # Log which classes are being oversampled and how rare they are, so the
+    # automatic selection can be sanity-checked against the BDD100k labels.
+    total_pixels = pixel_counts.sum()
+    print("Oversampling the following minority classes:")
+    for class_id in minority_class_ids:
+        prevalence = 100.0 * pixel_counts[class_id] / total_pixels
+        print(
+            f"  {class_id:>2} {CLASS_NAMES[class_id]:<14} "
+            f"({prevalence:6.3f}% of pixels)"
+        )
+
+    # Build weights that oversample images containing the selected minority
+    # classes. ``WeightedRandomSampler`` draws from these weights with
+    # replacement, so rare-class boundaries keep appearing in every batch
+    # instead of being swamped by highway-only frames.
+    train_sample_weights = compute_sample_weights(
+        present_classes=present_classes,
+        occurrence_counts=occurrence_counts,
+        minority_class_ids=minority_class_ids,
+    )
+
+    train_sampler = WeightedRandomSampler(
+        weights=train_sample_weights.tolist(),
+        num_samples=len(train_ds),
+        replacement=True,
+    )
+
+    # ``shuffle`` and ``sampler`` are mutually exclusive in ``DataLoader``; the
+    # sampler already provides the weighted random ordering.
     train_loader = DataLoader(
         dataset=train_ds,
         batch_size=Configuration.BATCH_SIZE,
-        shuffle=Configuration.APPLY_SHUFFLE
+        sampler=train_sampler,
     )
     val_loader = DataLoader(
             dataset=val_ds,
@@ -1143,9 +1401,25 @@ def main() -> None:
     )
 
     # Define Loss Function
-    # Distillation loss combines a hard Dice loss over the one-hot masks with a
-    # temperature-scaled KL divergence against the teacher's softened logits.
-    loss_fn = DistillationLoss(temperature=3.0, alpha=0.5)
+    # Mirror the teacher's clean loss: a compound Dice + Focal loss. This is
+    # the hard signal inside :class:`DistillationLoss`, so the student starts
+    # from the same clean objective the teacher was trained with before the
+    # soft KL-distillation term is blended in.
+    dice_loss = smp.losses.DiceLoss(
+        mode=smp.losses.MULTICLASS_MODE,
+        from_logits=True,
+        ignore_index=19
+    )
+    focal_loss = smp.losses.FocalLoss(
+        mode=smp.losses.MULTICLASS_MODE,
+        ignore_index=19
+    )
+
+    def compound_loss(logits: Logits, targets: BatchMask) -> Scalar:
+        # targets: (B, H, W) integer class indices rather than one-hot
+        return cast(Scalar, 0.5 * dice_loss(logits, targets) + focal_loss(logits, targets))
+
+    loss_fn = DistillationLoss(hard_loss=compound_loss, temperature=3.0, alpha=0.5)
 
     # Define optimizer over the student's parameters only; the teacher is
     # frozen and must stay out of the optimizer.
