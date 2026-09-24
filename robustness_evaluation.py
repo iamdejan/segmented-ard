@@ -662,7 +662,7 @@ def pgd_attack(
         perturbation = torch.clamp(perturbation, -epsilon, epsilon)
         x_adv = torch.clamp(images + perturbation, 0.0, 1.0).detach()
 
-    return cast(BatchImage, x_adv)
+    return x_adv
 
 
 def compute_untargeted_asr(clean_mean_iou: float, adv_mean_iou: float) -> float:

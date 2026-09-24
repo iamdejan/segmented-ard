@@ -833,8 +833,8 @@ class CompoundLoss(nn.Module):
         if targets.ndim == 4:
             targets = targets.argmax(dim=1)
 
-        dice = self.dice_loss(logits, targets)
-        focal = self.focal_loss(logits, targets)
+        dice = cast(Scalar, self.dice_loss(logits, targets))
+        focal = cast(Scalar, self.focal_loss(logits, targets))
 
         # Combine weighted losses to balance boundary refinement and region overlap
         return self.dice_weight * dice + self.focal_weight * focal
