@@ -752,6 +752,94 @@ def evaluate_segmentation_metrics(
     }
 
 
+class CompoundLoss(nn.Module):
+    """Compound loss combining Dice Loss and Focal Loss for semantic segmentation.
+
+    Semantic segmentation on class-imbalanced datasets benefits from combining a
+    region-based loss (Dice loss) and a distribution-based loss (Focal loss).
+    Dice loss optimizes overall mask overlap to handle class imbalance, while
+    Focal loss down-weights easy background pixels to focus gradient updates on
+    hard boundaries and minority classes.
+
+    Steps
+    -----
+    1. Initialize the underlying SMP DiceLoss and FocalLoss modules in multiclass mode.
+    2. In the forward pass, inspect target tensor dimensionality; if 4D (one-hot encoded),
+       collapse the channel dimension to 2D class indices via ``argmax(dim=1)``.
+    3. Compute multi-class Dice loss from raw logits.
+    4. Compute multi-class Focal loss from raw logits.
+    5. Return the weighted sum: ``dice_weight * dice + focal_weight * focal``.
+
+    Parameters
+    ----------
+    dice_weight : float, optional
+        Weight factor applied to the Dice loss component. Defaults to 0.5.
+    focal_weight : float, optional
+        Weight factor applied to the Focal loss component. Defaults to 1.0.
+    ignore_index : int, optional
+        Class index to ignore during loss computation. Defaults to 19.
+    """
+
+    def __init__(
+        self,
+        dice_weight: float = 0.5,
+        focal_weight: float = 1.0,
+        ignore_index: int = 19,
+    ) -> None:
+        super().__init__()
+        # Store loss weighting factors to adjust the relative contribution of each loss term
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+
+        # SMP DiceLoss operates directly on raw logits when from_logits=True,
+        # avoiding an explicit external softmax step
+        self.dice_loss = smp.losses.DiceLoss(
+            mode=smp.losses.MULTICLASS_MODE,
+            from_logits=True,
+            ignore_index=ignore_index,
+        )
+
+        # SMP FocalLoss handles multiclass cross-entropy while masking out
+        # the designated unknown/ignored class id
+        self.focal_loss = smp.losses.FocalLoss(
+            mode=smp.losses.MULTICLASS_MODE,
+            ignore_index=ignore_index,
+        )
+
+    def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
+        """Compute the weighted compound loss between predictions and targets.
+
+        Steps
+        -----
+        1. Check if targets are 4D (one-hot encoded); if so, collapse to class indices.
+        2. Evaluate Dice loss and Focal loss independently.
+        3. Weight and sum both loss terms.
+
+        Parameters
+        ----------
+        logits : Tensor
+            Raw unnormalized model predictions of shape ``(B, C, H, W)``.
+        targets : Tensor
+            Ground-truth masks, either one-hot encoded tensors of shape ``(B, C, H, W)``
+            or class indices of shape ``(B, H, W)``.
+
+        Returns
+        -------
+        Tensor
+            Scalar compound loss tensor suitable for gradient backpropagation.
+        """
+        # Collapse one-hot targets (B, C, H, W) to class indices (B, H, W) because
+        # SMP multiclass loss functions with ignore_index require integer class indices
+        if targets.ndim == 4:
+            targets = targets.argmax(dim=1)
+
+        dice = cast(Scalar, self.dice_loss(logits, targets))
+        focal = cast(Scalar, self.focal_loss(logits, targets))
+
+        # Combine weighted losses to balance boundary refinement and region overlap
+        return self.dice_weight * dice + self.focal_weight * focal
+
+
 @jaxtyped(typechecker=beartype)
 def kl_divergence(probs: Logits, adv_probs: Logits, eps: float = 1e-8) -> Scalar:
     """Compute the mean per-pixel Kullback-Leibler divergence ``KL(p || q)``.
@@ -1543,22 +1631,17 @@ def main() -> None:
             )
     )
 
-    # Define Loss Function
-    dice_loss = smp.losses.DiceLoss(
-        mode=smp.losses.MULTICLASS_MODE,
-        from_logits=True,
-        ignore_index=19
-    )
-    focal_loss = smp.losses.FocalLoss(
-        mode=smp.losses.MULTICLASS_MODE,
-        ignore_index=19
+    # Define the natural loss. An :class:`CompoundLoss` ``nn.Module`` is used
+    # rather than a bare function so it satisfies the ``natural_loss: nn.Module``
+    # annotation on :class:`TradesLoss`. It also collapses the one-hot masks it
+    # receives from the TRADES loss back into class indices automatically.
+    natural_loss = CompoundLoss(
+        dice_weight=0.5,
+        focal_weight=1.0,
+        ignore_index=19,
     )
 
-    def compound_loss(logits, targets):
-        # targets: (B, H, W) integer class indices rather than one-hot
-        return 0.5 * dice_loss(logits, targets) + focal_loss(logits, targets)
-
-    loss_fn = TradesLoss(natural_loss=compound_loss)
+    loss_fn = TradesLoss(natural_loss=natural_loss)
 
     # Define optimizer
     optimizer = torch.optim.AdamW(
