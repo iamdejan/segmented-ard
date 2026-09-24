@@ -1,4 +1,3 @@
-import argparse
 import os
 from typing import List, Optional, Set, Tuple
 
@@ -509,49 +508,14 @@ def load_or_compute_class_weights(
     )
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for standalone minority class extraction.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(
-        description="Extract minority classes and compute class weights for BDD100k."
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default=ImagePath.CLASS_WEIGHTS_PATH,
-        help=f"Path to store output .npy weights file (default: {ImagePath.CLASS_WEIGHTS_PATH})",
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        default="relative_to_max",
-        choices=["relative_to_max", "below_median"],
-        help="Cutoff method for minority class selection (default: relative_to_max)",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.05,
-        help="Prevalence fraction threshold relative to max (default: 0.05)",
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
     """Scan training masks, calculate sample weights for minority classes, and save to NPY.
 
     Steps
     -----
-    1. Parse command-line arguments (target output path, method, threshold).
-    2. Load dataset splits using the project's standard preprocessing logic.
-    3. Calculate sample weights and serialize them to the specified NPY file.
+    1. Load dataset splits using the project's standard preprocessing logic.
+    2. Calculate sample weights and serialize them to the specified NPY file.
     """
-    args = parse_args()
 
     # Import Configuration and dataset loader locally to prevent circular module imports
     from train_teacher import Configuration, load_dataset_from_files
@@ -562,13 +526,13 @@ def main() -> None:
     print(f"Calculating and persisting class weights for {len(train_df)} training samples...")
     weights = calculate_and_save_class_weights(
         df=train_df,
-        output_path=args.output_path,
+        output_path=ImagePath.CLASS_WEIGHTS_PATH,
         num_classes=Configuration.NUM_CLASSES,
         boundary_class_ids=BOUNDARY_CLASS_IDS,
-        method=args.method,
-        threshold=args.threshold,
+        method="relative_to_max",
+        threshold=0.05,
     )
-    print(f"Execution complete. Output shape: {weights.shape}, file: '{args.output_path}'.")
+    print(f"Execution complete. Output shape: {weights.shape}, file: '{ImagePath.CLASS_WEIGHTS_PATH}'.")
 
 
 if __name__ == "__main__":

@@ -567,192 +567,6 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
     return cast(Logits, model(x))
 
 
-@torch.no_grad()
-def compute_batch_macro_iou(
-    y_pred: torch.Tensor,      # (B, C, H, W) logits
-    y_true: torch.Tensor,      # (B, C, H, W) one-hot
-    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
-    eps: float = 1e-7,
-) -> float:
-    """Compute the mean macro IoU over a batch, excluding ignored classes.
-
-    The model outputs raw logits while the ground truth is one-hot, so both are
-    first reduced to a single class id per pixel via ``argmax``. IoU is then
-    computed class by class and averaged only over the classes that actually
-    occur in either the prediction or the ground truth; empty classes are
-    skipped rather than counted as zero, which would otherwise drag the mean
-    down on batches dominated by a few classes.
-
-    Steps
-    -----
-    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
-    2. For each class in ``[0, num_classes)``, compute intersection over union.
-    3. Average the IoU of every class whose union is non-zero.
-
-    Parameters
-    ----------
-    y_pred : torch.Tensor
-        Model logits of shape ``(B, C, H, W)``.
-    y_true : torch.Tensor
-        One-hot targets of shape ``(B, C, H, W)``.
-    num_classes : int, optional
-        Number of classes to score, excluding the ``Unknown`` class. Defaults
-        to ``19`` (classes 0-18).
-    eps : float, optional
-        Smoothing constant added to intersection and union to avoid division by
-        zero. Defaults to ``1e-7``.
-
-    Returns
-    -------
-    float
-        Mean IoU over the classes present in the batch, or ``0.0`` if no class
-        has a non-empty union.
-    """
-    preds = y_pred.argmax(dim=1)  # (B, H, W)
-    targets = y_true.argmax(dim=1)  # (B, H, W)
-
-    iou_per_class = []
-    for cls in range(num_classes):
-        pred_mask = preds == cls
-        true_mask = targets == cls
-
-        intersection = (pred_mask & true_mask).sum().float().item()
-        union = (pred_mask | true_mask).sum().float().item()
-
-        # Only include the class in the mean if it exists in GT or Prediction
-        if union > 0:
-            iou_per_class.append((intersection + eps) / (union + eps))
-
-    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
-
-
-def evaluate_segmentation_metrics(
-    model: nn.Module,
-    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    device: torch.device,
-    num_classes: int = 19,
-    ignore_index: int = -1,
-    ignored_class: int = 19,
-) -> Dict[str, float | List[float]]:
-    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
-
-    The metrics are derived from per-class true/false positive/negative pixel
-    counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
-    then reduced once at the end. Accumulating the raw counts rather than
-    averaging per-batch values guarantees the metrics stay correct even when
-    batches are class-imbalanced. The ``smp`` implementations are reused
-    wherever possible:
-
-    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
-      yields a single scalar.
-    * Class-wise pixel accuracy scores each class independently, so it uses no
-      reduction and returns one accuracy value per class.
-    * IoU (Jaccard) and Dice (F1) are macro-averaged over classes into single
-      scalars.
-
-    The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
-    ``ignore_index`` so those pixels never influence any metric. This mirrors
-    the ``ignore_index=19`` used by the training losses, but is required
-    because :func:`smp.metrics.get_stats` only accepts an ``ignore_index`` that
-    lies *outside* the ``[0, num_classes)`` range.
-
-    Steps
-    -----
-    1. Run the model over every batch under ``torch.inference_mode``.
-    2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
-       remap ``ignored_class`` to ``ignore_index`` on both.
-    3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
-    4. Reduce the accumulated counts into the requested metrics.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Segmentation model to evaluate.
-    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
-        Batched data to evaluate over (typically the test set).
-    device : torch.device
-        Device the evaluation runs on.
-    num_classes : int, optional
-        Number of classes to score, excluding the ignored class. Defaults to
-        ``19``.
-    ignore_index : int, optional
-        Sentinel class id excluded from every metric. Defaults to ``-1``.
-    ignored_class : int, optional
-        Original class id to exclude (``Unknown``). Defaults to ``19``.
-
-    Returns
-    -------
-    Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
-        ``dice`` are scalars, while ``class_pixel_accuracy`` is a list whose
-        index ``i`` holds the accuracy of class ``i`` (classes ``0..18``).
-    """
-    model.eval()
-
-    # Per-class confusion counts summed over the whole dataset. ``get_stats``
-    # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
-    # one count per class.
-    tp_total: torch.Tensor | None = None
-    fp_total: torch.Tensor | None = None
-    fn_total: torch.Tensor | None = None
-    tn_total: torch.Tensor | None = None
-
-    with torch.inference_mode():
-        for X, y in dataloader:
-            X, y = X.to(device), y.to(device)
-
-            # Feed-forward and reduce model logits to one class id per pixel.
-            y_pred = forward(model, X)
-            output = y_pred.argmax(dim=1)  # (B, H, W)
-            target = y.argmax(dim=1)  # (B, H, W)
-
-            # ``smp`` requires ``ignore_index`` outside the valid class range,
-            # so the ``Unknown`` class (id 19) is relabelled to ``-1``.
-            output = torch.where(
-                output == ignored_class, torch.full_like(output, ignore_index), output
-            )
-            target = torch.where(
-                target == ignored_class, torch.full_like(target, ignore_index), target
-            )
-
-            tp, fp, fn, tn = smp.metrics.functional.get_stats(
-                output,
-                target,
-                mode="multiclass",
-                ignore_index=ignore_index,
-                num_classes=num_classes,
-            )
-
-            # Accumulate the ``(N, C)`` counts into per-class running sums.
-            tp_total = tp.sum(dim=0) if tp_total is None else tp_total + tp.sum(dim=0)
-            fp_total = fp.sum(dim=0) if fp_total is None else fp_total + fp.sum(dim=0)
-            fn_total = fn.sum(dim=0) if fn_total is None else fn_total + fn.sum(dim=0)
-            tn_total = tn.sum(dim=0) if tn_total is None else tn_total + tn.sum(dim=0)
-
-    # Guard against an empty dataloader producing no counts at all.
-    if tp_total is None:
-        raise ValueError("The evaluation dataloader yielded no batches.")
-
-    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
-    pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
-
-    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
-    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
-    # is the accuracy of class ``i``.
-    class_pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total).tolist()
-
-    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
-    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-
-    return {
-        "pixel_accuracy": float(pixel_accuracy),
-        "class_pixel_accuracy": list(class_pixel_accuracy),
-        "iou": float(iou),
-        "dice": float(dice),
-    }
-
-
 class CompoundLoss(nn.Module):
     """Compound loss combining Dice Loss and Focal Loss for semantic segmentation.
 
@@ -1000,6 +814,192 @@ class TradesLoss(nn.Module):
         robust = kl_divergence(clean_probs, adv_probs)
 
         return natural + self.beta * robust
+
+
+@torch.no_grad()
+def compute_batch_macro_iou(
+    y_pred: torch.Tensor,      # (B, C, H, W) logits
+    y_true: torch.Tensor,      # (B, C, H, W) one-hot
+    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    eps: float = 1e-7,
+) -> float:
+    """Compute the mean macro IoU over a batch, excluding ignored classes.
+
+    The model outputs raw logits while the ground truth is one-hot, so both are
+    first reduced to a single class id per pixel via ``argmax``. IoU is then
+    computed class by class and averaged only over the classes that actually
+    occur in either the prediction or the ground truth; empty classes are
+    skipped rather than counted as zero, which would otherwise drag the mean
+    down on batches dominated by a few classes.
+
+    Steps
+    -----
+    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
+    2. For each class in ``[0, num_classes)``, compute intersection over union.
+    3. Average the IoU of every class whose union is non-zero.
+
+    Parameters
+    ----------
+    y_pred : torch.Tensor
+        Model logits of shape ``(B, C, H, W)``.
+    y_true : torch.Tensor
+        One-hot targets of shape ``(B, C, H, W)``.
+    num_classes : int, optional
+        Number of classes to score, excluding the ``Unknown`` class. Defaults
+        to ``19`` (classes 0-18).
+    eps : float, optional
+        Smoothing constant added to intersection and union to avoid division by
+        zero. Defaults to ``1e-7``.
+
+    Returns
+    -------
+    float
+        Mean IoU over the classes present in the batch, or ``0.0`` if no class
+        has a non-empty union.
+    """
+    preds = y_pred.argmax(dim=1)  # (B, H, W)
+    targets = y_true.argmax(dim=1)  # (B, H, W)
+
+    iou_per_class = []
+    for cls in range(num_classes):
+        pred_mask = preds == cls
+        true_mask = targets == cls
+
+        intersection = (pred_mask & true_mask).sum().float().item()
+        union = (pred_mask | true_mask).sum().float().item()
+
+        # Only include the class in the mean if it exists in GT or Prediction
+        if union > 0:
+            iou_per_class.append((intersection + eps) / (union + eps))
+
+    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
+
+
+def evaluate_segmentation_metrics(
+    model: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    device: torch.device,
+    num_classes: int = 19,
+    ignore_index: int = -1,
+    ignored_class: int = 19,
+) -> Dict[str, float | List[float]]:
+    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
+
+    The metrics are derived from per-class true/false positive/negative pixel
+    counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
+    then reduced once at the end. Accumulating the raw counts rather than
+    averaging per-batch values guarantees the metrics stay correct even when
+    batches are class-imbalanced. The ``smp`` implementations are reused
+    wherever possible:
+
+    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
+      yields a single scalar.
+    * Class-wise pixel accuracy scores each class independently, so it uses no
+      reduction and returns one accuracy value per class.
+    * IoU (Jaccard) and Dice (F1) are macro-averaged over classes into single
+      scalars.
+
+    The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
+    ``ignore_index`` so those pixels never influence any metric. This mirrors
+    the ``ignore_index=19`` used by the training losses, but is required
+    because :func:`smp.metrics.get_stats` only accepts an ``ignore_index`` that
+    lies *outside* the ``[0, num_classes)`` range.
+
+    Steps
+    -----
+    1. Run the model over every batch under ``torch.inference_mode``.
+    2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
+       remap ``ignored_class`` to ``ignore_index`` on both.
+    3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
+    4. Reduce the accumulated counts into the requested metrics.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model to evaluate.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched data to evaluate over (typically the test set).
+    device : torch.device
+        Device the evaluation runs on.
+    num_classes : int, optional
+        Number of classes to score, excluding the ignored class. Defaults to
+        ``19``.
+    ignore_index : int, optional
+        Sentinel class id excluded from every metric. Defaults to ``-1``.
+    ignored_class : int, optional
+        Original class id to exclude (``Unknown``). Defaults to ``19``.
+
+    Returns
+    -------
+    Dict[str, float | List[float]]
+        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
+        ``dice`` are scalars, while ``class_pixel_accuracy`` is a list whose
+        index ``i`` holds the accuracy of class ``i`` (classes ``0..18``).
+    """
+    model.eval()
+
+    # Per-class confusion counts summed over the whole dataset. ``get_stats``
+    # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
+    # one count per class.
+    tp_total: torch.Tensor | None = None
+    fp_total: torch.Tensor | None = None
+    fn_total: torch.Tensor | None = None
+    tn_total: torch.Tensor | None = None
+
+    with torch.inference_mode():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+
+            # Feed-forward and reduce model logits to one class id per pixel.
+            y_pred = forward(model, X)
+            output = y_pred.argmax(dim=1)  # (B, H, W)
+            target = y.argmax(dim=1)  # (B, H, W)
+
+            # ``smp`` requires ``ignore_index`` outside the valid class range,
+            # so the ``Unknown`` class (id 19) is relabelled to ``-1``.
+            output = torch.where(
+                output == ignored_class, torch.full_like(output, ignore_index), output
+            )
+            target = torch.where(
+                target == ignored_class, torch.full_like(target, ignore_index), target
+            )
+
+            tp, fp, fn, tn = smp.metrics.functional.get_stats(
+                output,
+                target,
+                mode="multiclass",
+                ignore_index=ignore_index,
+                num_classes=num_classes,
+            )
+
+            # Accumulate the ``(N, C)`` counts into per-class running sums.
+            tp_total = tp.sum(dim=0) if tp_total is None else tp_total + tp.sum(dim=0)
+            fp_total = fp.sum(dim=0) if fp_total is None else fp_total + fp.sum(dim=0)
+            fn_total = fn.sum(dim=0) if fn_total is None else fn_total + fn.sum(dim=0)
+            tn_total = tn.sum(dim=0) if tn_total is None else tn_total + tn.sum(dim=0)
+
+    # Guard against an empty dataloader producing no counts at all.
+    if tp_total is None:
+        raise ValueError("The evaluation dataloader yielded no batches.")
+
+    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
+    pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
+    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
+    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
+    # is the accuracy of class ``i``.
+    class_pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total).tolist()
+
+    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
+    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    return {
+        "pixel_accuracy": float(pixel_accuracy),
+        "class_pixel_accuracy": list(class_pixel_accuracy),
+        "iou": float(iou),
+        "dice": float(dice),
+    }
 
 
 @jaxtyped(typechecker=beartype)
