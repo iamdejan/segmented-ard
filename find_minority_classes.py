@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+from beartype import beartype
+from jaxtyping import Float64, UInt8, jaxtyped
+
 
 # BDD100k color-label palette. The row index is the class id (0-19).
 # Predicted class maps are coloured with this same palette so they render
@@ -48,6 +51,18 @@ CLASS_NAMES: List[str] = [
 BOUNDARY_CLASS_IDS: List[int] = [1]  # Sidewalk
 
 
+# Shape aliases enforced at runtime by ``jaxtyped`` + ``beartype``. Each alias
+# pins the rank and dtype of an array crossing a decorated function boundary, so
+# a shape mismatch raises a ``TypeCheckError`` instead of a confusing
+# downstream indexing or broadcasting error.
+# ``h``/``w`` are the spatial dimensions of a mask, and ``c`` is the number of
+# classes.
+NumpyColorLabel = UInt8[np.ndarray, "h w 3"]  # RGB color-label, channels-last
+ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class-id map
+ClassCounts = Float64[np.ndarray, "c"]  # per-class counts, 1-D
+SampleWeightsArray = Float64[np.ndarray, "_"]  # per-sample weights, 1-D
+
+
 class ImagePath:
     """Default directory paths for BDD100k masks and cached class weights."""
 
@@ -55,7 +70,8 @@ class ImagePath:
     CLASS_WEIGHTS_PATH: str = "./data/class_weights.npy"
 
 
-def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def color_label_to_class_index(label: NumpyColorLabel) -> ClassIndexArray:
     """Map an RGB color-label image to a per-pixel class-index map.
 
     BDD100k stores segmentation masks as RGB PNGs whose colours are exactly
@@ -73,14 +89,14 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    label : np.ndarray
-        RGB color-label array of shape ``(H, W, 3)`` with integer values.
+    label : NumpyColorLabel
+        RGB color-label array of shape ``(H, W, 3)`` with uint8 values.
 
     Returns
     -------
-    np.ndarray
+    ClassIndexArray
         Class-index array of shape ``(H, W)`` and dtype ``uint8``, whose values
-        are in ``[0, NUM_CLASSES)``.
+        are in ``[0, NUM_CLASSES)``. The spatial dimensions match ``label``.
     """
     # Default to the last class id so unknown colours fall back gracefully
     # instead of indexing the palette out of bounds later.
@@ -99,10 +115,11 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
     return class_ids
 
 
+@jaxtyped(typechecker=beartype)
 def compute_class_statistics(
     df: pd.DataFrame,
     num_classes: int = 20,
-) -> Tuple[np.ndarray, np.ndarray, List[Set[int]]]:
+) -> Tuple[ClassCounts, ClassCounts, List[Set[int]]]:
     """Scan every train mask and aggregate per-class statistics.
 
     The bias correction needs two pieces of information: which classes are
@@ -128,9 +145,9 @@ def compute_class_statistics(
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray, List[Set[int]]]
+    Tuple[ClassCounts, ClassCounts, List[Set[int]]]
         ``(pixel_counts, occurrence_counts, present_classes)``. ``pixel_counts``
-        and ``occurrence_counts`` are float arrays of shape ``(num_classes,)``;
+        and ``occurrence_counts`` are float64 arrays of shape ``(num_classes,)``;
         ``present_classes[i]`` is the set of class ids present in mask ``i``.
     """
     mask_paths: List[str] = df["mask_paths"].to_list()
@@ -155,8 +172,9 @@ def compute_class_statistics(
     return pixel_counts, occurrence_counts, present_classes
 
 
+@jaxtyped(typechecker=beartype)
 def find_minority_classes(
-    pixel_counts: np.ndarray,
+    pixel_counts: ClassCounts,
     method: str = "relative_to_max",
     threshold: float = 0.05,
     num_classes: int = 20,
@@ -180,7 +198,7 @@ def find_minority_classes(
 
     Parameters
     ----------
-    pixel_counts : np.ndarray
+    pixel_counts : ClassCounts
         Per-class pixel counts of shape ``(num_classes,)``.
     method : str, optional
         ``"relative_to_max"`` uses ``threshold * max(prevalence)`` as the
@@ -225,12 +243,13 @@ def find_minority_classes(
     return minority_ids
 
 
+@jaxtyped(typechecker=beartype)
 def compute_sample_weights(
     present_classes: List[Set[int]],
-    occurrence_counts: np.ndarray,
+    occurrence_counts: ClassCounts,
     minority_class_ids: List[int],
     eps: float = 1e-6,
-) -> np.ndarray:
+) -> SampleWeightsArray:
     """Build per-sample weights that oversample minority-class images.
 
     Each sample starts with a base weight of ``1.0`` and gains an inverse-
@@ -249,7 +268,7 @@ def compute_sample_weights(
     ----------
     present_classes : List[Set[int]]
         Per-sample set of class ids present in each mask.
-    occurrence_counts : np.ndarray
+    occurrence_counts : ClassCounts
         Per-class image occurrence counts of shape ``(num_classes,)``.
     minority_class_ids : List[int]
         Class ids to oversample.
@@ -259,8 +278,8 @@ def compute_sample_weights(
 
     Returns
     -------
-    np.ndarray
-        Float array of shape ``(num_samples,)``; higher values correspond to
+    SampleWeightsArray
+        Float64 array of shape ``(num_samples,)``; higher values correspond to
         samples the sampler should draw more frequently.
     """
     num_masks = len(present_classes)
@@ -279,6 +298,7 @@ def compute_sample_weights(
     return weights
 
 
+@jaxtyped(typechecker=beartype)
 def calculate_class_weights(
     df: pd.DataFrame,
     num_classes: int = 20,
@@ -286,7 +306,7 @@ def calculate_class_weights(
     method: str = "relative_to_max",
     threshold: float = 0.05,
     eps: float = 1e-6,
-) -> np.ndarray:
+) -> SampleWeightsArray:
     """Compute sampling weights for all masks in a dataset based on minority classes.
 
     Aggregates pixel and occurrence statistics across all masks, derives the
@@ -320,8 +340,8 @@ def calculate_class_weights(
 
     Returns
     -------
-    np.ndarray
-        Array of shape ``(num_samples,)`` with per-sample sampling weights.
+    SampleWeightsArray
+        Float64 array of shape ``(num_samples,)`` with per-sample sampling weights.
 
     Raises
     ------
@@ -368,6 +388,7 @@ def calculate_class_weights(
     return sample_weights
 
 
+@jaxtyped(typechecker=beartype)
 def calculate_and_save_class_weights(
     df: pd.DataFrame,
     output_path: str,
@@ -376,7 +397,7 @@ def calculate_and_save_class_weights(
     method: str = "relative_to_max",
     threshold: float = 0.05,
     eps: float = 1e-6,
-) -> np.ndarray:
+) -> SampleWeightsArray:
     """Calculate class-based sample weights and persist them into an NPY file.
 
     Computes the sample weights from mask prevalence and saves the resulting
@@ -409,8 +430,8 @@ def calculate_and_save_class_weights(
 
     Returns
     -------
-    np.ndarray
-        Array of float64 weights of shape ``(num_samples,)``.
+    SampleWeightsArray
+        Float64 array of shape ``(num_samples,)``.
 
     Raises
     ------
@@ -441,6 +462,7 @@ def calculate_and_save_class_weights(
     return sample_weights
 
 
+@jaxtyped(typechecker=beartype)
 def load_or_compute_class_weights(
     df: pd.DataFrame,
     weights_path: str,
@@ -449,7 +471,7 @@ def load_or_compute_class_weights(
     method: str = "relative_to_max",
     threshold: float = 0.05,
     eps: float = 1e-6,
-) -> np.ndarray:
+) -> SampleWeightsArray:
     """Load precomputed class weights from disk or compute and persist them.
 
     Inspects whether the designated NPY file exists. If it exists, the weights
@@ -483,8 +505,8 @@ def load_or_compute_class_weights(
 
     Returns
     -------
-    np.ndarray
-        Array of float64 weights of shape ``(num_samples,)``.
+    SampleWeightsArray
+        Float64 array of shape ``(num_samples,)``.
     """
     # Check for cached weights file to bypass mask image decoding
     if os.path.exists(weights_path):
