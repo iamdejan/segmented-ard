@@ -27,6 +27,11 @@ import segmentation_models_pytorch as smp
 from jaxtyping import Float, UInt8, jaxtyped
 from beartype import beartype
 
+from find_minority_classes import (
+    BOUNDARY_CLASS_IDS,
+    calculate_and_save_class_weights,
+)
+
 
 # Shape aliases that document the tensor layout at each stage of the pipeline.
 #
@@ -83,12 +88,6 @@ CLASS_NAMES = [
     "person", "rider", "car", "truck", "bus", "train", "motorcycle",
     "bicycle", "unknown",
 ]
-
-# Boundary-critical classes that are forced into the minority set regardless of
-# their pixel prevalence. Sidewalk is common in urban frames, so a pure
-# frequency threshold can miss it, but the road/sidewalk boundary is exactly
-# where the model over-predicts road and needs the most corrective sampling.
-BOUNDARY_CLASS_IDS = [1]  # Sidewalk
 
 
 def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
@@ -165,7 +164,7 @@ class Configuration:
     CHANNELS = 3 # RGB
 
 
-class ImagePath:
+class Path:
     BASE = "./data/bdd100k"
 
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
@@ -175,6 +174,8 @@ class ImagePath:
     IMAGE_FOLDER = BASE + "/images_10k"
     IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
     IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
+
+    CLASS_WEIGHTS_PATH = "./data/class_weights.npy"
 
 
 class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
@@ -287,11 +288,11 @@ def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> 
 
 
 def find_train_image_path_from_mask(complete_mask_path: str) -> str:
-    return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_TRAIN_PATH)
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_TRAIN_PATH)
 
 
 def find_val_image_path_from_mask(complete_mask_path: str) -> str:
-    return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_VAL_PATH)
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
 
 
 def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
@@ -303,16 +304,16 @@ def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> 
 
 
 def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_TRAIN_PATH)
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
 
 
 def find_val_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_VAL_PATH)
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
 
 
 def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # load train, then split into train-test
-    train_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
     problematic_masks = []
     for complete_mask_path in train_mask_paths:
         with Image.open(complete_mask_path) as img:
@@ -340,7 +341,7 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
 
     # load val
-    val_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
     problematic_val_masks = []
     for complete_mask_path in val_mask_paths:
         with Image.open(complete_mask_path) as img:
@@ -1552,42 +1553,22 @@ def main() -> None:
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
-    # Scan the train masks once to measure per-class pixel prevalence and image
-    # occurrence. These statistics drive both the choice of minority classes and
-    # the per-sample sampling weights, so the masks are decoded exactly once and
-    # independently of the online augmentation pipeline.
-    pixel_counts, occurrence_counts, present_classes = compute_class_statistics(
-        train_df
-    )
-
-    # Derive the minority classes from pixel prevalence instead of hardcoding
-    # them, then force in the boundary-critical classes (sidewalk) that a pure
-    # frequency threshold would miss.
-    minority_class_ids = find_minority_classes(pixel_counts)
-    minority_class_ids = sorted(
-        set(minority_class_ids) | set(BOUNDARY_CLASS_IDS)
-    )
-
-    # Log which classes are being oversampled and how rare they are, so the
-    # automatic selection can be sanity-checked against the BDD100k labels.
-    total_pixels = pixel_counts.sum()
-    print("Oversampling the following minority classes:")
-    for class_id in minority_class_ids:
-        prevalence = 100.0 * pixel_counts[class_id] / total_pixels
+    # Calculate class weights only if the NPY file does not exist, and reuse if
+    # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
+    if os.path.exists(Path.CLASS_WEIGHTS_PATH):
+        print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")
+        train_sample_weights = np.load(Path.CLASS_WEIGHTS_PATH)
+    else:
         print(
-            f"  {class_id:>2} {CLASS_NAMES[class_id]:<14} "
-            f"({prevalence:6.3f}% of pixels)"
+            f"Class weights file '{Path.CLASS_WEIGHTS_PATH}' not found. "
+            "Calculating class weights from training masks..."
         )
-
-    # Build weights that oversample images containing the selected minority
-    # classes. ``WeightedRandomSampler`` draws from these weights with
-    # replacement, so rare-class boundaries keep appearing in every batch
-    # instead of being swamped by highway-only frames.
-    train_sample_weights = compute_sample_weights(
-        present_classes=present_classes,
-        occurrence_counts=occurrence_counts,
-        minority_class_ids=minority_class_ids,
-    )
+        train_sample_weights = calculate_and_save_class_weights(
+            df=train_df,
+            output_path=Path.CLASS_WEIGHTS_PATH,
+            num_classes=Configuration.NUM_CLASSES,
+            boundary_class_ids=BOUNDARY_CLASS_IDS,
+        )
 
     train_sampler = WeightedRandomSampler(
         weights=train_sample_weights.tolist(),
