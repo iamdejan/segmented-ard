@@ -1332,7 +1332,7 @@ def main() -> None:
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
-   # Calculate class weights only if the NPY file does not exist, and reuse if
+    # Calculate class weights only if the NPY file does not exist, and reuse if
     # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
     if os.path.exists(Path.CLASS_WEIGHTS_PATH):
         print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")

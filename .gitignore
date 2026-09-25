@@ -1,6 +1,9 @@
 # dataset
 data/
 
+# model
+model/
+
 # pixi environments
 .pixi/*
 !.pixi/config.toml
