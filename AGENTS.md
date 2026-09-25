@@ -7,7 +7,7 @@ Make sure you adhere to the guide on this file to generate the code.
 ### Rules of engagement
 
 1. You're allowed to create functions, structs and impl blocks to generate the code.
-2. For function signatures, include the type from `typing` package. Optional arguments should be put after mandatory arguments.
+2. For function signatures, include the type from `typing` package. Optional arguments should be put after mandatory arguments. For function arguments and returns with type `np.ndarray` or `torch.tensor`, include `jaxtyping` validation as well (useful for validating tensor's shapes).
 3. With the exception of import statements, explain the flow of the program using comments. Make sure that you write not only what the program is doing, but why. It will help me to judge your work.
 4. You have to add documentation for new functions and classes that you generate. For existing functions, update the documentation for functions and classes that you edit. The documentation should follow NumPy style. The documentation should contain what is the function for (basically the description), a brief summary of the steps, and input and output parameters. If your function has the ability to throw error, please state it in the documentation as well.
 

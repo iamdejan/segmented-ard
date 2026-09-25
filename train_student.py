@@ -647,8 +647,10 @@ def evaluate_segmentation_metrics(
       yields a single scalar.
     * Class-wise pixel accuracy scores each class independently, so it uses no
       reduction and returns one accuracy value per class.
-    * IoU (Jaccard) and Dice (F1) are macro-averaged over classes into single
-      scalars.
+    * Class-wise IoU (Jaccard) similarly uses no reduction and returns one IoU
+      value per class; the mean IoU is then the average of those per-class
+      values, matching macro-averaging.
+    * Dice (F1) is macro-averaged over classes into a single scalar.
 
     The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
     ``ignore_index`` so those pixels never influence any metric. This mirrors
@@ -684,8 +686,9 @@ def evaluate_segmentation_metrics(
     -------
     Dict[str, float | List[float]]
         Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
-        ``dice`` are scalars, while ``class_pixel_accuracy`` is a list whose
-        index ``i`` holds the accuracy of class ``i`` (classes ``0..18``).
+        ``dice`` are scalars, while ``class_pixel_accuracy`` and
+        ``class_iou`` are lists whose index ``i`` holds the value of class
+        ``i`` (classes ``0..18``).
     """
     model.eval()
 
@@ -745,10 +748,20 @@ def evaluate_segmentation_metrics(
     iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
     dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
 
+    # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
+    # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
+    # class ``i``.
+    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total).tolist()
+
+    # Mean IoU: average of the class-wise IoU values (macro-averaging).
+    mean_iou = np.mean(class_iou)
+
     return {
         "pixel_accuracy": float(pixel_accuracy),
         "class_pixel_accuracy": list(class_pixel_accuracy),
         "iou": float(iou),
+        "mean_iou": float(mean_iou),
+        "class_iou": list(class_iou),
         "dice": float(dice),
     }
 
@@ -1472,10 +1485,14 @@ def main() -> None:
     print('\nFinal test-set metrics (best checkpoint):')
     print(f'  Pixel Accuracy : {test_metrics["pixel_accuracy"]:.4f}')
     print(f'  IoU (macro)    : {test_metrics["iou"]:.4f}')
+    print(f'  Mean IoU       : {test_metrics["mean_iou"]:.4f}')
     print(f'  Dice (macro)   : {test_metrics["dice"]:.4f}')
     print('  Class-wise Pixel Accuracy:')
     for class_id, acc in enumerate(cast(List[float], test_metrics["class_pixel_accuracy"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {acc:.4f}')
+    print('  Class-wise IoU:')
+    for class_id, class_iou in enumerate(cast(List[float], test_metrics["class_iou"])):
+        print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
 
     # Generate Segmentation Metrics
     student_metrics = compute_metrics(
