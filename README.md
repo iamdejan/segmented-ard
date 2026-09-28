@@ -10,6 +10,12 @@ Implementation of adversarial robust distillation for semantic segmentation task
   training (KL-divergence robustness term).
 - `train_student.py` - Distills the teacher into a smaller U-Net (MobileNet-V2)
   student via knowledge distillation (Dice+Focal hard loss + KL soft loss).
+- `evaluate_performance.py` - Loads a trained checkpoint (default
+  `./model/teacher.pt`) and reports the final segmentation metrics on the test
+  split.
+- `evaluate_latency.py` - Loads a trained checkpoint (default
+  `./model/teacher.pt`) and reports the per-image inference latency percentiles
+  (P25, P50/median, mean, P75, P90, P95, P99) on the test split, in ms.
 
 Each script reports the following metrics once at the end of training, using
 the best checkpoint (chosen by lowest validation loss) evaluated on the test
