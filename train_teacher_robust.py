@@ -27,7 +27,7 @@ import segmentation_models_pytorch as smp
 from jaxtyping import Float, UInt8, jaxtyped
 from beartype import beartype
 
-from find_minority_classes import (
+from precompute_weights import (
     BOUNDARY_CLASS_IDS,
     calculate_and_save_class_weights,
 )
