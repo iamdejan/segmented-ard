@@ -566,8 +566,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="./model/teacher.pt",
-        help="Path to the PyTorch checkpoint file (.pt) to evaluate. Defaults to ./model/teacher.pt.",
+        required=True,
+        help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
     )
     return parser.parse_args()
 

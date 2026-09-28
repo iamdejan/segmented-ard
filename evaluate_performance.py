@@ -639,11 +639,15 @@ def evaluate_segmentation_metrics(
     # Mean IoU: average of the class-wise IoU values (macro-averaging).
     mean_iou = np.mean(class_iou)
 
+    # Dataset-level global (micro) IoU
+    global_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
     return {
         "pixel_accuracy": float(pixel_accuracy),
         "class_pixel_accuracy": list(class_pixel_accuracy),
         "iou": float(iou),
         "mean_iou": float(mean_iou),
+        "global_iou": float(global_iou),
         "class_iou": list(class_iou),
         "dice": float(dice),
     }
@@ -716,8 +720,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="./model/teacher.pt",
-        help="Path to the PyTorch checkpoint file (.pt) to evaluate. Defaults to ./model/teacher.pt.",
+        required=True,
+        help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
     )
     parser.add_argument(
         "--batch-size",
@@ -805,6 +809,7 @@ def main() -> None:
     print('\nFinal test-set metrics (averaged over %d runs):' % num_runs)
     print(f'  Pixel Accuracy : {averaged_metrics["pixel_accuracy"]:.4f}')
     print(f'  IoU (macro)    : {averaged_metrics["iou"]:.4f}')
+    print(f'  Global IoU     : {averaged_metrics["global_iou"]:.4f}')
     print(f'  Mean IoU       : {averaged_metrics["mean_iou"]:.4f}')
     print(f'  Dice (macro)   : {averaged_metrics["dice"]:.4f}')
     print('  Class-wise Pixel Accuracy:')
