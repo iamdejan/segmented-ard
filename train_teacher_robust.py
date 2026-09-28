@@ -702,146 +702,6 @@ def compute_batch_macro_iou(
     return float(np.mean(iou_per_class)) if iou_per_class else 0.0
 
 
-def evaluate_segmentation_metrics(
-    model: nn.Module,
-    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    device: torch.device,
-    num_classes: int = 19,
-    ignore_index: int = -1,
-    ignored_class: int = 19,
-) -> Dict[str, float | List[float]]:
-    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
-
-    The metrics are derived from per-class true/false positive/negative pixel
-    counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
-    then reduced once at the end. Accumulating the raw counts rather than
-    averaging per-batch values guarantees the metrics stay correct even when
-    batches are class-imbalanced. The ``smp`` implementations are reused
-    wherever possible:
-
-    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
-      yields a single scalar.
-    * Class-wise pixel accuracy scores each class independently, so it uses no
-      reduction and returns one accuracy value per class.
-    * Class-wise IoU (Jaccard) similarly uses no reduction and returns one IoU
-      value per class; the mean IoU is then the average of those per-class
-      values, matching macro-averaging.
-    * Dice (F1) is macro-averaged over classes into a single scalar.
-
-    The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
-    ``ignore_index`` so those pixels never influence any metric. This mirrors
-    the ``ignore_index=19`` used by the training losses, but is required
-    because :func:`smp.metrics.get_stats` only accepts an ``ignore_index`` that
-    lies *outside* the ``[0, num_classes)`` range.
-
-    Steps
-    -----
-    1. Run the model over every batch under ``torch.inference_mode``.
-    2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
-       remap ``ignored_class`` to ``ignore_index`` on both.
-    3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
-    4. Reduce the accumulated counts into the requested metrics.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Segmentation model to evaluate.
-    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
-        Batched data to evaluate over (typically the test set).
-    device : torch.device
-        Device the evaluation runs on.
-    num_classes : int, optional
-        Number of classes to score, excluding the ignored class. Defaults to
-        ``19``.
-    ignore_index : int, optional
-        Sentinel class id excluded from every metric. Defaults to ``-1``.
-    ignored_class : int, optional
-        Original class id to exclude (``Unknown``). Defaults to ``19``.
-
-    Returns
-    -------
-    Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
-        ``dice`` are scalars, while ``class_pixel_accuracy`` and
-        ``class_iou`` are lists whose index ``i`` holds the value of class
-        ``i`` (classes ``0..18``).
-    """
-    model.eval()
-
-    # Per-class confusion counts summed over the whole dataset. ``get_stats``
-    # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
-    # one count per class.
-    tp_total: torch.Tensor | None = None
-    fp_total: torch.Tensor | None = None
-    fn_total: torch.Tensor | None = None
-    tn_total: torch.Tensor | None = None
-
-    with torch.inference_mode():
-        for X, y in dataloader:
-            X, y = X.to(device), y.to(device)
-
-            # Feed-forward and reduce model logits to one class id per pixel.
-            y_pred = forward(model, X)
-            output = y_pred.argmax(dim=1)  # (B, H, W)
-            target = y.argmax(dim=1)  # (B, H, W)
-
-            # ``smp`` requires ``ignore_index`` outside the valid class range,
-            # so the ``Unknown`` class (id 19) is relabelled to ``-1``.
-            output = torch.where(
-                output == ignored_class, torch.full_like(output, ignore_index), output
-            )
-            target = torch.where(
-                target == ignored_class, torch.full_like(target, ignore_index), target
-            )
-
-            tp, fp, fn, tn = smp.metrics.functional.get_stats(
-                output,
-                target,
-                mode="multiclass",
-                ignore_index=ignore_index,
-                num_classes=num_classes,
-            )
-
-            # Accumulate the ``(N, C)`` counts into per-class running sums.
-            tp_total = tp.sum(dim=0) if tp_total is None else tp_total + tp.sum(dim=0)
-            fp_total = fp.sum(dim=0) if fp_total is None else fp_total + fp.sum(dim=0)
-            fn_total = fn.sum(dim=0) if fn_total is None else fn_total + fn.sum(dim=0)
-            tn_total = tn.sum(dim=0) if tn_total is None else tn_total + tn.sum(dim=0)
-
-    # Guard against an empty dataloader producing no counts at all.
-    if tp_total is None:
-        raise ValueError("The evaluation dataloader yielded no batches.")
-
-    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
-    pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
-
-    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
-    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
-    # is the accuracy of class ``i``.
-    class_pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total).tolist()
-
-    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
-    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-
-    # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
-    # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
-    # class ``i``.
-    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total).tolist()
-
-    # Mean IoU: average of the class-wise IoU values (macro-averaging).
-    mean_iou = np.mean(class_iou)
-
-    return {
-        "pixel_accuracy": float(pixel_accuracy),
-        "class_pixel_accuracy": list(class_pixel_accuracy),
-        "iou": float(iou),
-        "mean_iou": float(mean_iou),
-        "class_iou": list(class_iou),
-        "dice": float(dice),
-    }
-
-
 @jaxtyped(typechecker=beartype)
 def execute_epoch(
     model: nn.Module,
@@ -1138,100 +998,6 @@ def plot_training_curves(
     sns.despine()
 
 
-@jaxtyped(typechecker=beartype)
-def dice_score(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
-    """Compute the Sorensen-Dice coefficient for a single mask pair.
-
-    Both operands must share the same ``(C, H, W)`` shape, which ``jaxtyped``
-    enforces at runtime before the element-wise product is evaluated.
-
-    Parameters
-    ----------
-    y_true : ClassMask
-        Ground-truth mask with shape ``(C, H, W)``.
-    y_pred : ClassMask
-        Predicted mask with shape ``(C, H, W)``.
-
-    Returns
-    -------
-    Scalar
-        Scalar Dice coefficient, smoothed by ``eps`` to avoid division by zero.
-    """
-    eps = 1e-8
-    intersection = (y_true * y_pred).sum()
-    summation = (y_true + y_pred).sum()
-
-    return ((2 * intersection) / (summation + eps))
-
-
-@jaxtyped(typechecker=beartype)
-def jaccard_index(y_true: ClassMask, y_pred: ClassMask) -> Scalar:
-    """Compute the Jaccard index (IoU) for a single mask pair.
-
-    Both operands must share the same ``(C, H, W)`` shape, which ``jaxtyped``
-    enforces at runtime before the element-wise product is evaluated.
-
-    Parameters
-    ----------
-    y_true : ClassMask
-        Ground-truth mask with shape ``(C, H, W)``.
-    y_pred : ClassMask
-        Predicted mask with shape ``(C, H, W)``.
-
-    Returns
-    -------
-    Scalar
-        Scalar IoU, smoothed by ``eps`` to avoid division by zero.
-    """
-    eps = 1e-8
-    intersection = (y_true * y_pred).sum()
-    union = (y_true + y_pred).sum() - intersection
-
-    return (intersection / (union + eps))
-
-
-def compute_metrics(
-    model: nn.Module,
-    sample_loader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    device: torch.device
-) -> Dict[str, List[float]]:
-
-    # Initiate Metrics Dict
-    metrics: Dict[str, List[float]] = {
-        'IoU'           : [],
-        'dice_score'    : [],
-    }
-
-    # Set model into eval mode
-    model.eval()
-
-    # Active inferene context manager
-    with torch.inference_mode():
-        # Execute eval loop over dataloader
-        for _, (X, y) in enumerate(tqdm(sample_loader)):
-            # Load data onto target device
-            X, y = X.to(device), y.to(device)
-
-            # Feed-forward Input
-            y_pred = forward(model, X)
-
-            # Generate Predicted Masks
-            # Softmax yields per-class probabilities matching the one-hot ``y``;
-            # these are passed straight to the soft Dice/IoU helpers.
-            predicted = torch.softmax(y_pred, dim=1)
-
-            # Compute Batch Metrics For Each Mask
-            for true_mask, pred_mask in zip(y, predicted, strict=True):
-                iou = jaccard_index(true_mask, pred_mask).cpu().item()
-                dice = dice_score(true_mask, pred_mask).cpu().item()
-
-                # Record metrics
-                metrics['dice_score'].append(dice)
-                metrics['IoU'].append(iou)
-
-    return metrics
-
-
 def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """Map a class-index mask to an RGB image using ``palette``.
 
@@ -1265,14 +1031,14 @@ def visualize_predictions(
     output_path:str = "./predictions.png",
 ) -> None:
 
-    """Render random test samples next to their true and predicted masks.
+    """Render a fixed set of test samples next to their true and predicted masks.
 
-    A few rows of ``test_df`` are sampled, every image is run through
-    ``model``, and a grid with three columns (image / image + true mask /
-    image + predicted mask) is exported to a PNG file. The model's ``(20, H,
-    W)`` logits are reduced to a single class id per pixel via ``argmax`` so
-    they can be coloured with ``CLASS_COLORS`` and compared to the
-    ground-truth color labels.
+    The first ``num_samples`` rows of ``test_df`` are selected, every image is
+    run through ``model``, and a grid with three columns (image / image + true
+    mask / image + predicted mask) is exported to a PNG file. The model's
+    ``(20, H, W)`` logits are reduced to a single class id per pixel via
+    ``argmax`` so they can be coloured with ``CLASS_COLORS`` and compared to
+    the ground-truth color labels.
 
     Parameters
     ----------
@@ -1283,22 +1049,18 @@ def visualize_predictions(
     device : torch.device
         Device used to run inference.
     num_samples : int, optional
-        Number of random samples to visualise. Defaults to 4.
+        Number of samples to visualise. Defaults to 4.
     output_path : str, optional
         Destination of the exported PNG. Defaults to ``"./predictions.png"``.
 
     Raises
     ------
     ValueError
-        If ``test_df`` has no rows to sample.
+        If ``test_df`` has no rows to visualise.
     """
-    # Sample a fixed number of random rows (or fewer if the frame is small)
-    # so the visualisation changes with every call while staying reproducible
-    # thanks to the fixed random state.
-    sample_df = test_df.sample(
-        n=min(num_samples, len(test_df)),
-        random_state=Configuration.SEED,
-    ).reset_index(drop=True)
+    # Take the first ``num_samples`` rows of the test frame (or fewer if the
+    # frame is smaller) so the visualisation is identical across training runs.
+    sample_df = test_df.head(min(num_samples, len(test_df))).reset_index(drop=True)
 
     if sample_df.empty:
         raise ValueError("test_df has no rows to visualise.")
@@ -1391,7 +1153,6 @@ def main() -> None:
     ])
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
-    test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
 
     # Calculate class weights only if the NPY file does not exist, and reuse if
     # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
@@ -1428,11 +1189,6 @@ def main() -> None:
             batch_size=Configuration.BATCH_SIZE,
             shuffle=Configuration.APPLY_SHUFFLE
         )
-    test_loader = DataLoader(
-        dataset=test_ds,
-        batch_size=Configuration.BATCH_SIZE,
-        shuffle=Configuration.APPLY_SHUFFLE
-    )
 
     model = smp.Unet(
         encoder_name="resnet18",
@@ -1516,41 +1272,7 @@ def main() -> None:
         fig_size=(20, 20)
     )
 
-    # Evaluate the best checkpoint (``train`` restores it into ``model``) on
-    # the test set and report the segmentation metrics once.
-    test_metrics = evaluate_segmentation_metrics(
-        model, test_loader, Configuration.DEVICE
-    )
-    print('\nFinal test-set metrics (best checkpoint):')
-    print(f'  Pixel Accuracy : {test_metrics["pixel_accuracy"]:.4f}')
-    print(f'  IoU (macro)    : {test_metrics["iou"]:.4f}')
-    print(f'  Mean IoU       : {test_metrics["mean_iou"]:.4f}')
-    print(f'  Dice (macro)   : {test_metrics["dice"]:.4f}')
-    print('  Class-wise Pixel Accuracy:')
-    for class_id, acc in enumerate(cast(List[float], test_metrics["class_pixel_accuracy"])):
-        print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {acc:.4f}')
-    print('  Class-wise IoU:')
-    for class_id, class_iou in enumerate(cast(List[float], test_metrics["class_iou"])):
-        print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
-
-    # Generate Segmentation Metrics
-    unet_metrics = compute_metrics(
-        model, test_loader, Configuration.DEVICE
-    )
-
-    # Create copy of test df
-    unet_test_df = test_df.copy()
-
-    # Concatenate Metrics onto copied df
-    unet_test_df = pd.concat(
-        (unet_test_df, pd.DataFrame(unet_metrics)),
-        axis=1
-    )
-
-    # View df
-    print(unet_test_df[:5])
-
-    # Export a grid of random test samples (image / image+true mask /
+    # Export a grid of test samples (image / image+true mask /
     # image+predicted mask) so the model output can be inspected visually.
     visualize_predictions(
         model,
