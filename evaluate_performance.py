@@ -10,12 +10,14 @@ end of training.
 
 import argparse
 import glob
+import os
 from typing import Dict, List, Tuple, cast
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
 from jaxtyping import Float, UInt8, jaxtyped
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -698,6 +700,138 @@ def load_trained_model(checkpoint_path: str, device: torch.device) -> nn.Module:
     return model
 
 
+def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map a class-index mask to an RGB image using ``palette``.
+
+    Steps
+    -----
+    1. Cast ``class_mask`` to integer so it can be used as row indices.
+    2. Index ``palette`` with those indices, turning a ``(H, W)`` array of
+       class ids into a ``(H, W, 3)`` image.
+
+    Parameters
+    ----------
+    class_mask : np.ndarray
+        Array of shape ``(H, W)`` whose values are class indices.
+    palette : np.ndarray
+        Array of shape ``(NUM_CLASSES, 3)`` mapping a class id to an RGB
+        colour (the 0-255 range).
+
+    Returns
+    -------
+    np.ndarray
+        RGB image of shape ``(H, W, 3)`` matching the dtype of ``palette``.
+    """
+    return palette[class_mask.astype(np.int64)]
+
+
+def visualize_predictions(
+    model: nn.Module,
+    test_df: pd.DataFrame,
+    device: torch.device,
+    num_samples: int = 4,
+    output_path: str = "./model/predictions.png",
+) -> None:
+    """Render a fixed set of test samples next to their true and predicted masks.
+
+    The first ``num_samples`` rows of ``test_df`` are selected, every image is
+    run through ``model``, and a grid with three columns (image / image + true
+    mask / image + predicted mask) is exported to a PNG file. The model's
+    ``(20, H, W)`` logits are reduced to a single class id per pixel via
+    ``argmax`` so they can be coloured with ``CLASS_COLORS`` and compared to
+    the ground-truth color labels.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained segmentation model returning ``(B, 20, H, W)`` logits.
+    test_df : pd.DataFrame
+        DataFrame carrying the ``image_paths`` and ``mask_paths`` columns.
+    device : torch.device
+        Device used to run inference.
+    num_samples : int, optional
+        Number of samples to visualise. Defaults to 4.
+    output_path : str, optional
+        Destination of the exported PNG. Defaults to
+        ``"./model/predictions.png"``.
+
+    Raises
+    ------
+    ValueError
+        If ``test_df`` has no rows to visualise.
+    """
+    # Take the first ``num_samples`` rows of the test frame (or fewer if the
+    # frame is smaller) so the visualisation is identical across training runs.
+    sample_df = test_df.head(min(num_samples, len(test_df))).reset_index(drop=True)
+
+    if sample_df.empty:
+        raise ValueError("test_df has no rows to visualise.")
+
+    num_rows = len(sample_df)
+    fig, axes = plt.subplots(num_rows, 3, figsize=(15, 5 * num_rows))
+
+    # plt.subplots returns a 1D array when there is a single row; promote it
+    # to 2D so the axes[row, col] indexing below is uniform.
+    if num_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    # Reuse the dataset loader so the visual path matches training: this
+    # guarantees the RGB collapse and [0, 1] scaling are identical.
+    sample_ds = BDDSegmentationDataset(sample_df)
+
+    # Switch to inference once for the whole grid; no gradients are needed.
+    model.eval()
+
+    for row in range(num_rows):
+        # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
+        # and the mask as an (H, W) class-index array.
+        image, class_mask = sample_ds.load_sample(row)
+
+        # Replicate the ToTensorV2 conversion: transpose HWC -> CHW, add a
+        # batch dim and move to the device so the model sees the same format
+        # it received during training.
+        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous()
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+
+        # Forward pass, then collapse the 20-class logits to one class id per
+        # pixel so the output can be colourised.
+        with torch.inference_mode():
+            logits = model(image_tensor)
+        pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+
+        # Colour the predicted class map, then bring it back to [0, 1] for
+        # Matplotlib so it can be blended with the RGB image.
+        pred_color = colorize_mask(pred_class, CLASS_COLORS).astype(np.float32) / 255.0
+
+        # Colour the ground-truth class map the same way so the two overlays
+        # are directly comparable.
+        true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+
+        axes[row, 0].imshow(image)
+        axes[row, 0].set_title("Image")
+
+        axes[row, 1].imshow(image)
+        axes[row, 1].imshow(true_mask_color, alpha=0.5)
+        axes[row, 1].set_title("Image + True Mask")
+
+        axes[row, 2].imshow(image)
+        axes[row, 2].imshow(pred_color, alpha=0.5)
+        axes[row, 2].set_title("Image + Predicted Mask")
+
+        # Remove axis ticks/labels so only the pixels are shown.
+        for ax in axes[row]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+    # Ensure the output directory exists before writing the PNG.
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments for the performance evaluation script.
 
@@ -818,6 +952,16 @@ def main() -> None:
     print('  Class-wise IoU:')
     for class_id, class_iou in enumerate(cast(List[float], averaged_metrics["class_iou"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
+
+    # Render the first ``num_samples`` test samples to ``./model/predictions.png``
+    # so the predictions can be inspected visually alongside the metrics.
+    print('\nExporting sample predictions to ./model/predictions.png...')
+    visualize_predictions(
+        model=model,
+        test_df=test_df,
+        device=Configuration.DEVICE,
+        output_path="./model/predictions.png",
+    )
 
 
 if __name__ == "__main__":

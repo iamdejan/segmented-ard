@@ -12,7 +12,8 @@ Implementation of adversarial robust distillation for semantic segmentation task
   student via knowledge distillation (Dice+Focal hard loss + KL soft loss).
 - `evaluate_performance.py` - Loads a trained checkpoint (default
   `./model/teacher.pt`) and reports the final segmentation metrics on the test
-  split.
+  split. It also renders a grid of the first test samples next to their
+  predicted masks to `./model/predictions.png`.
 - `evaluate_latency.py` - Loads a trained checkpoint (default
   `./model/teacher.pt`) and reports the per-image inference latency percentiles
   (P25, P50/median, mean, P75, P90, P95, P99) on the test split, in ms.
