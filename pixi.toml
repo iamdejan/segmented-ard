@@ -11,8 +11,20 @@ lint-fix = "ruff check . --fix"
 type-check = "mypy ."
 
 [tasks.train]
-args = [{"arg" = "mode", "choices" = ["teacher", "student"]}]
-cmd = "python3 train_{{mode}}.py"
+args = [
+    {"arg" = "type", "choices" = ["teacher", "student"]},
+    {"arg" = "mode", "choices" = ["normal", "robust"]}
+]
+cmd = "python3 train_{{type}}_{{mode}}.py"
+
+[tasks.precompute-weights]
+cmd = "python3 precompute_weights.py"
+
+[tasks.evaluate]
+args = [
+    {"arg" = "aspect", "choices" = ["latency", "performance", "robustness"]}
+]
+cmd = "python3 evaluate_{{aspect}}.py"
 
 [dependencies]
 python = ">=3.13,<3.14"

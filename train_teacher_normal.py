@@ -19,7 +19,7 @@ from albumentations.pytorch import ToTensorV2
 
 from PIL import Image
 from tqdm import tqdm
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
@@ -27,7 +27,7 @@ import segmentation_models_pytorch as smp
 from jaxtyping import Float, UInt8, jaxtyped
 from beartype import beartype
 
-from find_minority_classes import (
+from precompute_weights import (
     BOUNDARY_CLASS_IDS,
     calculate_and_save_class_weights,
 )
@@ -482,91 +482,6 @@ class CompoundLoss(nn.Module):
         return self.dice_weight * dice + self.focal_weight * focal
 
 
-class DistillationLoss(nn.Module):
-    """Combined hard (Dice + Focal) and soft (KL) loss for segmentation distillation.
-
-    Following "Distilling the Knowledge in a Neural Network" (Hinton et al.),
-    the student is trained against two signals at once: a hard signal from the
-    one-hot ground-truth mask via a compound Dice+Focal loss (the same clean
-    loss the teacher was trained with), and a soft signal from the frozen
-    teacher's temperature-softened distribution via a KL-divergence term. The
-    KL term is multiplied by ``temperature ** 2`` as recommended in the paper
-    so its gradients stay on the same scale as the hard loss, and the two terms
-    are blended with ``alpha``.
-
-    Because segmentation logits are ``(B, C, H, W)`` rather than a plain
-    classification vector, the softmax and log-softmax are taken over the class
-    axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
-
-    Parameters
-    ----------
-    hard_loss : Callable[[Logits, BatchMask], Scalar]
-        Clean supervision loss evaluated against the ground-truth masks, e.g.
-        the compound Dice + Focal loss used to train the teacher.
-    temperature : float, optional
-        Softening temperature applied to both distributions. Defaults to 3.0.
-    alpha : float, optional
-        Weight of the hard loss; ``1 - alpha`` weights the KL term.
-        Defaults to 0.5.
-    """
-
-    def __init__(
-        self,
-        hard_loss: Callable[[Logits, BatchMask], Scalar],
-        temperature: float = 3.0,
-        alpha: float = 0.5,
-    ):
-        super().__init__()
-        self.temperature = temperature
-        self.alpha = alpha
-        self.hard_loss = hard_loss
-
-    def forward(
-        self,
-        student_logits: Logits,
-        target: BatchMask,
-        teacher_logits: Logits,
-    ) -> Scalar:
-        """Compute the blended distillation loss.
-
-        Parameters
-        ----------
-        student_logits : Logits
-            Raw student output of shape ``(B, C, H, W)``.
-        target : BatchMask
-            One-hot ground-truth mask of shape ``(B, C, H, W)``.
-        teacher_logits : Logits
-            Raw teacher output of shape ``(B, C, H, W)``.
-
-        Returns
-        -------
-        Scalar
-            Weighted sum of the Dice loss and the temperature-scaled KL loss.
-        """
-        # Soften the teacher logits into probabilities and the student logits
-        # into log-probabilities over the class axis (dim=1). The paper uses
-        # dim=-1 for a classification vector; segmentation uses dim=1 because
-        # the class axis of (B, C, H, W) logits is the channel axis.
-        soft_targets = torch.softmax(teacher_logits / self.temperature, dim=1)
-        soft_prob = torch.log_softmax(student_logits / self.temperature, dim=1)
-
-        # KL(soft_targets || soft_prob), summed over classes per pixel and then
-        # averaged over the batch and spatial positions. Scaled by T**2 as
-        # suggested by the authors of the paper.
-        kl_loss = torch.sum(
-            soft_targets * (soft_targets.log() - soft_prob), dim=1
-        ).mean() * (self.temperature ** 2)
-
-        # Hard supervision keeps the student tied to the ground truth rather
-        # than drifting toward whatever mistakes the teacher makes. ``self.
-        # hard_loss`` is the compound Dice+Focal loss the teacher was trained
-        # with, so the student starts from the same clean objective as the
-        # teacher before the KL term is blended in.
-        hard_loss = self.hard_loss(student_logits, target)
-
-        return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
-
-
 @torch.no_grad()
 def compute_batch_macro_iou(
     y_pred: torch.Tensor,      # (B, C, H, W) logits
@@ -768,45 +683,49 @@ def evaluate_segmentation_metrics(
 
 @jaxtyped(typechecker=beartype)
 def execute_epoch(
-    teacher: nn.Module,
-    student: nn.Module,
+    model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
     device: torch.device
 ) -> tuple[float, float]:
-    """Run one distillation training epoch.
+    """Run one training epoch and return the mean loss and macro IoU.
 
-    The teacher stays in eval mode and its logits are computed under
-    ``torch.no_grad`` so they act as fixed soft targets; only the student
-    accumulates gradients. ``loss_fn`` is expected to be callable as
-    ``loss_fn(student_logits, target, teacher_logits)``.
+    This method iterates over ``dataloader`` once, keeping the model in train
+    mode and performing a forward pass, backward pass and optimizer step for
+    every batch. The returned values are normalised by the number of batches,
+    not samples, so they represent per-batch averages.
+
+    Steps
+    -----
+    1. Set the model to training mode.
+    2. For each batch, move the data to ``device``, run :func:`forward`, and
+       compute the loss.
+    3. Backpropagate the loss and step the optimizer.
+    4. Accumulate the batch loss and macro IoU.
+    5. Return the per-batch mean loss and macro IoU.
 
     Parameters
     ----------
-    teacher : nn.Module
-        Pre-trained model whose softened outputs supervise the student.
-    student : nn.Module
-        Model being trained.
-    dataloader : DataLoader
-        Training data loader yielding ``(image, one_hot_mask)`` pairs.
+    model : nn.Module
+        Segmentation model to train.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Loader yielding ``(image, one-hot mask)`` batches.
     optimizer : torch.optim.Optimizer
-        Optimizer that updates the student's parameters.
+        Optimizer used to update model parameters.
     loss_fn : nn.Module
-        Distillation loss combining Dice and KL divergence.
+        Loss callable that consumes ``(logits, targets)``.
     device : torch.device
-        Device the tensors are moved to before the forward pass.
+        Device to run the forward and backward passes on.
 
     Returns
     -------
     tuple[float, float]
-        Mean training loss and mean macro IoU over the epoch.
+        The ``(mean_loss, mean_macro_iou)`` averaged over batches.
     """
-    # Set teacher model into eval mode
-    teacher.eval()
 
-    # Set student model into training mode
-    student.train()
+    # Set model into training mode
+    model.train()
 
     # Initialize train loss & accuracy
     train_loss, train_iou = 0.0, 0.0
@@ -816,16 +735,9 @@ def execute_epoch(
         # Load data onto target device
         X, y = X.to(device), y.to(device)
 
-        # The teacher's outputs are constant soft targets, so no gradient must
-        # ever flow into it.
-        with torch.no_grad():
-            teacher_logits = forward(teacher, X)
-
-        # Student forward pass with gradient tracking enabled.
-        student_logits = forward(student, X)
-
-        # Combined hard (Dice) + soft (KL) distillation loss.
-        loss = loss_fn(student_logits, y, teacher_logits)
+        # Feed-forward and compute metrics
+        y_pred = forward(model, X)
+        loss = loss_fn(y_pred, y)
         train_loss += loss.item()
 
         # Reset Gradients & Backpropagate Loss
@@ -836,7 +748,7 @@ def execute_epoch(
         optimizer.step()
 
         # Compute Macro IoU for the batch (excluding class 19)
-        train_iou += compute_batch_macro_iou(student_logits, y, num_classes=19)
+        train_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
 
 
     # Compute Step Metrics
@@ -850,7 +762,7 @@ def execute_epoch(
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    loss_fn: Callable[[Logits, BatchMask], Scalar],
+    loss_fn: nn.Module,
     device: torch.device
 ) -> tuple[float, float]:
     """Evaluate the model on a dataloader and return mean loss and macro IoU.
@@ -865,7 +777,7 @@ def evaluate(
         Segmentation model being evaluated.
     dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
         Batched validation data.
-    loss_fn : Callable[[Logits, BatchMask], Scalar]
+    loss_fn : nn.Module
         Clean loss callable that consumes ``(logits, one-hot targets)``.
     device : torch.device
         Device the evaluation runs on.
@@ -906,51 +818,59 @@ def evaluate(
 
 @jaxtyped(typechecker=beartype)
 def train(
-    teacher: nn.Module,
-    student: nn.Module,
+    model: nn.Module,
     train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     scheduler: lr_scheduler.ReduceLROnPlateau | None,
-    loss_fn: DistillationLoss,
+    loss_fn: nn.Module,
     epochs: int,
     train_device: torch.device,
-    eval_device: torch.device
+    eval_device: torch.device,
 ) -> Dict[str, List[float]]:
-    """Train the student via knowledge distillation from the teacher.
+    """Execute the full training and validation loop across multiple epochs.
 
-    Each epoch runs a distillation pass (``loss_fn``) to update the student and
-    then evaluates the student against the hard ground-truth masks with a plain
-    Dice loss. The teacher is used only as the source of soft targets and is
-    never updated.
+    This function coordinates model training, validation evaluation, learning
+    rate scheduling, best-checkpoint tracking, and metric logging across epochs.
+    At the conclusion of training, the model parameters are restored to the state
+    achieving the lowest validation loss.
+
+    Steps
+    -----
+    1. Initialize the metric recording container.
+    2. For each epoch, execute ``execute_epoch`` to update model weights on training batches.
+    3. Evaluate the updated model on the validation set using ``evaluate``.
+    4. Save a detached copy of model weights whenever validation loss reaches a new minimum.
+    5. Step the learning rate scheduler based on validation loss if one is configured.
+    6. Log epoch metrics and append values to the session history.
+    7. Restore the best-performing model checkpoint before returning history.
 
     Parameters
     ----------
-    teacher : nn.Module
-        Pre-trained model producing the soft targets.
-    student : nn.Module
-        Model being trained.
-    train_dataloader : DataLoader
-        Training data loader.
-    eval_dataloader : DataLoader
-        Validation data loader.
+    model : nn.Module
+        Neural network model to be trained and evaluated.
+    train_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Loader yielding training batches of (image, mask) pairs.
+    eval_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Loader yielding validation batches of (image, mask) pairs.
     optimizer : torch.optim.Optimizer
-        Optimizer updating the student.
-    scheduler : lr_scheduler.ReduceLROnPlateau | None
-        Optional learning-rate scheduler stepped on the eval loss.
-    loss_fn : DistillationLoss
-        Distillation loss combining Dice and KL divergence.
+        Optimizer used to update model parameters.
+    scheduler : lr_scheduler.ReduceLROnPlateau or None
+        Learning rate scheduler adjusting step size based on validation loss.
+    loss_fn : nn.Module
+        Loss function module calculating error between predictions and targets.
     epochs : int
-        Number of training epochs.
+        Total number of training epochs to execute.
     train_device : torch.device
-        Device used for training.
+        Hardware device hosting model and batches during training.
     eval_device : torch.device
-        Device used for evaluation.
+        Hardware device hosting model and batches during evaluation.
 
     Returns
     -------
     Dict[str, List[float]]
-        Per-epoch history of training/eval losses and macro IoU scores.
+        Dictionary mapping metric names ('loss', 'macro_iou_score', 'eval_loss',
+        'eval_macro_iou_score') to per-epoch scalar values.
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
@@ -960,12 +880,7 @@ def train(
         'eval_macro_iou_score' : []
     }
 
-    # The student is scored against hard targets alone, so evaluation uses the
-    # clean compound loss (without the teacher's soft targets) rather than the
-    # combined distillation objective.
-    eval_loss_fn = loss_fn.hard_loss
-
-    # Track the checkpoint with the lowest validation loss so the final student
+    # Track the checkpoint with the lowest validation loss so the final model
     # can be reverted to the best-seen weights instead of the last epoch's.
     best_eval_loss = float('inf')
     best_model_state: Dict[str, Tensor] | None = None
@@ -975,8 +890,7 @@ def train(
         # Execute Epoch
         print(f'\nEpoch {epoch + 1}/{epochs}')
         train_loss, train_macro_iou = execute_epoch(
-            teacher,
-            student,
+            model,
             train_dataloader,
             optimizer,
             loss_fn,
@@ -984,10 +898,10 @@ def train(
         )
 
         # Evaluate Model
-        eval_loss, eval_macro_iou = evaluate(
-            student,
+        eval_loss, eval_iou = evaluate(
+            model,
             eval_dataloader,
-            eval_loss_fn,
+            loss_fn,
             eval_device
         )
 
@@ -997,7 +911,7 @@ def train(
             best_eval_loss = eval_loss
             best_model_state = {
                 name: param.detach().cpu().clone()
-                for name, param in student.state_dict().items()
+                for name, param in model.state_dict().items()
             }
 
         # Execute schedular step
@@ -1007,7 +921,7 @@ def train(
             current_lr = optimizer.param_groups[0]['lr']
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
+        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_iou:.4f}'
 
         if scheduler:
             print(log_text + f' - lr: {current_lr}')
@@ -1018,13 +932,12 @@ def train(
         session['loss'].append(train_loss)
         session['macro_iou_score'].append(train_macro_iou)
         session['eval_loss'].append(eval_loss)
-        session['eval_macro_iou_score'].append(eval_macro_iou)
+        session['eval_macro_iou_score'].append(eval_iou)
 
-    # Restore the best checkpoint so the student returned to the caller (and
-    # the one evaluated on the test set downstream) reflects the lowest eval
-    # loss.
+    # Restore the best checkpoint so the model returned to the caller (and the
+    # one evaluated on the test set downstream) reflects the lowest eval loss.
     if best_model_state is not None:
-        student.load_state_dict(best_model_state)
+        model.load_state_dict(best_model_state)
 
     # Return Session Metrics
     return session
@@ -1349,6 +1262,7 @@ def main() -> None:
             boundary_class_ids=BOUNDARY_CLASS_IDS,
         )
 
+    # Build sampler drawing minority-class frames more frequently with replacement
     train_sampler = WeightedRandomSampler(
         weights=train_sample_weights.tolist(),
         num_samples=len(train_ds),
@@ -1373,33 +1287,16 @@ def main() -> None:
         shuffle=Configuration.APPLY_SHUFFLE
     )
 
-    # Load the pre-trained teacher from disk (saved by ``train_teacher.py``) and
-    # freeze it. The teacher only produces soft targets, so its parameters must
-    # not receive gradient updates.
-    teacher_path = "./model/teacher.pt"
-    teacher = cast(
-        nn.Module,
-        torch.load(teacher_path, map_location=Configuration.DEVICE, weights_only=False),
-    )
-    teacher = teacher.to(Configuration.DEVICE)
-    teacher.eval()
-    for param in teacher.parameters():
-        param.requires_grad = False
-
-    # Build a smaller student network that learns to mimic the teacher's
-    # softened predictions. ``mobilenet_v2`` is a lighter backbone than the
-    # teacher's ``resnet18``.
-    student = smp.Unet(
-        encoder_name="mobilenet_v2",
+    model = smp.Unet(
+        encoder_name="resnet18",
         encoder_weights="imagenet",
         in_channels=Configuration.CHANNELS,
         classes=Configuration.NUM_CLASSES
     )
-    student = student.to(Configuration.DEVICE)
 
     print(
         summary(
-                model=student,
+                model=model,
                 input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
                 col_names=["output_size", "num_params", "trainable"],
                 col_width=30,
@@ -1408,25 +1305,18 @@ def main() -> None:
             )
     )
 
-    # Define Loss Function
-    # Mirror the teacher's clean loss: a compound Dice + Focal loss. This is
-    # the hard signal inside :class:`DistillationLoss`, so the student starts
-    # from the same clean objective the teacher was trained with before the
-    # soft KL-distillation term is blended in. An :class:`CompoundLoss`
-    # ``nn.Module`` is used so it automatically collapses the one-hot masks into
-    # class indices for the SMP losses.
-    compound_loss = CompoundLoss(
+    # Instantiate the compound loss module combining Dice and Focal losses.
+    # An nn.Module subclass is used so it satisfies the jaxtyped/beartype constraint
+    # (loss_fn: nn.Module) and automatically handles one-hot to class-index target mapping.
+    loss_fn = CompoundLoss(
         dice_weight=0.5,
         focal_weight=1.0,
         ignore_index=19,
     )
 
-    loss_fn = DistillationLoss(hard_loss=compound_loss, temperature=3.0, alpha=0.5)
-
-    # Define optimizer over the student's parameters only; the teacher is
-    # frozen and must stay out of the optimizer.
+    # Define optimizer
     optimizer = torch.optim.AdamW(
-        student.parameters(),
+        model.parameters(),
         lr=Configuration.LR
     )
 
@@ -1437,14 +1327,13 @@ def main() -> None:
         patience=Configuration.PATIENCE
     )
 
-    print('Distilling Knowledge From Teacher To Student')
+    print('Training U-Net Model')
     print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
     print('----------------------------------')
 
     # Generate training session config
     session_config = {
-        'teacher'             : teacher,
-        'student'             : student,
+        'model'               : model,
         'train_dataloader'    : train_loader,
         'eval_dataloader'     : val_loader,
         'optimizer'           : optimizer,
@@ -1456,31 +1345,31 @@ def main() -> None:
     }
 
     # Execute Training Session
-    student_session_history = train(**session_config)
+    unet_session_history = train(**session_config)
 
-    # Create Model directory if it does not already exist (it is created by the
-    # teacher run, but this script should still work standalone).
-    model_name = 'student'
+    # Create Model directory
+    model_name = 'teacher'
     model_path = './model/'
-    os.makedirs(model_path, exist_ok=True)
+    os.mkdir(model_path)
 
     # Save Model
-    torch.save(student, model_path + model_name + '.pt')
+    torch.save(model, model_path + model_name + '.pt')
 
-    # Convert student history dict to DataFrame
-    student_session_history_df = pd.DataFrame(student_session_history)
-    print(student_session_history_df)
+    # Convert U-Net history dict to DataFrame
+    unet_session_history_df = pd.DataFrame(unet_session_history)
+    print("Loss and Macro IoU Scores after 20 epochs")
+    print(unet_session_history_df)
 
-    # Plot student Session Training History
+    # Plot U-Net Session Training History
     plot_training_curves(
-        student_session_history,
+        unet_session_history,
         fig_size=(20, 20)
     )
 
-    # Evaluate the best checkpoint (``train`` restores it into ``student``) on
+    # Evaluate the best checkpoint (``train`` restores it into ``model``) on
     # the test set and report the segmentation metrics once.
     test_metrics = evaluate_segmentation_metrics(
-        student, test_loader, Configuration.DEVICE
+        model, test_loader, Configuration.DEVICE
     )
     print('\nFinal test-set metrics (best checkpoint):')
     print(f'  Pixel Accuracy : {test_metrics["pixel_accuracy"]:.4f}')
@@ -1495,28 +1384,28 @@ def main() -> None:
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
 
     # Generate Segmentation Metrics
-    student_metrics = compute_metrics(
-        student, test_loader, Configuration.DEVICE
+    unet_metrics = compute_metrics(
+        model, test_loader, Configuration.DEVICE
     )
 
     # Create copy of test df
-    student_test_df = test_df.copy()
+    unet_test_df = test_df.copy()
 
     # Concatenate Metrics onto copied df
-    student_test_df = pd.concat(
-        (student_test_df, pd.DataFrame(student_metrics)),
+    unet_test_df = pd.concat(
+        (unet_test_df, pd.DataFrame(unet_metrics)),
         axis=1
     )
 
     # View df
-    print(student_test_df[:5])
+    print(unet_test_df[:5])
 
     # Export a grid of random test samples (image / image+true mask /
     # image+predicted mask) so the model output can be inspected visually.
     visualize_predictions(
-        student,
+        model,
         test_df,
-        Configuration.DEVICE
+        torch.device(Configuration.DEVICE)
     )
 
 

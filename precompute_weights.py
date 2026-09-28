@@ -1,3 +1,4 @@
+import glob
 import os
 from typing import List, Optional, Set, Tuple
 
@@ -7,6 +8,8 @@ from PIL import Image
 
 from beartype import beartype
 from jaxtyping import Float64, UInt8, jaxtyped
+
+from sklearn.model_selection import train_test_split
 
 
 # BDD100k color-label palette. The row index is the class id (0-19).
@@ -63,11 +66,23 @@ ClassCounts = Float64[np.ndarray, "c"]  # per-class counts, 1-D
 SampleWeightsArray = Float64[np.ndarray, "_"]  # per-sample weights, 1-D
 
 
-class ImagePath:
-    """Default directory paths for BDD100k masks and cached class weights."""
+class Configuration:
+    NUM_CLASSES = 20
+    SEED = 768
 
-    BASE: str = "./data/bdd100k"
-    CLASS_WEIGHTS_PATH: str = "./data/class_weights.npy"
+
+class Path:
+    BASE = "./data/bdd100k"
+
+    SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
+    SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
+    SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
+
+    IMAGE_FOLDER = BASE + "/images_10k"
+    IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
+    IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
+
+    CLASS_WEIGHTS_PATH = "./data/class_weights.npy"
 
 
 @jaxtyped(typechecker=beartype)
@@ -530,6 +545,97 @@ def load_or_compute_class_weights(
     )
 
 
+def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
+    file_path_split = complete_mask_path.split("/")
+    mask_file_name = file_path_split[-1].split("_")[0]
+
+    image_path = base_image_path + "/" + mask_file_name + ".jpg"
+    return image_path
+
+
+def find_train_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_TRAIN_PATH)
+
+
+def find_val_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
+
+
+def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
+    file_path_split = complete_image_path.split("/")
+    mask_file_name = file_path_split[-1].split(".")[0]
+
+    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
+    return mask_path
+
+
+def find_train_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
+
+
+def find_val_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
+
+
+def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # load train, then split into train-test
+    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    problematic_masks = []
+    for complete_mask_path in train_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_masks.append(complete_mask_path)
+                train_mask_paths.remove(complete_mask_path)
+    print(f"Problematic masks: {problematic_masks}")
+
+    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    problematic_images = []
+    for complete_image_path in train_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_images.append(complete_image_path)
+                train_image_paths.remove(complete_image_path)
+                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+    print(f"Problematic images: {problematic_images}")
+
+    train_test_df = pd.DataFrame({
+        "image_paths": train_image_paths,
+        "mask_paths": train_mask_paths,
+    })
+    train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
+
+    # load val
+    val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    problematic_val_masks = []
+    for complete_mask_path in val_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_masks.append(complete_mask_path)
+                val_mask_paths.remove(complete_mask_path)
+    print(f"Problematic val masks: {problematic_val_masks}")
+
+    val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    problematic_val_images = []
+    for complete_image_path in val_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_images.append(complete_image_path)
+                val_image_paths.remove(complete_image_path)
+                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+    print(f"Problematic val images: {problematic_val_images}")
+
+    val_df = pd.DataFrame({
+        "image_paths": val_image_paths,
+        "mask_paths": val_mask_paths,
+    })
+
+    return train_df, val_df, test_df
+
+
 def main() -> None:
     """Scan training masks, calculate sample weights for minority classes, and save to NPY.
 
@@ -538,23 +644,19 @@ def main() -> None:
     1. Load dataset splits using the project's standard preprocessing logic.
     2. Calculate sample weights and serialize them to the specified NPY file.
     """
-
-    # Import Configuration and dataset loader locally to prevent circular module imports
-    from train_teacher import Configuration, load_dataset_from_files
-
     print("Loading BDD100k training dataset splits...")
     train_df, _, _ = load_dataset_from_files()
 
     print(f"Calculating and persisting class weights for {len(train_df)} training samples...")
     weights = calculate_and_save_class_weights(
         df=train_df,
-        output_path=ImagePath.CLASS_WEIGHTS_PATH,
+        output_path=Path.CLASS_WEIGHTS_PATH,
         num_classes=Configuration.NUM_CLASSES,
         boundary_class_ids=BOUNDARY_CLASS_IDS,
         method="relative_to_max",
         threshold=0.05,
     )
-    print(f"Execution complete. Output shape: {weights.shape}, file: '{ImagePath.CLASS_WEIGHTS_PATH}'.")
+    print(f"Execution complete. Output shape: {weights.shape}, file: '{Path.CLASS_WEIGHTS_PATH}'.")
 
 
 if __name__ == "__main__":
