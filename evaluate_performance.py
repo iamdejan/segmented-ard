@@ -701,7 +701,9 @@ def parse_arguments() -> argparse.Namespace:
     -----
     1. Configure an ArgumentParser with an optional checkpoint path argument.
     2. Add an optional batch-size argument to override the configuration.
-    3. Parse and return the argument namespace.
+    3. Add an optional number-of-runs argument controlling how many times
+       evaluation is repeated before averaging.
+    4. Parse and return the argument namespace.
 
     Returns
     -------
@@ -723,6 +725,12 @@ def parse_arguments() -> argparse.Namespace:
         default=Configuration.BATCH_SIZE,
         help="DataLoader batch size. Defaults to the configuration value.",
     )
+    parser.add_argument(
+        "--num-runs",
+        type=int,
+        default=5,
+        help="Number of evaluation runs over which metrics are averaged. Defaults to 5.",
+    )
     return parser.parse_args()
 
 
@@ -731,11 +739,13 @@ def main() -> None:
 
     Steps
     -----
-    1. Parse the checkpoint and batch-size arguments.
+    1. Parse the checkpoint, batch-size, and number-of-runs arguments.
     2. Load the trained model onto the target device.
     3. Load the BDD100k test partition with the training-compatible transforms.
     4. Build the evaluation DataLoader.
-    5. Run :func:`evaluate_segmentation_metrics` and log the final test metrics.
+    5. Run :func:`evaluate_segmentation_metrics` ``N`` times and average every
+       reported metric (scalars and per-class lists alike) so the logged numbers
+       are robust to single-run variance.
     """
     args = parse_arguments()
 
@@ -767,21 +777,41 @@ def main() -> None:
     )
 
     # Compute the same metrics the training scripts report on their best
-    # checkpoint so the numbers can be compared one-to-one.
-    test_metrics = evaluate_segmentation_metrics(
-        model, test_loader, Configuration.DEVICE
-    )
+    # checkpoint so the numbers can be compared one-to-one. Evaluate multiple
+    # times and average so the reported metrics are stable and robust to any
+    # single-run variance.
+    num_runs = args.num_runs
+    print(f"Evaluating over {num_runs} run(s)...")
+    run_metrics: List[Dict[str, float | List[float]]] = []
+    for run_idx in range(num_runs):
+        metrics = evaluate_segmentation_metrics(
+            model, test_loader, Configuration.DEVICE
+        )
+        run_metrics.append(metrics)
+        print(f"  Run {run_idx + 1}/{num_runs} complete.")
 
-    print('\nFinal test-set metrics:')
-    print(f'  Pixel Accuracy : {test_metrics["pixel_accuracy"]:.4f}')
-    print(f'  IoU (macro)    : {test_metrics["iou"]:.4f}')
-    print(f'  Mean IoU       : {test_metrics["mean_iou"]:.4f}')
-    print(f'  Dice (macro)   : {test_metrics["dice"]:.4f}')
+    # Reduce the per-run results into a single averaged metric dictionary. Scalar
+    # metrics (e.g. pixel accuracy, IoU, Dice) are averaged directly, while the
+    # per-class lists are averaged element-wise so class ``i`` still reports the
+    # mean of class ``i`` across runs.
+    averaged_metrics: Dict[str, float | List[float]] = {}
+    for key in run_metrics[0]:
+        values = [run[key] for run in run_metrics]
+        if all(isinstance(value, float) for value in values):
+            averaged_metrics[key] = float(np.mean(values))
+        else:
+            averaged_metrics[key] = list(np.mean(np.array(values), axis=0))
+
+    print('\nFinal test-set metrics (averaged over %d runs):' % num_runs)
+    print(f'  Pixel Accuracy : {averaged_metrics["pixel_accuracy"]:.4f}')
+    print(f'  IoU (macro)    : {averaged_metrics["iou"]:.4f}')
+    print(f'  Mean IoU       : {averaged_metrics["mean_iou"]:.4f}')
+    print(f'  Dice (macro)   : {averaged_metrics["dice"]:.4f}')
     print('  Class-wise Pixel Accuracy:')
-    for class_id, acc in enumerate(cast(List[float], test_metrics["class_pixel_accuracy"])):
+    for class_id, acc in enumerate(cast(List[float], averaged_metrics["class_pixel_accuracy"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {acc:.4f}')
     print('  Class-wise IoU:')
-    for class_id, class_iou in enumerate(cast(List[float], test_metrics["class_iou"])):
+    for class_id, class_iou in enumerate(cast(List[float], averaged_metrics["class_iou"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
 
 
