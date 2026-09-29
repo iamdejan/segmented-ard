@@ -146,7 +146,6 @@ class Configuration:
     # Total batch size across both GPUs.
     # 16 total = 8 images on GPU 0 and 8 images on GPU 1.
     BATCH_SIZE = 16 if torch.cuda.device_count() >= 2 else 8
-    ACCUMULATION_STEPS = 1
     LR = 1e-4
     PATIENCE = 8
 
@@ -951,7 +950,7 @@ def train(
         raw_model = model.module if hasattr(model, "module") else model
         raw_model.load_state_dict(best_model_state)
 
-    # Return Session Metrics
+    # Return raw model and session metrics
     return raw_model, session
 
 
