@@ -137,16 +137,15 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    NUM_DEVICES = 1
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    NUM_DEVICES = torch.cuda.device_count()
     NUM_WORKERS = 2
 
     NUM_CLASSES = 20
     EPOCHS = 20
-    BATCH_SIZE = (
-        16 if torch.cuda.device_count() < 2
-        else (16 * torch.cuda.device_count())
-    )
+    # Total batch size across both GPUs.
+    # 16 total = 8 images on GPU 0 and 8 images on GPU 1.
+    BATCH_SIZE = 16 if torch.cuda.device_count() >= 2 else 8
     LR = 1e-4
     PATIENCE = 8
 
@@ -687,7 +686,7 @@ def train(
     epochs: int,
     train_device: torch.device,
     eval_device: torch.device,
-) -> Dict[str, List[float]]:
+) -> tuple[nn.Module, Dict[str, List[float]]]:
     """Execute the full training and validation loop across multiple epochs.
 
     This function coordinates model training, validation evaluation, learning
@@ -728,8 +727,9 @@ def train(
 
     Returns
     -------
-    Dict[str, List[float]]
-        Dictionary mapping metric names ('loss', 'macro_iou_score', 'eval_loss',
+    tuple[nn.Module, Dict[str, List[float]]]
+        The unwrapped model with the best checkpoint restored, and a dictionary
+        mapping metric names ('loss', 'macro_iou_score', 'eval_loss',
         'eval_macro_iou_score') to per-epoch scalar values.
     """
     # Initialize training session
@@ -765,13 +765,16 @@ def train(
             eval_device
         )
 
+        # Access the raw unwrapped model so saved weights are agnostic of DataParallel
+        raw_model = model.module if isinstance(model, nn.DataParallel) else model
+
         # Keep a snapshot whenever the validation loss improves so the best
         # checkpoint is available for the final test evaluation.
         if eval_loss < best_eval_loss:
             best_eval_loss = eval_loss
             best_model_state = {
                 name: param.detach().cpu().clone()
-                for name, param in model.state_dict().items()
+                for name, param in raw_model.state_dict().items()
             }
 
         # Execute schedular step
@@ -797,10 +800,11 @@ def train(
     # Restore the best checkpoint so the model returned to the caller (and the
     # one evaluated on the test set downstream) reflects the lowest eval loss.
     if best_model_state is not None:
-        model.load_state_dict(best_model_state)
+        raw_model = model.module if isinstance(model, nn.DataParallel) else model
+        raw_model.load_state_dict(best_model_state)
 
-    # Return Session Metrics
-    return session
+    # Return raw model and session metrics
+    return raw_model, session
 
 
 def plot_training_curves(
@@ -930,7 +934,9 @@ def visualize_predictions(
     sample_ds = BDDSegmentationDataset(sample_df)
 
     # Switch to inference once for the whole grid; no gradients are needed.
-    model.eval()
+    # Use the underlying unwrapped module for batch_size=1 inference
+    eval_model = model.module if isinstance(model, nn.DataParallel) else model
+    eval_model.eval()
 
     for row in range(num_rows):
         # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
@@ -946,7 +952,7 @@ def visualize_predictions(
         # Foward pass, then collapse the 20-class logits to one class id per
         # pixel so the output can be colourised.
         with torch.inference_mode():
-            logits = model(image_tensor)
+            logits = eval_model(image_tensor)
         pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
 
         # Colour the predicted class map, then bring it back to [0, 1] for
@@ -1049,6 +1055,7 @@ def main() -> None:
         in_channels=Configuration.CHANNELS,
         classes=Configuration.NUM_CLASSES
     )
+    model = model.to(Configuration.DEVICE)
 
     print(
         summary(
@@ -1060,6 +1067,11 @@ def main() -> None:
                 depth=5
             )
     )
+
+    # Wrap model in DataParallel if 2 or more GPUs are present
+    if torch.cuda.device_count() > 1:
+        print(f"Utilizing {torch.cuda.device_count()} GPUs with DataParallel!")
+        model = nn.DataParallel(model)
 
     # Instantiate the compound loss module combining Dice and Focal losses.
     # An nn.Module subclass is used so it satisfies the jaxtyped/beartype constraint
@@ -1101,7 +1113,7 @@ def main() -> None:
     }
 
     # Execute Training Session
-    unet_session_history = train(**session_config)
+    model, unet_session_history = train(**session_config)
 
     # Create Model directory
     model_name = 'teacher'

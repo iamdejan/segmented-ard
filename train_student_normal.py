@@ -137,16 +137,15 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    NUM_DEVICES = 1
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    NUM_DEVICES = torch.cuda.device_count()
     NUM_WORKERS = 2
 
     NUM_CLASSES = 20
     EPOCHS = 20
-    BATCH_SIZE = (
-        16 if torch.cuda.device_count() < 2
-        else (16 * torch.cuda.device_count())
-    )
+    # Total batch size across both GPUs.
+    # 16 total = 8 images on GPU 0 and 8 images on GPU 1.
+    BATCH_SIZE = 16 if torch.cuda.device_count() >= 2 else 8
     LR = 1e-4
     PATIENCE = 8
 
@@ -776,7 +775,7 @@ def train(
     epochs: int,
     train_device: torch.device,
     eval_device: torch.device
-) -> Dict[str, List[float]]:
+) -> tuple[nn.Module, Dict[str, List[float]]]:
     """Train the student via knowledge distillation from the teacher.
 
     Each epoch runs a distillation pass (``loss_fn``) to update the student and
@@ -809,8 +808,9 @@ def train(
 
     Returns
     -------
-    Dict[str, List[float]]
-        Per-epoch history of training/eval losses and macro IoU scores.
+    tuple[nn.Module, Dict[str, List[float]]]
+        The unwrapped student with the best checkpoint restored, and the
+        per-epoch history of training/eval losses and macro IoU scores.
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
@@ -851,13 +851,16 @@ def train(
             eval_device
         )
 
+        # Access the raw unwrapped student so saved weights are agnostic of DataParallel
+        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+
         # Keep a snapshot whenever the validation loss improves so the best
         # checkpoint is available for the final test evaluation.
         if eval_loss < best_eval_loss:
             best_eval_loss = eval_loss
             best_model_state = {
                 name: param.detach().cpu().clone()
-                for name, param in student.state_dict().items()
+                for name, param in raw_student.state_dict().items()
             }
 
         # Execute schedular step
@@ -884,10 +887,11 @@ def train(
     # the one evaluated on the test set downstream) reflects the lowest eval
     # loss.
     if best_model_state is not None:
-        student.load_state_dict(best_model_state)
+        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+        raw_student.load_state_dict(best_model_state)
 
-    # Return Session Metrics
-    return session
+    # Return raw student and session metrics
+    return raw_student, session
 
 
 def plot_training_curves(
@@ -1017,7 +1021,9 @@ def visualize_predictions(
     sample_ds = BDDSegmentationDataset(sample_df)
 
     # Switch to inference once for the whole grid; no gradients are needed.
-    model.eval()
+    # Use the underlying unwrapped module for batch_size=1 inference
+    eval_model = model.module if isinstance(model, nn.DataParallel) else model
+    eval_model.eval()
 
     for row in range(num_rows):
         # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
@@ -1033,7 +1039,7 @@ def visualize_predictions(
         # Foward pass, then collapse the 20-class logits to one class id per
         # pixel so the output can be colourised.
         with torch.inference_mode():
-            logits = model(image_tensor)
+            logits = eval_model(image_tensor)
         pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
 
         # Colour the predicted class map, then bring it back to [0, 1] for
@@ -1164,6 +1170,11 @@ def main() -> None:
             )
     )
 
+    # Wrap student in DataParallel if 2 or more GPUs are present
+    if torch.cuda.device_count() > 1:
+        print(f"Utilizing {torch.cuda.device_count()} GPUs with DataParallel!")
+        student = nn.DataParallel(student)
+
     # Define Loss Function
     # Mirror the teacher's clean loss: a compound Dice + Focal loss. This is
     # the hard signal inside :class:`DistillationLoss`, so the student starts
@@ -1212,7 +1223,7 @@ def main() -> None:
     }
 
     # Execute Training Session
-    student_session_history = train(**session_config)
+    student, student_session_history = train(**session_config)
 
     # Create Model directory if it does not already exist (it is created by the
     # teacher run, but this script should still work standalone).

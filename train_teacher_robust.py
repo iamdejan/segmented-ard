@@ -875,8 +875,9 @@ def train(
 
     Returns
     -------
-    Dict[str, List[float]]
-        Per-epoch lists of training/eval loss and macro IoU.
+    tuple[nn.Module, Dict[str, List[float]]]
+        The unwrapped model with the best checkpoint restored, and the per-epoch
+        metric history of training/eval loss and macro IoU.
     """
 
     # Initialize training session
@@ -913,7 +914,7 @@ def train(
         )
 
         # Access the raw unwrapped model so saved weights are agnostic of DataParallel
-        raw_model = model.module if hasattr(model, "module") else model
+        raw_model = model.module if isinstance(model, nn.DataParallel) else model
 
         # Keep a snapshot whenever the validation loss improves so the best
         # checkpoint is available for the final test evaluation.
@@ -947,7 +948,7 @@ def train(
     # Restore the best checkpoint so the model returned to the caller (and the
     # one evaluated on the test set downstream) reflects the lowest eval loss.
     if best_model_state is not None:
-        raw_model = model.module if hasattr(model, "module") else model
+        raw_model = model.module if isinstance(model, nn.DataParallel) else model
         raw_model.load_state_dict(best_model_state)
 
     # Return raw model and session metrics
@@ -1082,7 +1083,7 @@ def visualize_predictions(
 
     # Switch to inference once for the whole grid; no gradients are needed.
     # Use the underlying unwrapped module for batch_size=1 inference
-    eval_model = model.module if hasattr(model, "module") else model
+    eval_model = model.module if isinstance(model, nn.DataParallel) else model
     eval_model.eval()
 
     for row in range(num_rows):

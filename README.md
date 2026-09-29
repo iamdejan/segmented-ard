@@ -4,12 +4,13 @@ Implementation of adversarial robust distillation for semantic segmentation task
 
 ## Project Structure
 
-- `train_teacher.py` - Trains a U-Net (ResNet-18) teacher for BDD100k semantic
-  segmentation with bias-correction sampling (weighted random sampler).
+- `train_teacher_normal.py` - Trains a U-Net (ResNet-18) teacher for BDD100k
+  semantic segmentation with bias-correction sampling (weighted random sampler).
 - `train_teacher_robust.py` - Trains a TRADES robust teacher using adversarial
   training (KL-divergence robustness term).
-- `train_student.py` - Distills the teacher into a smaller U-Net (MobileNet-V2)
-  student via knowledge distillation (Dice+Focal hard loss + KL soft loss).
+- `train_student_normal.py` - Distills the teacher into a smaller U-Net
+  (MobileNet-V2) student via knowledge distillation (Dice+Focal hard loss + KL
+  soft loss).
 - `evaluate_performance.py` - Loads a trained checkpoint (default
   `./model/teacher.pt`) and reports the final segmentation metrics on the test
   split. It also renders a grid of the first test samples next to their
