@@ -8,7 +8,6 @@ Attack Success Rate (ASR).
 
 import argparse
 import glob
-import os
 from typing import Dict, List, Optional, Tuple, Union, cast
 
 import albumentations as A
@@ -476,53 +475,6 @@ def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
     return palette[class_mask.astype(np.int64)]
 
 
-def resolve_model_path(model_arg: str) -> str:
-    """Locate the requested checkpoint file on disk.
-
-    This function makes the evaluation script reusable for any model name
-    whether passed as a bare name (e.g. 'teacher'), filename ('teacher.pt'),
-    or full path ('./model/teacher.pt').
-
-    Steps
-    -----
-    1. Check if ``model_arg`` directly exists as a file.
-    2. Search common fallback paths (appending ``.pt`` and checking the ``model/`` directory).
-    3. Return the first matching path, or raise ``FileNotFoundError`` if unresolved.
-
-    Parameters
-    ----------
-    model_arg : str
-        Model name, filename, or filesystem path provided via command line.
-
-    Returns
-    -------
-    str
-        Resolved, valid filesystem path to the model checkpoint.
-
-    Raises
-    ------
-    FileNotFoundError
-        If no checkpoint file matching ``model_arg`` exists on disk.
-    """
-    candidates = [
-        model_arg,
-        f"{model_arg}.pt",
-        os.path.join("model", model_arg),
-        os.path.join("model", f"{model_arg}.pt"),
-        os.path.join(".", "model", model_arg),
-        os.path.join(".", "model", f"{model_arg}.pt"),
-    ]
-
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-
-    raise FileNotFoundError(
-        f"Could not locate model checkpoint for '{model_arg}'. "
-        f"Searched candidate paths:\n  - " + "\n  - ".join(candidates)
-    )
-
-
 def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
     """Load a trained segmentation model checkpoint from disk.
 
@@ -553,13 +505,12 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
     TypeError
         If the loaded checkpoint object is not an ``nn.Module``.
     """
-    resolved_path = resolve_model_path(model_path)
     # weights_only=False is required because the project saves entire nn.Module objects
-    checkpoint = torch.load(resolved_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
     if not isinstance(checkpoint, nn.Module):
         raise TypeError(
-            f"Checkpoint at '{resolved_path}' loaded an object of type {type(checkpoint)}, "
+            f"Checkpoint at '{model_path}' loaded an object of type {type(checkpoint)}, "
             "but an nn.Module instance was expected."
         )
 
@@ -1011,8 +962,9 @@ def parse_arguments() -> argparse.Namespace:
     )
     # The 1 mandatory argument requested by the user
     parser.add_argument(
-        "model_path",
+        "--checkpoint",
         type=str,
+        required=True,
         help="Filename or path of the trained model checkpoint (.pt file).",
     )
     parser.add_argument(
@@ -1066,9 +1018,8 @@ def main() -> None:
     print("=" * 68)
 
     # Resolve and load model checkpoint
-    resolved_path = resolve_model_path(args.model_path)
-    print(f"Loading checkpoint from: {resolved_path}")
-    model = load_trained_model(resolved_path, Configuration.DEVICE)
+    print(f"Loading checkpoint from: {args.checkpoint}")
+    model = load_trained_model(args.checkpoint, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
     # Load dataset test partition
