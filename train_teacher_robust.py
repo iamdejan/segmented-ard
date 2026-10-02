@@ -1,3 +1,4 @@
+import gc
 import glob
 import os
 
@@ -24,13 +25,8 @@ from typing import Dict, List, cast
 from sklearn.model_selection import train_test_split
 import segmentation_models_pytorch as smp
 
-from jaxtyping import Float, UInt8, jaxtyped
+from jaxtyping import Float, Int64, UInt8, jaxtyped
 from beartype import beartype
-
-from precompute_weights import (
-    BOUNDARY_CLASS_IDS,
-    calculate_and_save_class_weights,
-)
 
 
 # Shape aliases that document the tensor layout at each stage of the pipeline.
@@ -40,14 +36,14 @@ from precompute_weights import (
 # ``jaxtyped`` + ``beartype``, so a shape mismatch raises a ``TypeCheckError``
 # instead of a confusing downstream broadcast error.
 ImageTensor = Float[Tensor, "3 h w"]  # single image, channel-first layout
-MaskTensor = Float[Tensor, "c h w"]  # one-hot mask, ``c == NUM_CLASSES``
+IndexMaskTensor = Int64[Tensor, "h w"]  # single class-index mask
 BatchImage = Float[Tensor, "b 3 h w"]  # collated batch of images
-BatchMask = Float[Tensor, "b c h w"]  # collated batch of one-hot masks
+BatchIndexMask = Int64[Tensor, "b h w"]  # collated batch of class-index masks
 Logits = Float[Tensor, "b c h w"]  # model output, ``c == NUM_CLASSES``
-ClassMask = Float[Tensor, "c h w"]  # per-sample probability/binary mask, ``c`` channels
 Scalar = Float[Tensor, ""]  # scalar (0-dim) tensor
 NumpyImage = Float[np.ndarray, "h w 3"]  # single image, channels-last layout
 ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class id map (numpy)
+RawColorImage = UInt8[np.ndarray, "h w 3"]  # single image, channels-last uint8 layout
 
 
 # BDD100k color-label palette. The row index is the class id (0-19), matching
@@ -55,34 +51,36 @@ ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class id map (numpy)
 # same palette so they render side by side with the ground-truth color labels
 # stored on disk. The exact colour per class only needs to be distinct and
 # consistent; it mirrors the default BDD100k colours.
-CLASS_COLORS = np.array([
-    [128,  64, 128],   # 0  - Road
-    [244,  35, 232],   # 1  - Sidewalk
-    [ 70,  70,  70],   # 2  - Building
-    [102, 102, 156],   # 3  - Wall
-    [190, 153, 153],   # 4  - Fence
-    [153, 153, 153],   # 5  - Pole
-    [250, 170,  30],   # 6  - Traffic Light
-    [220, 220,   0],   # 7  - Traffic Sign
-    [107, 142,  35],   # 8  - Vegetation
-    [152, 251, 152],   # 9  - Terrain
-    [ 70, 130, 180],   # 10 - Sky
-    [220,  20,  60],   # 11 - Person
-    [255,   0,   0],   # 12 - Rider
-    [  0,   0, 142],   # 13 - Car
-    [  0,   0,  70],   # 14 - Truck
-    [  0,  60, 100],   # 15 - Bus
-    [  0,  80, 100],   # 16 - Train
-    [  0,   0, 230],   # 17 - Motorcycle
-    [119,  11,  32],   # 18 - Bicycle
-    [  0,   0,   0],   # 19 - Unknown
-], dtype=np.uint8)
-
+CLASS_COLORS: np.ndarray = np.array(
+    [
+        [128, 64, 128],  # 0  - Road
+        [244, 35, 232],  # 1  - Sidewalk
+        [70, 70, 70],  # 2  - Building
+        [102, 102, 156],  # 3  - Wall
+        [190, 153, 153],  # 4  - Fence
+        [153, 153, 153],  # 5  - Pole
+        [250, 170, 30],  # 6  - Traffic Light
+        [220, 220, 0],  # 7  - Traffic Sign
+        [107, 142, 35],  # 8  - Vegetation
+        [152, 251, 152],  # 9  - Terrain
+        [70, 130, 180],  # 10 - Sky
+        [220, 20, 60],  # 11 - Person
+        [255, 0, 0],  # 12 - Rider
+        [0, 0, 142],  # 13 - Car
+        [0, 0, 70],  # 14 - Truck
+        [0, 60, 100],  # 15 - Bus
+        [0, 80, 100],  # 16 - Train
+        [0, 0, 230],  # 17 - Motorcycle
+        [119, 11, 32],  # 18 - Bicycle
+        [0, 0, 0],  # 19 - Unknown
+    ],
+    dtype=np.uint8,
+)
 
 # Human-readable names for each palette row, kept in lock-step with
 # ``CLASS_COLORS`` so class ids can be logged without consulting the palette
 # comments by hand.
-CLASS_NAMES = [
+CLASS_NAMES: list[str] = [
     "road", "sidewalk", "building", "wall", "fence", "pole",
     "traffic light", "traffic sign", "vegetation", "terrain", "sky",
     "person", "rider", "car", "truck", "bus", "train", "motorcycle",
@@ -90,118 +88,155 @@ CLASS_NAMES = [
 ]
 
 
-def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
+@jaxtyped(typechecker=beartype)
+def color_label_to_class_index(label: RawColorImage) -> ClassIndexArray:
     """Map an RGB color-label image to a per-pixel class-index map.
 
-    BDD100k stores segmentation masks as RGB PNGs whose colours are exactly
-    the entries of ``CLASS_COLORS``. Semantic segmentation needs the class id
-    per pixel (shape ``(H, W)``) rather than the RGB representation (shape
+    BDD100k stores segmentation masks as RGB PNGs whose colours are exactly the
+    entries of ``CLASS_COLORS``. Semantic segmentation needs the class id per
+    pixel (shape ``(H, W)``) rather than the RGB representation (shape
     ``(H, W, 3)``), so this conversion must happen before the mask is turned
-    into a tensor and one-hot encoded.
+    into a tensor.
+
+    Instead of allocating one boolean mask per palette colour, the RGB triplets
+    are bit-packed into single 32-bit integer keys. This turns the per-pixel
+    colour matching into single comparison instructions and avoids creating 20
+    intermediate boolean arrays for every image.
 
     Steps
     -----
     1. Initialise the output with the id of the last palette entry so that any
        unknown colour degrades to ``Unknown`` instead of producing an invalid
        index.
-    2. For each palette colour, boolean-mask the pixels whose RGB values match
-       it exactly and assign the corresponding class id. The loop is over only
-       ``NUM_CLASSES`` colours and each iteration is fully vectorised.
+    2. Pack the image's RGB channels into a single 32-bit integer ``(R << 16) |
+       (G << 8) | B`` and do the same for every palette colour.
+    3. For each packed palette key, assign the corresponding class id to every
+       pixel whose packed key matches.
 
     Parameters
     ----------
-    label : np.ndarray
-        RGB color-label array of shape ``(H, W, 3)`` with integer values.
+    label : RawColorImage
+        RGB color-label array of shape ``(H, W, 3)`` and dtype ``uint8``.
 
     Returns
     -------
-    np.ndarray
+    ClassIndexArray
         Class-index array of shape ``(H, W)`` and dtype ``uint8``, whose values
-        are in ``[0, NUM_CLASSES)``.
+        are in ``[0, len(CLASS_COLORS))``.
     """
+    if label.ndim != 3 or label.shape[-1] != 3:
+        raise ValueError(f"Expected an (H, W, 3) RGB image, got shape {label.shape}.")
+
     # Default to the last class id so unknown colours fall back gracefully
     # instead of indexing the palette out of bounds later.
-    class_ids = np.full(label.shape[:2], CLASS_COLORS.shape[0] - 1, dtype=np.uint8)
+    class_ids = np.full(label.shape[:2], len(CLASS_COLORS) - 1, dtype=np.uint8)
 
-    # Match each palette colour via exact RGB equality. This stays fast because
-    # every comparison operates on the whole image at once.
-    for class_id, (red, green, blue) in enumerate(CLASS_COLORS):
-        match = (
-            (label[..., 0] == red)
-            & (label[..., 1] == green)
-            & (label[..., 2] == blue)
-        )
-        class_ids[match] = class_id
+    # Pack RGB channels into a single int32 scalar so a class match reduces to
+    # one scalar equality check instead of three per-colour channel comparisons.
+    label_packed = (
+        (label[..., 0].astype(np.int32) << 16)
+        | (label[..., 1].astype(np.int32) << 8)
+        | label[..., 2].astype(np.int32)
+    )
+    palette_packed = (
+        (CLASS_COLORS[:, 0].astype(np.int32) << 16)
+        | (CLASS_COLORS[:, 1].astype(np.int32) << 8)
+        | CLASS_COLORS[:, 2].astype(np.int32)
+    )
+
+    # Assign class indices where the packed pixel keys match the palette keys.
+    for class_id, color_key in enumerate(palette_packed):
+        class_ids[label_packed == color_key] = class_id
 
     return class_ids
 
 
 class Configuration:
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    NUM_DEVICES = torch.cuda.device_count()
-    NUM_WORKERS = 2
+    """Global configuration settings for data loading, training, and validation."""
 
-    NUM_CLASSES = 20
-    EPOCHS = 20
-    # Total batch size across both GPUs.
-    # 16 total = 8 images on GPU 0 and 8 images on GPU 1.
-    BATCH_SIZE = 16 if torch.cuda.device_count() >= 2 else 8
-    LR = 1e-4
-    PATIENCE = 8
+    DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    NUM_DEVICES: int = torch.cuda.device_count()
+    # Two background workers overlap disk I/O with GPU execution.
+    NUM_WORKERS: int = 2
 
-    APPLY_SHUFFLE=True
-    SEED = 768
-    # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
-    # The BDD100k images used here are 720 rows (height) by 1280 columns
-    # (width)
-    ORIGINAL_IMAGE_HEIGHT = 720
-    ORIGINAL_IMAGE_WIDTH = 1280
+    NUM_CLASSES: int = 20
+    EPOCHS: int = 20
+    # Total batch size across both GPUs (8 per GPU keeps VRAM stable without OOM).
+    BATCH_SIZE: int = 16 if torch.cuda.device_count() >= 2 else 8
+    LR: float = 1e-4
+    PATIENCE: int = 8
 
-    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the resolution after downscale the images.
-    IMAGE_HEIGHT = 360
-    IMAGE_WIDTH = 640
-    CHANNELS = 3 # RGB
+    APPLY_SHUFFLE: bool = True
+    SEED: int = 768
+
+    # Spatial dimensions of raw BDD100k images before preprocessing.
+    ORIGINAL_IMAGE_HEIGHT: int = 720
+    ORIGINAL_IMAGE_WIDTH: int = 1280
+
+    # Downsampled resolution balancing spatial detail against GPU memory.
+    IMAGE_HEIGHT: int = 360
+    IMAGE_WIDTH: int = 640
+    CHANNELS: int = 3  # Standard RGB channels.
 
 
 class Path:
-    BASE = "./data/bdd100k"
+    """Filesystem path definitions for datasets, masks, and precomputed weights."""
 
-    SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
-    SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
-    SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
+    BASE: str = "./data/bdd100k"
 
-    IMAGE_FOLDER = BASE + "/images_10k"
-    IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
-    IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
+    SEGMENTATION_MASK_LABEL_FOLDER: str = BASE + "/segmentation_maps/color_labels"
+    SEGMENTATION_MASK_TRAIN_PATH: str = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
+    SEGMENTATION_MASK_VAL_PATH: str = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
 
-    CLASS_WEIGHTS_PATH = "./data/class_weights.npy"
+    IMAGE_FOLDER: str = BASE + "/images_10k"
+    IMAGE_TRAIN_PATH: str = IMAGE_FOLDER + "/train"
+    IMAGE_VAL_PATH: str = IMAGE_FOLDER + "/val"
+
+    CLASS_WEIGHTS_PATH: str = "./data/class_weights.npy"
 
 
-class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
-    def __init__(self, df: pd.DataFrame, transform: A.Compose | None = None):
-        super(BDDSegmentationDataset, self).__init__()
+class BDDSegmentationDataset(Dataset[tuple[ImageTensor, IndexMaskTensor]]):
+    """Dataset loader for BDD100k semantic segmentation.
 
-        self.image_paths: List[str] = df["image_paths"].to_list()
-        self.mask_paths: List[str] = df["mask_paths"].to_list()
-        self.transform = transform
+    Reads paired camera frames and segmentation maps from disk, applies spatial
+    and photometric augmentations, and formats tensors for PyTorch model
+    ingestion. Masks are kept as compact 2-D ``int64`` class-index maps rather
+    than one-hot ``float`` tensors to conserve host memory.
+    """
 
+    def __init__(self, df: pd.DataFrame, transform: A.Compose | None = None) -> None:
+        """Initialise file references and the transformation pipeline.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame containing ``image_paths`` and ``mask_paths`` columns.
+        transform : A.Compose | None, optional
+            Albumentations transformation pipeline. Defaults to None.
+        """
+        super().__init__()
+
+        # Materialise pandas columns to Python lists, avoiding pandas indexing
+        # overhead on every ``__getitem__`` call.
+        self.image_paths: list[str] = df["image_paths"].to_list()
+        self.mask_paths: list[str] = df["mask_paths"].to_list()
+        self.transform: A.Compose | None = transform
 
     @jaxtyped(typechecker=beartype)
     def load_sample(self, index: int) -> tuple[NumpyImage, ClassIndexArray]:
         """Load the image and its per-pixel class-index mask at ``index``.
 
-        The image is opened as RGB and normalised to ``[0, 1]``. The mask PNG
-        is likewise forced to RGB (some BDD100k color-labels carry an alpha
+        The image is opened as RGB and normalised to ``[0, 1]``. The mask PNG is
+        likewise forced to RGB (some BDD100k color-labels carry an alpha
         channel) before being collapsed from the RGB color-label format to a
-        single class id per pixel via :func:`color_label_to_class_index`. This
-        class-index representation is what the one-hot encoder and Dice loss
-        expect downstream.
+        single class id per pixel via :func:`color_label_to_class_index`.
 
         Steps
         -----
-        1. Open both files as RGB and convert them to NumPy arrays.
-        2. Normalise the image pixels to ``[0, 1]``.
-        3. Map the mask's RGB colours to class indices.
+        1. Validate ``index`` against the dataset bounds.
+        2. Open the image and normalise its pixels to ``[0, 1]``.
+        3. Open the mask, force RGB, and map its colours to class indices.
+        4. Use context managers so file descriptors are released immediately.
 
         Parameters
         ----------
@@ -220,62 +255,73 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
         IndexError
             If ``index`` is out of the range of the dataset lists.
         """
+        if index < 0 or index >= len(self.image_paths):
+            raise IndexError(f"Index {index} is out of bounds for dataset of length {len(self)}.")
+
         image_path = self.image_paths[index]
         mask_path = self.mask_paths[index]
 
         # Force RGB so that RGBA sources (e.g. some BDD100k color-label PNGs
         # carry an alpha channel) are reduced to 3 channels.
-        image_pil = Image.open(image_path).convert("RGB")
-        mask_pil = Image.open(mask_path).convert("RGB")
+        with Image.open(image_path) as image_pil:
+            image = np.array(image_pil.convert("RGB"), dtype=np.float32) / 255.0
 
-        image = np.array(image_pil).astype(np.float32) / 255.0
-        class_mask = color_label_to_class_index(np.array(mask_pil))
+        with Image.open(mask_path) as mask_pil:
+            raw_mask = np.array(mask_pil.convert("RGB"), dtype=np.uint8)
+            class_mask = color_label_to_class_index(raw_mask)
 
         return image, class_mask
 
-
     def __len__(self) -> int:
+        """Return the total number of samples present in the dataset.
+
+        Returns
+        -------
+        int
+            Length of the underlying sample list.
+        """
         return len(self.image_paths)
 
-
     @jaxtyped(typechecker=beartype)
-    def __getitem__(self, index: int) -> tuple[ImageTensor, MaskTensor]:
-        """Return the transformed ``(image, mask)`` pair at position ``index``.
+    def __getitem__(self, index: int) -> tuple[ImageTensor, IndexMaskTensor]:
+        """Retrieve and transform the sample at position ``index``.
 
         ``ToTensorV2`` converts the image from ``(H, W, 3)`` to ``(3, H, W)``
         and leaves the 2-D class-index mask as ``(H, W)``. The mask is then
-        one-hot encoded to ``(NUM_CLASSES, H, W)`` so that its channel axis
-        lines up with the model logits and the Dice loss. The DataLoader adds
-        the batch dimension when collating samples.
+        cast to ``int64``; one-hot encoding is deferred to the loss functions so
+        the dataloader never materialises a 20-channel float tensor, which would
+        otherwise inflate host memory 20x and risk OOM during collation.
+
+        Steps
+        -----
+        1. Fetch the raw image array and 2-D integer class mask via ``load_sample``.
+        2. Apply Albumentations or the default channel transposition.
+        3. Cast the transformed mask to ``int64`` and return both tensors.
 
         Parameters
         ----------
         index : int
-            Zero-based position of the sample to load.
+            Index of the sample to retrieve.
 
         Returns
         -------
-        tuple[ImageTensor, MaskTensor]
-            The ``(image, mask)`` pair where ``image`` has shape ``(3, H, W)``
-            and ``mask`` is a one-hot tensor of shape ``(NUM_CLASSES, H, W)``.
+        tuple[ImageTensor, IndexMaskTensor]
+            Transformed image tensor ``(3, H, W)`` and integer mask tensor ``(H, W)``.
         """
         image, class_mask = self.load_sample(index)
 
-        # Transform if necessary. The mask is a 2-D class map, so no channel
-        # transposition is needed for it.
+        # Apply Albumentations pipeline or default channel transposition. The
+        # mask is a 2-D class map, so no channel transposition is needed for it.
         if self.transform:
             transformed = self.transform(image=image, mask=class_mask)
         else:
             transformed = ToTensorV2()(image=image, mask=class_mask)
 
-        # One-hot encode the (H, W) class ids into (NUM_CLASSES, H, W) floats
-        # so the mask matches the model's (B, NUM_CLASSES, H, W) output and the
-        # Dice loss. ``one_hot`` needs int64 input, hence the cast.
-        mask_one_hot = torch.nn.functional.one_hot(
-            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float()
+        # Keep the mask as a compact (H, W) int64 tensor instead of expanding it
+        # to a one-hot float tensor.
+        mask_tensor = transformed["mask"].to(torch.int64)
 
-        return transformed["image"], mask_one_hot
+        return transformed["image"], mask_tensor
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
@@ -373,10 +419,15 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 def forward(model: nn.Module, x: BatchImage) -> Logits:
     """Run a single forward pass and assert the input/output shapes.
 
-    Centralising the forward pass here lets ``jaxtyping`` verify that the
-    input batch is always ``(B, 3, H, W)`` and that the model produces
-    ``(B, NUM_CLASSES, H, W)`` logits, which is where shape confusion most
-    often arises.
+    Centralising the forward pass here lets ``jaxtyping`` verify that the input
+    batch is always ``(B, 3, H, W)`` and that the model produces
+    ``(B, NUM_CLASSES, H, W)`` logits, which is where shape confusion most often
+    arises.
+
+    Steps
+    -----
+    1. Run the input tensor batch through the model.
+    2. Return the raw logits for downstream loss computation.
 
     Parameters
     ----------
@@ -483,14 +534,14 @@ class CompoundLoss(nn.Module):
 
 @jaxtyped(typechecker=beartype)
 def kl_divergence(probs: Logits, adv_probs: Logits, eps: float = 1e-8) -> Scalar:
-    """Compute the mean per-pixel Kullback-Leibler divergence ``KL(p || q)``.
+    """Compute mean per-pixel Kullback-Leibler divergence ``KL(p || q)``.
 
     TRADES measures robustness as the divergence between the model's clean
     prediction ``p`` and its prediction on a perturbed input ``q``. Because a
-    segmentation model outputs a per-pixel class distribution, the KL
-    divergence is evaluated independently at every pixel and then averaged over
-    the batch and spatial dimensions, so every pixel contributes equally to the
-    regulariser regardless of the image resolution.
+    segmentation model outputs a per-pixel class distribution, the KL divergence
+    is evaluated independently at every pixel and then averaged over the batch
+    and spatial dimensions, so every pixel contributes equally to the regulariser
+    regardless of the image resolution.
 
     Steps
     -----
@@ -542,7 +593,7 @@ class TradesLoss(nn.Module):
     Parameters
     ----------
     natural_loss : nn.Module
-        Loss applied to clean logits, e.g. :class:`DiceLoss`.
+        Loss applied to clean logits, e.g. :class:`CompoundLoss`.
     epsilon : float, optional
         Radius of the ``L_inf`` adversarial perturbation ball. Defaults to 0.03.
     alpha : float, optional
@@ -568,57 +619,77 @@ class TradesLoss(nn.Module):
         num_steps: int = 10,
         beta: float = 6.0,
     ) -> None:
-        super().__init__()
-        self.natural_loss = natural_loss
-        self.epsilon = epsilon
-        self.alpha = alpha
-        self.num_steps = num_steps
-        self.beta = beta
+        """Configure TRADES perturbation boundaries and weighting hyperparameters.
 
-    def forward(self, model: nn.Module, x: BatchImage, y: BatchMask) -> Scalar:
-        """Compute the combined natural + robustness TRADES loss.
+        Parameters
+        ----------
+        natural_loss : nn.Module
+            Supervised criterion applied to clean model logits.
+        epsilon : float, optional
+            L-infinity perturbation boundary radius. Defaults to 0.03.
+        alpha : float, optional
+            Single step perturbation increment. Defaults to 0.01.
+        num_steps : int, optional
+            Number of PGD iterations per batch. Defaults to 10.
+        beta : float, optional
+            Trade-off weight balancing natural loss against robustness. Defaults to 6.0.
+        """
+        super().__init__()
+        self.natural_loss: nn.Module = natural_loss
+        self.epsilon: float = epsilon
+        self.alpha: float = alpha
+        self.num_steps: int = num_steps
+        self.beta: float = beta
+
+    def forward(self, model: nn.Module, x: BatchImage, y: BatchIndexMask) -> tuple[Scalar, Logits]:
+        """Compute natural loss, craft a PGD adversary, and evaluate robustness loss.
 
         Steps
         -----
-        1. Run the clean image through the model to obtain clean logits, the
-           natural loss, and the clean class probabilities.
-        2. Craft an adversarial image with PGD, maximising
-           ``KL(clean || adversarial)`` at every step.
-        3. Evaluate the KL robustness term on the final adversarial image and
-           return ``natural + beta * robust``.
+        1. Evaluate the clean forward pass, compute the natural loss, and detach
+           the clean probabilities.
+        2. Switch the model to eval mode during PGD so BatchNorm running
+           statistics are not polluted by the intermediate adversarial steps.
+        3. Iteratively ascend the KL divergence gradient while projecting back
+           onto the epsilon ``L_inf`` ball and the ``[0, 1]`` pixel range.
+        4. Restore the original training state and evaluate the final robustness
+           regulariser on the adversarial image.
+        5. Return the total loss plus the detached clean logits so the caller
+           does not need a redundant forward pass for metric tracking.
 
         Parameters
         ----------
         model : nn.Module
-            Segmentation model that maps ``(B, 3, H, W)`` images to
-            ``(B, C, H, W)`` logits.
+            Segmentation network being optimised.
         x : BatchImage
-            Clean images of shape ``(B, 3, H, W)``.
-        y : BatchMask
-            One-hot ground-truth masks of shape ``(B, C, H, W)``.
+            Clean image batch of shape ``(B, 3, H, W)``.
+        y : BatchIndexMask
+            Target class-index batch of shape ``(B, H, W)``.
 
         Returns
         -------
-        Scalar
-            Differentiable scalar loss value.
+        tuple[Scalar, Logits]
+            Tuple containing the differentiable composite loss and the detached
+            clean logits.
         """
-        # Clean branch: it provides the natural supervision signal and anchors
-        # the KL regulariser used by the inner and outer robustness terms.
+        # 1. Clean branch: baseline predictions and the task loss. The clean
+        # probabilities are detached so the adversarial steps only propagate
+        # gradients through the perturbed branch.
         clean_logits = forward(model, x)
         natural = cast(Scalar, self.natural_loss(clean_logits, y))
-
-        # Detach the clean probabilities so the maximisation and the robustness
-        # term only propagate gradients through the adversarial branch, matching
-        # the original TRADES surrogate loss.
         clean_probs = torch.softmax(clean_logits, dim=1).detach()
 
-        # PGD attack: increase the KL divergence between clean and adversarial
-        # predictions while staying inside the epsilon L_inf ball.
+        # 2. PGD attack while freezing BatchNorm updates. Running BatchNorm in
+        # training mode over ``num_steps`` iterations would corrupt the moving
+        # mean/variance statistics and retain unnecessary graphs.
+        was_training = model.training
+        model.eval()
+
         x_adv = x.clone().detach()
         for _ in range(self.num_steps):
             # Re-enable autograd on the current adversarial image so the step
             # walks the loss surface of the robustness term.
-            x_adv = x_adv.clone().detach().requires_grad_(True)
+            x_adv.requires_grad_(True)
 
             adv_logits = forward(model, x_adv)
             adv_probs = torch.softmax(adv_logits, dim=1)
@@ -633,34 +704,42 @@ class TradesLoss(nn.Module):
             perturbation = torch.clamp(perturbation, -self.epsilon, self.epsilon)
             x_adv = torch.clamp(x + perturbation, 0.0, 1.0).detach()
 
-        # Robustness term: penalise how much the final adversarial input moved
-        # the model's prediction away from the clean prediction.
+        # Restore the original model mode before the final adversarial pass.
+        if was_training:
+            model.train()
+
+        # 3. Robustness term on the final adversarial example: penalise how much
+        # the perturbation moved the prediction away from the clean prediction.
         adv_logits = forward(model, x_adv)
         adv_probs = torch.softmax(adv_logits, dim=1)
         robust = kl_divergence(clean_probs, adv_probs)
 
-        return natural + self.beta * robust
+        total_loss = natural + self.beta * robust
+
+        # Return the clean logits (detached) alongside the loss to avoid a
+        # duplicate forward pass in the training loop.
+        return total_loss, clean_logits.detach()
 
 
 @torch.no_grad()
 def compute_batch_macro_iou(
-    y_pred: torch.Tensor,      # (B, C, H, W) logits
-    y_true: torch.Tensor,      # (B, C, H, W) one-hot
-    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    y_pred: torch.Tensor,  # (B, C, H, W) logits
+    y_true: torch.Tensor,  # (B, H, W) class indices
+    num_classes: int = 19,  # Classes 0 to 18 (excludes 19: Unknown)
     eps: float = 1e-7,
 ) -> float:
     """Compute the mean macro IoU over a batch, excluding ignored classes.
 
-    The model outputs raw logits while the ground truth is one-hot, so both are
-    first reduced to a single class id per pixel via ``argmax``. IoU is then
-    computed class by class and averaged only over the classes that actually
-    occur in either the prediction or the ground truth; empty classes are
-    skipped rather than counted as zero, which would otherwise drag the mean
+    The model outputs raw logits while the ground truth is a class-index map, so
+    the logits are reduced to a single class id per pixel via ``argmax``. IoU is
+    then computed class by class and averaged only over the classes that
+    actually occur in either the prediction or the ground truth; empty classes
+    are skipped rather than counted as zero, which would otherwise drag the mean
     down on batches dominated by a few classes.
 
     Steps
     -----
-    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
+    1. Collapse logits to ``(B, H, W)`` class-index maps via ``argmax``.
     2. For each class in ``[0, num_classes)``, compute intersection over union.
     3. Average the IoU of every class whose union is non-zero.
 
@@ -669,7 +748,7 @@ def compute_batch_macro_iou(
     y_pred : torch.Tensor
         Model logits of shape ``(B, C, H, W)``.
     y_true : torch.Tensor
-        One-hot targets of shape ``(B, C, H, W)``.
+        Class-index targets of shape ``(B, H, W)``.
     num_classes : int, optional
         Number of classes to score, excluding the ``Unknown`` class. Defaults
         to ``19`` (classes 0-18).
@@ -684,12 +763,11 @@ def compute_batch_macro_iou(
         has a non-empty union.
     """
     preds = y_pred.argmax(dim=1)  # (B, H, W)
-    targets = y_true.argmax(dim=1)  # (B, H, W)
 
     iou_per_class = []
     for cls in range(num_classes):
         pred_mask = preds == cls
-        true_mask = targets == cls
+        true_mask = y_true == cls
 
         intersection = (pred_mask & true_mask).sum().float().item()
         union = (pred_mask | true_mask).sum().float().item()
@@ -704,29 +782,36 @@ def compute_batch_macro_iou(
 @jaxtyped(typechecker=beartype)
 def execute_epoch(
     model: nn.Module,
-    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    dataloader: DataLoader[tuple[ImageTensor, IndexMaskTensor]],
     optimizer: torch.optim.Optimizer,
     loss_fn: TradesLoss,
-    device: torch.device
+    device: torch.device,
 ) -> tuple[float, float]:
     """Run one adversarial training epoch and return its average metrics.
 
-    Each batch is passed to :class:`TradesLoss`, which produces the natural
-    loss plus the TRADES KL robustness term. Gradient descent is applied to
-    that combined loss, while the per-batch macro IoU on clean predictions is
+    Each batch is passed to :class:`TradesLoss`, which produces the natural loss
+    plus the TRADES KL robustness term. Gradient descent is applied to that
+    combined loss, while the per-batch macro IoU on the detached clean logits is
     accumulated as a quality metric alongside the loss.
+
+    Steps
+    -----
+    1. Set the model to training mode and initialise metric accumulators.
+    2. Iterate over the dataloader, transferring tensors to the device.
+    3. Zero gradients, evaluate TRADES loss, backpropagate, and step weights.
+    4. Accumulate loss and macro IoU from the returned clean logits.
+    5. Return epoch-level average loss and IoU.
 
     Parameters
     ----------
     model : nn.Module
         Segmentation model being trained.
-    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+    dataloader : DataLoader[tuple[ImageTensor, IndexMaskTensor]]
         Batched training data.
     optimizer : torch.optim.Optimizer
         Optimiser used for the parameter update.
     loss_fn : TradesLoss
-        Adversarial TRADES loss that carries both the natural and robustness
-        terms.
+        Adversarial TRADES loss that returns the loss and detached clean logits.
     device : torch.device
         Device the training runs on.
 
@@ -735,7 +820,6 @@ def execute_epoch(
     tuple[float, float]
         Mean training loss and mean macro IoU over the epoch.
     """
-
     # Set model into training mode
     model.train()
 
@@ -743,28 +827,22 @@ def execute_epoch(
     train_loss, train_iou = 0.0, 0.0
 
     # Execute training loop over train dataloader
-    for _, (X, y) in enumerate(dataloader):
+    for X, y in dataloader:
         # Load data onto target device
-        X, y = X.to(device), y.to(device)
+        X = X.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
 
-        # Compute clean logits for the macro-IoU metric, then ask the TRADES
-        # loss to build the adversary and produce the combined loss. The loss
-        # function re-runs the model internally for its clean and adversarial
-        # branches.
-        y_pred = forward(model, X)
-        loss = loss_fn(model, X, y)
-        train_loss += loss.item()
-
-        # Reset Gradients & Backpropagate Loss
+        # Reset Gradients
         optimizer.zero_grad()
-        loss.backward()
 
-        # Update Model Gradients
+        # TRADES loss returns the total loss and detached clean logits so the
+        # IoU metric can be computed without a redundant forward pass.
+        loss, clean_logits = loss_fn(model, X, y)
+        loss.backward()
         optimizer.step()
 
-        # Compute Macro IoU for the batch (excluding class 19)
-        train_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
-
+        train_loss += loss.item()
+        train_iou += compute_batch_macro_iou(clean_logits, y, num_classes=19)
 
     # Compute Step Metrics
     train_loss = train_loss / len(dataloader)
@@ -776,9 +854,9 @@ def execute_epoch(
 @jaxtyped(typechecker=beartype)
 def evaluate(
     model: nn.Module,
-    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    dataloader: DataLoader[tuple[ImageTensor, IndexMaskTensor]],
     loss_fn: nn.Module,
-    device: torch.device
+    device: torch.device,
 ) -> tuple[float, float]:
     """Evaluate the model on a dataloader and return mean loss and macro IoU.
 
@@ -786,14 +864,21 @@ def evaluate(
     that no gradients are tracked. Each batch's clean loss and macro IoU are
     accumulated and normalised by the number of batches.
 
+    Steps
+    -----
+    1. Set the model to eval mode and enter ``torch.inference_mode``.
+    2. Pass clean batches through the model without gradient tracking.
+    3. Accumulate validation loss and macro IoU.
+    4. Return normalised validation metrics.
+
     Parameters
     ----------
     model : nn.Module
         Segmentation model being evaluated.
-    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+    dataloader : DataLoader[tuple[ImageTensor, IndexMaskTensor]]
         Batched validation data.
     loss_fn : nn.Module
-        Clean loss callable that consumes ``(logits, one-hot targets)``.
+        Clean loss callable that consumes ``(logits, class-index targets)``.
     device : torch.device
         Device the evaluation runs on.
 
@@ -802,19 +887,19 @@ def evaluate(
     tuple[float, float]
         Mean evaluation loss and mean macro IoU over the epoch.
     """
-
     # Set model into eval mode
     model.eval()
 
     # Initialize eval loss & accuracy
     eval_loss, eval_iou = 0.0, 0.0
 
-    # Active inferene context manager
+    # Active inference context manager
     with torch.inference_mode():
         # Execute eval loop over dataloader
-        for _, (X, y) in enumerate(dataloader):
+        for X, y in dataloader:
             # Load data onto target device
-            X, y = X.to(device), y.to(device)
+            X = X.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
             # Feed-forward and compute metrics
             y_pred = forward(model, X)
@@ -834,34 +919,43 @@ def evaluate(
 @jaxtyped(typechecker=beartype)
 def train(
     model: nn.Module,
-    train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
-    eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    train_dataloader: DataLoader[tuple[ImageTensor, IndexMaskTensor]],
+    eval_dataloader: DataLoader[tuple[ImageTensor, IndexMaskTensor]],
     optimizer: torch.optim.Optimizer,
-    scheduler: lr_scheduler.ReduceLROnPlateau | None,
     loss_fn: TradesLoss,
     eval_loss_fn: nn.Module,
     epochs: int,
     train_device: torch.device,
-    eval_device: torch.device
+    eval_device: torch.device,
+    scheduler: lr_scheduler.ReduceLROnPlateau | None = None,
 ) -> tuple[nn.Module, Dict[str, List[float]]]:
     """Run full TRADES training with periodic clean validation.
 
-    Training epochs use the adversarial :class:`TradesLoss`, while validation
-    is measured with the clean ``eval_loss_fn`` (no adversary) so the reported
-    evaluation metrics reflect real-world, unperturbed performance.
+    Training epochs use the adversarial :class:`TradesLoss`, while validation is
+    measured with the clean ``eval_loss_fn`` (no adversary) so the reported
+    evaluation metrics reflect real-world, unperturbed performance. The best
+    checkpoint is retained by lowest validation loss and restored before
+    returning.
+
+    Steps
+    -----
+    1. Initialise the metric history and checkpoint-tracking variables.
+    2. For each epoch, execute adversarial training and clean validation.
+    3. Save an unwrapped CPU state-dict copy when validation loss improves.
+    4. Step the learning-rate scheduler if provided.
+    5. Release host/device memory at epoch end to prevent fragmentation.
+    6. Restore the best checkpoint before returning.
 
     Parameters
     ----------
     model : nn.Module
         Segmentation model being trained.
-    train_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+    train_dataloader : DataLoader[tuple[ImageTensor, IndexMaskTensor]]
         Batched training data.
-    eval_dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+    eval_dataloader : DataLoader[tuple[ImageTensor, IndexMaskTensor]]
         Batched validation data.
     optimizer : torch.optim.Optimizer
         Optimiser used for the parameter update.
-    scheduler : lr_scheduler.ReduceLROnPlateau | None
-        Optional learning-rate scheduler stepped on the validation loss.
     loss_fn : TradesLoss
         Adversarial loss used for gradient updates during training.
     eval_loss_fn : nn.Module
@@ -872,6 +966,9 @@ def train(
         Device used for training.
     eval_device : torch.device
         Device used for validation.
+    scheduler : lr_scheduler.ReduceLROnPlateau | None, optional
+        Optional learning-rate scheduler stepped on the validation loss.
+        Defaults to None.
 
     Returns
     -------
@@ -879,13 +976,12 @@ def train(
         The unwrapped model with the best checkpoint restored, and the per-epoch
         metric history of training/eval loss and macro IoU.
     """
-
     # Initialize training session
     session: Dict[str, List[float]] = {
-        'loss'                 : [],
-        'macro_iou_score'      : [],
-        'eval_loss'            : [],
-        'eval_macro_iou_score' : []
+        'loss': [],
+        'macro_iou_score': [],
+        'eval_loss': [],
+        'eval_macro_iou_score': [],
     }
 
     # Track the checkpoint with the lowest validation loss so the final model
@@ -902,7 +998,7 @@ def train(
             train_dataloader,
             optimizer,
             loss_fn,
-            train_device
+            train_device,
         )
 
         # Evaluate Model
@@ -910,7 +1006,7 @@ def train(
             model,
             eval_dataloader,
             eval_loss_fn,
-            eval_device
+            eval_device,
         )
 
         # Access the raw unwrapped model so saved weights are agnostic of DataParallel
@@ -925,14 +1021,17 @@ def train(
                 for name, param in raw_model.state_dict().items()
             }
 
-        # Execute schedular step
-        current_lr = 0
+        # Execute scheduler step
+        current_lr = optimizer.param_groups[0]['lr']
         if scheduler:
             scheduler.step(eval_loss)
             current_lr = optimizer.param_groups[0]['lr']
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_iou:.4f}'
+        log_text = (
+            f'loss: {train_loss:.4f} - train_macro_iou: {train_iou:.4f} - '
+            f'eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_iou:.4f}'
+        )
 
         if scheduler:
             print(log_text + f' - lr: {current_lr}')
@@ -944,6 +1043,12 @@ def train(
         session['macro_iou_score'].append(train_iou)
         session['eval_loss'].append(eval_loss)
         session['eval_macro_iou_score'].append(eval_iou)
+
+        # Explicitly invoke garbage collection and release cached PyTorch memory.
+        # This prevents fragmented tensors from steadily accumulating in host memory across epochs.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Restore the best checkpoint so the model returned to the caller (and the
     # one evaluated on the test set downstream) reflects the lowest eval loss.
@@ -957,7 +1062,7 @@ def train(
 
 def plot_training_curves(
     history: Dict[str, List[float]],
-    fig_size: tuple[int, int] = (20, 10)
+    fig_size: tuple[int, int] = (20, 10),
 ) -> None:
 
     loss = np.array(history['loss'])
@@ -1028,14 +1133,13 @@ def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
 
 
 def visualize_predictions(
-    model:nn.Module,
-    test_df:pd.DataFrame,
-    device:torch.device,
-    num_samples:int = 4,
-    output_path:str = "./predictions.png",
+    model: nn.Module,
+    test_df: pd.DataFrame,
+    device: torch.device,
+    num_samples: int = 4,
+    output_path: str = "./predictions.png",
 ) -> None:
-
-    """Render a fixed set of test samples next to their true and predicted masks.
+    """Render test samples side by side with ground-truth and predicted masks.
 
     The first ``num_samples`` rows of ``test_df`` are selected, every image is
     run through ``model``, and a grid with three columns (image / image + true
@@ -1043,6 +1147,13 @@ def visualize_predictions(
     ``(20, H, W)`` logits are reduced to a single class id per pixel via
     ``argmax`` so they can be coloured with ``CLASS_COLORS`` and compared to
     the ground-truth color labels.
+
+    Steps
+    -----
+    1. Select the first ``num_samples`` rows from the evaluation DataFrame.
+    2. Pass each image through the model in inference mode to generate logits.
+    3. Colour the ground-truth and predicted masks with the BDD100k palette.
+    4. Export comparison subplots to a PNG file and close the figure.
 
     Parameters
     ----------
@@ -1082,7 +1193,7 @@ def visualize_predictions(
     sample_ds = BDDSegmentationDataset(sample_df)
 
     # Switch to inference once for the whole grid; no gradients are needed.
-    # Use the underlying unwrapped module for batch_size=1 inference
+    # Use the underlying unwrapped module for batch_size=1 inference.
     eval_model = model.module if isinstance(model, nn.DataParallel) else model
     eval_model.eval()
 
@@ -1097,7 +1208,7 @@ def visualize_predictions(
         image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous()
         image_tensor = image_tensor.unsqueeze(0).to(device)
 
-        # Foward pass, then collapse the 20-class logits to one class id per
+        # Forward pass, then collapse the 20-class logits to one class id per
         # pixel so the output can be colourised.
         with torch.inference_mode():
             logits = eval_model(image_tensor)
@@ -1126,8 +1237,6 @@ def visualize_predictions(
         for ax in axes[row]:
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.set_xticklabels([])
-            ax.set_yticklabels([])
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -1137,7 +1246,7 @@ def visualize_predictions(
 def main() -> None:
     # Print current Torch package versions
     print('Package versions:')
-    print('*'*26)
+    print('*' * 26)
     print(f'torch \t\t - {torch.__version__}')
     print(f'torchvision \t - {torchvision.__version__}')
 
@@ -1160,22 +1269,10 @@ def main() -> None:
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
 
-    # Calculate class weights only if the NPY file does not exist, and reuse if
-    # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
-    if os.path.exists(Path.CLASS_WEIGHTS_PATH):
-        print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")
-        train_sample_weights = np.load(Path.CLASS_WEIGHTS_PATH)
-    else:
-        print(
-            f"Class weights file '{Path.CLASS_WEIGHTS_PATH}' not found. "
-            "Calculating class weights from training masks..."
-        )
-        train_sample_weights = calculate_and_save_class_weights(
-            df=train_df,
-            output_path=Path.CLASS_WEIGHTS_PATH,
-            num_classes=Configuration.NUM_CLASSES,
-            boundary_class_ids=BOUNDARY_CLASS_IDS,
-        )
+    # Class weights are always precomputed by ``precompute_weights.py`` and
+    # shipped with the dataset, so load them directly instead of recomputing.
+    print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")
+    train_sample_weights = np.load(Path.CLASS_WEIGHTS_PATH)
 
     train_sampler = WeightedRandomSampler(
         weights=train_sample_weights.tolist(),
@@ -1185,34 +1282,40 @@ def main() -> None:
 
     # ``shuffle`` and ``sampler`` are mutually exclusive in ``DataLoader``; the
     # sampler already provides the weighted random ordering.
+    # ``num_workers`` loads batches asynchronously across background processes,
+    # and ``pin_memory`` accelerates host-to-device transfers over PCIe.
     train_loader = DataLoader(
         dataset=train_ds,
         batch_size=Configuration.BATCH_SIZE,
         sampler=train_sampler,
+        num_workers=Configuration.NUM_WORKERS,
+        pin_memory=True,
     )
     val_loader = DataLoader(
-            dataset=val_ds,
-            batch_size=Configuration.BATCH_SIZE,
-            shuffle=Configuration.APPLY_SHUFFLE
-        )
+        dataset=val_ds,
+        batch_size=Configuration.BATCH_SIZE,
+        shuffle=Configuration.APPLY_SHUFFLE,
+        num_workers=Configuration.NUM_WORKERS,
+        pin_memory=True,
+    )
 
     model = smp.Unet(
         encoder_name="resnet18",
         encoder_weights="imagenet",
         in_channels=Configuration.CHANNELS,
-        classes=Configuration.NUM_CLASSES
+        classes=Configuration.NUM_CLASSES,
     )
     model = model.to(Configuration.DEVICE)
 
     print(
         summary(
-                model=model,
-                input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
-                col_names=["output_size", "num_params", "trainable"],
-                col_width=30,
-                row_settings=["var_names"],
-                depth=5
-            )
+            model=model,
+            input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
+            col_names=["output_size", "num_params", "trainable"],
+            col_width=30,
+            row_settings=["var_names"],
+            depth=5,
+        )
     )
 
     # Wrap model in DataParallel if 2 or more GPUs are present
@@ -1235,14 +1338,14 @@ def main() -> None:
     # Define optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=Configuration.LR
+        lr=Configuration.LR,
     )
 
     # Define Scheduler
     scheduler = lr_scheduler.ReduceLROnPlateau(
         optimizer=optimizer,
         mode='min',
-        patience=Configuration.PATIENCE
+        patience=Configuration.PATIENCE,
     )
 
     print('Training U-Net Model')
@@ -1251,16 +1354,16 @@ def main() -> None:
 
     # Generate training session config
     session_config = {
-        'model'               : model,
-        'train_dataloader'    : train_loader,
-        'eval_dataloader'     : val_loader,
-        'optimizer'           : optimizer,
-        'scheduler'           : scheduler,
-        'loss_fn'             : loss_fn,
-        'eval_loss_fn'        : loss_fn.natural_loss,
-        'epochs'              : Configuration.EPOCHS,
-        'train_device'        : Configuration.DEVICE,
-        'eval_device'         : Configuration.DEVICE,
+        'model': model,
+        'train_dataloader': train_loader,
+        'eval_dataloader': val_loader,
+        'optimizer': optimizer,
+        'scheduler': scheduler,
+        'loss_fn': loss_fn,
+        'eval_loss_fn': loss_fn.natural_loss,
+        'epochs': Configuration.EPOCHS,
+        'train_device': Configuration.DEVICE,
+        'eval_device': Configuration.DEVICE,
     }
 
     # Execute Training Session
@@ -1269,10 +1372,10 @@ def main() -> None:
     # Create Model directory
     model_name = 'teacher'
     model_path = './model/'
-    os.mkdir(model_path)
+    os.makedirs(model_path, exist_ok=True)
 
     # Save Model
-    torch.save(model, model_path + model_name + '.pt')
+    torch.save(model, os.path.join(model_path, model_name + '.pt'))
 
     # Convert U-Net history dict to DataFrame
     unet_session_history_df = pd.DataFrame(unet_session_history)
@@ -1281,7 +1384,7 @@ def main() -> None:
     # Plot U-Net Session Training History
     plot_training_curves(
         unet_session_history,
-        fig_size=(20, 20)
+        fig_size=(20, 20),
     )
 
     # Export a grid of test samples (image / image+true mask /
@@ -1289,7 +1392,7 @@ def main() -> None:
     visualize_predictions(
         model,
         test_df,
-        torch.device(Configuration.DEVICE)
+        torch.device(Configuration.DEVICE),
     )
 
 
