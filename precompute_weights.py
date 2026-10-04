@@ -82,7 +82,7 @@ class Path:
     IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
     IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
 
-    CLASS_WEIGHTS_PATH = "./data/class_weights.npy"
+    SAMPLE_WEIGHTS_PATH = "./data/sample_weights.npy"
 
 
 @jaxtyped(typechecker=beartype)
@@ -314,7 +314,7 @@ def compute_sample_weights(
 
 
 @jaxtyped(typechecker=beartype)
-def calculate_class_weights(
+def calculate_sample_weights(
     df: pd.DataFrame,
     num_classes: int = 20,
     boundary_class_ids: Optional[List[int]] = None,
@@ -334,8 +334,9 @@ def calculate_class_weights(
     1. Aggregate per-class pixel counts, occurrence counts, and per-mask class sets.
     2. Identify under-represented minority class IDs below the prevalence threshold.
     3. Merge mandatory boundary-critical class IDs into the minority set.
-    4. Log the selected minority classes along with their relative pixel prevalence.
+    4. Log every class with its pixel fraction and whether it is oversampled.
     5. Compute inverse-frequency sampling weights for every sample in the dataset.
+    6. Log every computed per-sample weight before returning the array.
 
     Parameters
     ----------
@@ -384,13 +385,20 @@ def calculate_class_weights(
     # are spatially common but critical for error prevention along object edges
     merged_minority_ids = sorted(set(minority_ids) | set(boundary_class_ids))
 
-    # Step 4: Log minority class details and their pixel fractions for visibility
+    # Step 4: Log every class rather than only the minority set so the dataset's
+    # complete pixel distribution is visible when reviewing the generated weights.
     total_pixels = pixel_counts.sum()
-    print("Oversampling the following minority classes:")
-    for class_id in merged_minority_ids:
-        prevalence = 100.0 * pixel_counts[class_id] / total_pixels
+    print("Pixel fractions for all classes:")
+    for class_id in range(num_classes):
+        pixel_fraction = pixel_counts[class_id] / total_pixels
+        prevalence = 100.0 * pixel_fraction
         class_name = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else f"Class {class_id}"
-        print(f"  {class_id:>2} {class_name:<14} ({prevalence:6.3f}% of pixels)")
+        oversampled = "yes" if class_id in merged_minority_ids else "no"
+        print(
+            f"  {class_id:>2} {class_name:<14} "
+            f"fraction={pixel_fraction:.8f} ({prevalence:6.3f}%), "
+            f"oversampled={oversampled}"
+        )
 
     # Step 5: Derive sample weights boosted by inverse frequency of contained minority classes
     sample_weights = compute_sample_weights(
@@ -400,11 +408,16 @@ def calculate_class_weights(
         eps=eps,
     )
 
+    # Step 6: Render the complete array without NumPy's default truncation so the
+    # exact values persisted to ``class_weights.npy`` are also present in the log.
+    # print("Class weights (per-sample sampling weights):")
+    # print(np.array2string(sample_weights, threshold=sample_weights.size))
+
     return sample_weights
 
 
 @jaxtyped(typechecker=beartype)
-def calculate_and_save_class_weights(
+def calculate_and_save_sample_weights(
     df: pd.DataFrame,
     output_path: str,
     num_classes: int = 20,
@@ -456,7 +469,7 @@ def calculate_and_save_class_weights(
         If ``method`` is unrecognized.
     """
     # Compute the sample weights using mask prevalence statistics
-    sample_weights = calculate_class_weights(
+    sample_weights = calculate_sample_weights(
         df=df,
         num_classes=num_classes,
         boundary_class_ids=boundary_class_ids,
@@ -475,74 +488,6 @@ def calculate_and_save_class_weights(
     print(f"Class weights successfully saved to '{output_path}' (shape: {sample_weights.shape}).")
 
     return sample_weights
-
-
-@jaxtyped(typechecker=beartype)
-def load_or_compute_class_weights(
-    df: pd.DataFrame,
-    weights_path: str,
-    num_classes: int = 20,
-    boundary_class_ids: Optional[List[int]] = None,
-    method: str = "relative_to_max",
-    threshold: float = 0.05,
-    eps: float = 1e-6,
-) -> SampleWeightsArray:
-    """Load precomputed class weights from disk or compute and persist them.
-
-    Inspects whether the designated NPY file exists. If it exists, the weights
-    are loaded immediately, bypassing the expensive mask reading loop. If the
-    file does not exist, the weights are calculated, saved to ``weights_path``,
-    and returned.
-
-    Steps
-    -----
-    1. Check if ``weights_path`` exists on disk.
-    2. If found, load and return the weights using ``np.load``.
-    3. If not found, invoke :func:`calculate_and_save_class_weights` to compute,
-       save, and return the weights.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Training DataFrame containing the ``mask_paths`` column.
-    weights_path : str
-        Path to the .npy file containing serialized weights.
-    num_classes : int, optional
-        Total number of semantic classes. Defaults to ``20``.
-    boundary_class_ids : Optional[List[int]], optional
-        Class IDs forced into the minority set. Defaults to ``None``.
-    method : str, optional
-        Cutoff method for minority selection. Defaults to ``"relative_to_max"``.
-    threshold : float, optional
-        Prevalence cutoff fraction. Defaults to ``0.05``.
-    eps : float, optional
-        Epsilon to guard against division by zero. Defaults to ``1e-6``.
-
-    Returns
-    -------
-    SampleWeightsArray
-        Float64 array of shape ``(num_samples,)``.
-    """
-    # Check for cached weights file to bypass mask image decoding
-    if os.path.exists(weights_path):
-        print(f"Reusing existing class weights from '{weights_path}'...")
-        weights: np.ndarray = np.load(weights_path)
-        return weights
-
-    # File does not exist: compute from scratch and serialize
-    print(
-        f"Class weights file '{weights_path}' not found. "
-        "Calculating class weights from training masks and saving to disk..."
-    )
-    return calculate_and_save_class_weights(
-        df=df,
-        output_path=weights_path,
-        num_classes=num_classes,
-        boundary_class_ids=boundary_class_ids,
-        method=method,
-        threshold=threshold,
-        eps=eps,
-    )
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
@@ -647,16 +592,16 @@ def main() -> None:
     print("Loading BDD100k training dataset splits...")
     train_df, _, _ = load_dataset_from_files()
 
-    print(f"Calculating and persisting class weights for {len(train_df)} training samples...")
-    weights = calculate_and_save_class_weights(
+    print(f"Calculating and persisting sample weights for {len(train_df)} training samples...")
+    weights = calculate_and_save_sample_weights(
         df=train_df,
-        output_path=Path.CLASS_WEIGHTS_PATH,
+        output_path=Path.SAMPLE_WEIGHTS_PATH,
         num_classes=Configuration.NUM_CLASSES,
         boundary_class_ids=BOUNDARY_CLASS_IDS,
         method="relative_to_max",
         threshold=0.05,
     )
-    print(f"Execution complete. Output shape: {weights.shape}, file: '{Path.CLASS_WEIGHTS_PATH}'.")
+    print(f"Execution complete. Output shape: {weights.shape}, file: '{Path.SAMPLE_WEIGHTS_PATH}'.")
 
 
 if __name__ == "__main__":

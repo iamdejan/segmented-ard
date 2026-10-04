@@ -192,7 +192,7 @@ class Path:
     IMAGE_TRAIN_PATH: str = IMAGE_FOLDER + "/train"
     IMAGE_VAL_PATH: str = IMAGE_FOLDER + "/val"
 
-    CLASS_WEIGHTS_PATH: str = "./data/class_weights.npy"
+    SAMPLE_WEIGHTS_PATH: str = "./data/sample_weights.npy"
 
 
 class BDDSegmentationDataset(Dataset[tuple[ImageTensor, IndexMaskTensor]]):
@@ -1271,8 +1271,8 @@ def main() -> None:
 
     # Class weights are always precomputed by ``precompute_weights.py`` and
     # shipped with the dataset, so load them directly instead of recomputing.
-    print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")
-    train_sample_weights = np.load(Path.CLASS_WEIGHTS_PATH)
+    print(f"Reusing precomputed sample weights from '{Path.SAMPLE_WEIGHTS_PATH}'...")
+    train_sample_weights = np.load(Path.SAMPLE_WEIGHTS_PATH)
 
     train_sampler = WeightedRandomSampler(
         weights=train_sample_weights.tolist(),

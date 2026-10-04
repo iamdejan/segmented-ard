@@ -29,7 +29,7 @@ from beartype import beartype
 
 from precompute_weights import (
     BOUNDARY_CLASS_IDS,
-    calculate_and_save_class_weights,
+    calculate_and_save_sample_weights,
 )
 
 
@@ -174,7 +174,7 @@ class Path:
     IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
     IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
 
-    CLASS_WEIGHTS_PATH = "./data/class_weights.npy"
+    SAMPLE_WEIGHTS_PATH = "./data/sample_weights.npy"
 
 
 class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
@@ -1099,19 +1099,19 @@ def main() -> None:
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
 
-    # Calculate class weights only if the NPY file does not exist, and reuse if
+    # Calculate sample weights only if the NPY file does not exist, and reuse if
     # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
-    if os.path.exists(Path.CLASS_WEIGHTS_PATH):
-        print(f"Reusing precomputed class weights from '{Path.CLASS_WEIGHTS_PATH}'...")
-        train_sample_weights = np.load(Path.CLASS_WEIGHTS_PATH)
+    if os.path.exists(Path.SAMPLE_WEIGHTS_PATH):
+        print(f"Reusing precomputed sample weights from '{Path.SAMPLE_WEIGHTS_PATH}'...")
+        train_sample_weights = np.load(Path.SAMPLE_WEIGHTS_PATH)
     else:
         print(
-            f"Class weights file '{Path.CLASS_WEIGHTS_PATH}' not found. "
-            "Calculating class weights from training masks..."
+            f"Sample weights file '{Path.SAMPLE_WEIGHTS_PATH}' not found. "
+            "Calculating sample weights from training masks..."
         )
-        train_sample_weights = calculate_and_save_class_weights(
+        train_sample_weights = calculate_and_save_sample_weights(
             df=train_df,
-            output_path=Path.CLASS_WEIGHTS_PATH,
+            output_path=Path.SAMPLE_WEIGHTS_PATH,
             num_classes=Configuration.NUM_CLASSES,
             boundary_class_ids=BOUNDARY_CLASS_IDS,
         )
