@@ -149,6 +149,14 @@ class Configuration:
     LR = 1e-4
     PATIENCE = 8
 
+    # ARD follows Goldblum et al.'s PGD setup: adversarial student inputs are
+    # initialized inside an L-infinity epsilon-ball and iteratively moved in the
+    # direction that maximizes the task loss. The image tensors in this script
+    # live in [0, 1], so the attack magnitudes are expressed on that same scale.
+    ARD_EPSILON = 8.0 / 255.0
+    ARD_STEP_SIZE = 2.0 / 255.0
+    ARD_NUM_STEPS = 10
+
     APPLY_SHUFFLE=True
     SEED = 768
     # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
@@ -482,20 +490,34 @@ class CompoundLoss(nn.Module):
 
 
 class DistillationLoss(nn.Module):
-    """Combined hard (Dice + Focal) and soft (KL) loss for segmentation distillation.
+    """Compute ARD-style segmentation distillation with the existing losses.
 
-    Following "Distilling the Knowledge in a Neural Network" (Hinton et al.),
-    the student is trained against two signals at once: a hard signal from the
-    one-hot ground-truth mask via a compound Dice+Focal loss (the same clean
-    loss the teacher was trained with), and a soft signal from the frozen
-    teacher's temperature-softened distribution via a KL-divergence term. The
-    KL term is multiplied by ``temperature ** 2`` as recommended in the paper
-    so its gradients stay on the same scale as the hard loss, and the two terms
-    are blended with ``alpha``.
+    Adversarially Robust Distillation (ARD) trains the student to reproduce the
+    teacher's clean prediction when the student is evaluated on an adversarial
+    version of the same input. The clean supervised term remains present so the
+    student is also tied directly to the ground-truth segmentation mask. Unlike
+    the classification loss used by Goldblum et al., this implementation keeps
+    the existing compound Dice + Focal loss for segmentation.
+
+    The KL term is multiplied by ``temperature ** 2`` as in knowledge
+    distillation so temperature scaling does not shrink its gradients. To avoid
+    changing the public behavior of this existing class, ``alpha`` keeps its
+    original meaning in this codebase: it weights the clean hard loss and
+    ``1 - alpha`` weights the ARD KL term. Goldblum et al. use the opposite
+    naming convention, where their ``alpha`` weights the KL term.
 
     Because segmentation logits are ``(B, C, H, W)`` rather than a plain
     classification vector, the softmax and log-softmax are taken over the class
     axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
+
+    Steps
+    -----
+    1. Soften the clean teacher logits and adversarial student logits.
+    2. Compute per-pixel KL divergence from the teacher distribution to the
+       adversarial student distribution and scale it by ``temperature ** 2``.
+    3. Compute the existing compound hard loss from the clean student logits.
+    4. Blend the clean hard loss and adversarial distillation loss with
+       ``alpha`` using the existing weighting convention.
 
     Parameters
     ----------
@@ -507,6 +529,11 @@ class DistillationLoss(nn.Module):
     alpha : float, optional
         Weight of the hard loss; ``1 - alpha`` weights the KL term.
         Defaults to 0.5.
+
+    Raises
+    ------
+    ValueError
+        If ``temperature`` is not positive or ``alpha`` is outside ``[0, 1]``.
     """
 
     def __init__(
@@ -514,56 +541,183 @@ class DistillationLoss(nn.Module):
         hard_loss: Callable[[Logits, BatchMask], Scalar],
         temperature: float = 3.0,
         alpha: float = 0.5,
-    ):
+    ) -> None:
         super().__init__()
+
+        # Distillation temperature must be positive because it divides logits,
+        # while alpha is a convex-combination weight by construction.
+        if temperature <= 0.0:
+            raise ValueError("temperature must be greater than 0.")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0 and 1, inclusive.")
+
         self.temperature = temperature
         self.alpha = alpha
         self.hard_loss = hard_loss
 
+    @jaxtyped(typechecker=beartype)
     def forward(
         self,
-        student_logits: Logits,
+        student_adversarial_logits: Logits,
         target: BatchMask,
-        teacher_logits: Logits,
+        teacher_clean_logits: Logits,
+        student_clean_logits: Logits,
     ) -> Scalar:
-        """Compute the blended distillation loss.
+        """Compute the ARD objective for one segmentation batch.
+
+        The adversarial student prediction is matched to the teacher prediction
+        on the corresponding clean image, while the clean student prediction is
+        supervised by the ground-truth mask through the existing compound loss.
+
+        Steps
+        -----
+        1. Temperature-soften clean teacher and adversarial student logits.
+        2. Compute the temperature-scaled, per-pixel KL divergence.
+        3. Compute clean Dice + Focal supervision with ``hard_loss``.
+        4. Return the weighted sum using this class's existing alpha convention.
 
         Parameters
         ----------
-        student_logits : Logits
-            Raw student output of shape ``(B, C, H, W)``.
+        student_adversarial_logits : Logits
+            Raw student output for adversarial inputs, shape ``(B, C, H, W)``.
         target : BatchMask
             One-hot ground-truth mask of shape ``(B, C, H, W)``.
-        teacher_logits : Logits
-            Raw teacher output of shape ``(B, C, H, W)``.
+        teacher_clean_logits : Logits
+            Raw teacher output for clean inputs, shape ``(B, C, H, W)``.
+        student_clean_logits : Logits
+            Raw student output for clean inputs, shape ``(B, C, H, W)``.
 
         Returns
         -------
         Scalar
-            Weighted sum of the Dice loss and the temperature-scaled KL loss.
+            Weighted sum of clean compound loss and adversarial KL loss.
         """
-        # Soften the teacher logits into probabilities and the student logits
-        # into log-probabilities over the class axis (dim=1). The paper uses
-        # dim=-1 for a classification vector; segmentation uses dim=1 because
-        # the class axis of (B, C, H, W) logits is the channel axis.
-        soft_targets = torch.softmax(teacher_logits / self.temperature, dim=1)
-        soft_prob = torch.log_softmax(student_logits / self.temperature, dim=1)
+        # ARD uses the teacher's prediction on the clean image as the soft target
+        # for the student's prediction on the adversarial image. Segmentation
+        # classes occupy dim=1, so all softening happens over that channel axis.
+        soft_targets = torch.softmax(teacher_clean_logits / self.temperature, dim=1)
+        soft_prob = torch.log_softmax(
+            student_adversarial_logits / self.temperature,
+            dim=1,
+        )
 
-        # KL(soft_targets || soft_prob), summed over classes per pixel and then
-        # averaged over the batch and spatial positions. Scaled by T**2 as
-        # suggested by the authors of the paper.
+        # Preserve the script's existing KL formulation exactly: sum over
+        # classes per pixel, average across batch/spatial positions, and scale
+        # by T**2. ARD changes which logits enter this term, not its definition.
         kl_loss = torch.sum(
-            soft_targets * (soft_targets.log() - soft_prob), dim=1
+            soft_targets * (soft_targets.log() - soft_prob),
+            dim=1,
         ).mean() * (self.temperature ** 2)
 
-        # Hard supervision keeps the student tied to the ground truth rather
-        # than drifting toward whatever mistakes the teacher makes. ``self.
-        # hard_loss`` is the compound Dice+Focal loss the teacher was trained
-        # with, so the student starts from the same clean objective as the
-        # teacher before the KL term is blended in.
-        hard_loss = self.hard_loss(student_logits, target)
+        # Goldblum et al. retain a clean supervised term alongside adversarial
+        # distillation. For segmentation, keep the existing Dice + Focal
+        # compound objective instead of replacing it with cross-entropy.
+        hard_loss = self.hard_loss(student_clean_logits, target)
 
         return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
+
+
+@jaxtyped(typechecker=beartype)
+def generate_adversarial_examples(
+    student: nn.Module,
+    images: BatchImage,
+    targets: BatchMask,
+    attack_loss: Callable[[Logits, BatchMask], Scalar],
+    epsilon: float,
+    step_size: float,
+    num_steps: int,
+) -> BatchImage:
+    """Generate L-infinity PGD examples for ARD segmentation training.
+
+    ARD constructs adversarial inputs by maximizing the student's supervised
+    task loss inside an epsilon-ball around each clean sample. Goldblum et al.
+    use cross-entropy for classification; this segmentation adaptation instead
+    maximizes the existing compound Dice + Focal loss so the attack objective
+    matches the task's current supervision.
+
+    Steps
+    -----
+    1. Randomly initialize each example inside its L-infinity epsilon-ball.
+    2. Repeatedly differentiate the compound segmentation loss with respect to
+       the perturbed image only.
+    3. Take a sign-gradient ascent step, project back into the epsilon-ball, and
+       clamp to the valid ``[0, 1]`` image range.
+    4. Detach the final adversarial batch so the outer ARD update differentiates
+       through the final student forward pass, not through the PGD construction.
+
+    Parameters
+    ----------
+    student : nn.Module
+        Student segmentation model used to construct the attack.
+    images : BatchImage
+        Clean image batch of shape ``(B, 3, H, W)`` with values in ``[0, 1]``.
+    targets : BatchMask
+        One-hot segmentation masks of shape ``(B, C, H, W)``.
+    attack_loss : Callable[[Logits, BatchMask], Scalar]
+        Supervised segmentation loss maximized by PGD.
+    epsilon : float
+        Maximum L-infinity perturbation radius on the ``[0, 1]`` image scale.
+    step_size : float
+        Size of each PGD sign-gradient ascent step.
+    num_steps : int
+        Number of projected gradient-ascent iterations.
+
+    Returns
+    -------
+    BatchImage
+        Detached adversarial images with the same shape as ``images``.
+
+    Raises
+    ------
+    ValueError
+        If ``epsilon`` is negative, ``step_size`` is not positive, or
+        ``num_steps`` is less than one.
+    """
+    # Validate attack hyperparameters early so a malformed configuration cannot
+    # silently turn ARD into an unconstrained or no-op attack.
+    if epsilon < 0.0:
+        raise ValueError("epsilon must be greater than or equal to 0.")
+    if step_size <= 0.0:
+        raise ValueError("step_size must be greater than 0.")
+    if num_steps < 1:
+        raise ValueError("num_steps must be at least 1.")
+
+    # A random start is part of the PGD setup used by ARD and prevents every
+    # attack trajectory from beginning at the exact clean image.
+    clean_images = images.detach()
+    adversarial_images = clean_images + torch.empty_like(clean_images).uniform_(
+        -epsilon,
+        epsilon,
+    )
+    adversarial_images = torch.clamp(adversarial_images, 0.0, 1.0).detach()
+
+    # Only the image gradient is requested. ``autograd.grad`` therefore avoids
+    # accumulating parameter gradients during attack construction; the student
+    # parameters are updated later from the final ARD objective.
+    for _ in range(num_steps):
+        adversarial_images.requires_grad_(True)
+        adversarial_logits = forward(student, adversarial_images)
+        loss = attack_loss(adversarial_logits, targets)
+        image_gradient = torch.autograd.grad(loss, adversarial_images)[0]
+
+        # Take an ascent step because PGD is maximizing the segmentation loss,
+        # then project into both the epsilon-ball and valid image domain.
+        adversarial_images = (
+            adversarial_images.detach()
+            + step_size * image_gradient.detach().sign()
+        )
+        perturbation = torch.clamp(
+            adversarial_images - clean_images,
+            min=-epsilon,
+            max=epsilon,
+        )
+        adversarial_images = torch.clamp(
+            clean_images + perturbation,
+            0.0,
+            1.0,
+        ).detach()
+
+    return cast(BatchImage, adversarial_images)
 
 
 @torch.no_grad()
@@ -631,15 +785,28 @@ def execute_epoch(
     student: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
-    loss_fn: nn.Module,
-    device: torch.device
+    loss_fn: DistillationLoss,
+    device: torch.device,
+    attack_epsilon: float,
+    attack_step_size: float,
+    attack_num_steps: int,
 ) -> tuple[float, float]:
-    """Run one distillation training epoch.
+    """Run one Adversarially Robust Distillation training epoch.
 
-    The teacher stays in eval mode and its logits are computed under
-    ``torch.no_grad`` so they act as fixed soft targets; only the student
-    accumulates gradients. ``loss_fn`` is expected to be callable as
-    ``loss_fn(student_logits, target, teacher_logits)``.
+    For each batch, PGD first creates an adversarial input by maximizing the
+    student's compound segmentation loss. The teacher then supplies soft targets
+    from the clean image, while the student is evaluated on both clean and
+    adversarial inputs. The resulting objective keeps the existing clean
+    compound loss and distillation KL term, but applies the KL term according to
+    ARD: adversarial student prediction versus clean teacher prediction.
+
+    Steps
+    -----
+    1. Move the clean images and masks to the training device.
+    2. Generate PGD adversarial images using the student's compound hard loss.
+    3. Compute clean teacher logits without gradients.
+    4. Compute clean and adversarial student logits and the ARD loss.
+    5. Backpropagate only through the student and record clean macro IoU.
 
     Parameters
     ----------
@@ -651,10 +818,16 @@ def execute_epoch(
         Training data loader yielding ``(image, one_hot_mask)`` pairs.
     optimizer : torch.optim.Optimizer
         Optimizer that updates the student's parameters.
-    loss_fn : nn.Module
-        Distillation loss combining Dice and KL divergence.
+    loss_fn : DistillationLoss
+        ARD-aware distillation loss retaining the compound segmentation loss.
     device : torch.device
         Device the tensors are moved to before the forward pass.
+    attack_epsilon : float
+        Maximum L-infinity PGD perturbation radius.
+    attack_step_size : float
+        PGD sign-gradient ascent step size.
+    attack_num_steps : int
+        Number of PGD attack steps per training batch.
 
     Returns
     -------
@@ -675,27 +848,59 @@ def execute_epoch(
         # Load data onto target device
         X, y = X.to(device), y.to(device)
 
-        # The teacher's outputs are constant soft targets, so no gradient must
-        # ever flow into it.
+        # Clear previous parameter gradients before constructing the attack.
+        # PGD requests gradients only with respect to its image tensor, but
+        # clearing here mirrors the ARD reference implementation and keeps the
+        # batch's optimization state unambiguous.
+        optimizer.zero_grad()
+
+        # ARD attacks the student by maximizing the same supervised task loss
+        # used for segmentation training. The teacher is intentionally not part
+        # of attack construction.
+        adversarial_X = generate_adversarial_examples(
+            student=student,
+            images=X,
+            targets=y,
+            attack_loss=loss_fn.hard_loss,
+            epsilon=attack_epsilon,
+            step_size=attack_step_size,
+            num_steps=attack_num_steps,
+        )
+
+        # Match the reference ARD ordering by evaluating the final adversarial
+        # student example before the clean student pass. This also leaves any
+        # train-mode normalization statistics updated most recently by clean
+        # data, as in the reference implementation.
+        student_adversarial_logits = forward(student, adversarial_X)
+
+        # ARD's soft target is the frozen teacher prediction on the CLEAN input,
+        # not on the adversarial image.
         with torch.no_grad():
-            teacher_logits = forward(teacher, X)
+            teacher_clean_logits = forward(teacher, X)
 
-        # Student forward pass with gradient tracking enabled.
-        student_logits = forward(student, X)
+        # The clean student prediction supplies the compound hard-loss term.
+        # Keeping this pass after the adversarial pass mirrors Goldblum et al.'s
+        # public implementation when the student contains train-mode statistics.
+        student_clean_logits = forward(student, X)
 
-        # Combined hard (Dice) + soft (KL) distillation loss.
-        loss = loss_fn(student_logits, y, teacher_logits)
+        # Keep both existing loss components, changing only where each is
+        # evaluated so the training objective follows ARD for segmentation.
+        loss = loss_fn(
+            student_adversarial_logits,
+            y,
+            teacher_clean_logits,
+            student_clean_logits,
+        )
         train_loss += loss.item()
 
-        # Reset Gradients & Backpropagate Loss
-        optimizer.zero_grad()
+        # Backpropagate the outer ARD objective through the student only.
         loss.backward()
 
         # Update Model Gradients
         optimizer.step()
 
         # Compute Macro IoU for the batch (excluding class 19)
-        train_iou += compute_batch_macro_iou(student_logits, y, num_classes=19)
+        train_iou += compute_batch_macro_iou(student_clean_logits, y, num_classes=19)
 
 
     # Compute Step Metrics
@@ -774,14 +979,25 @@ def train(
     loss_fn: DistillationLoss,
     epochs: int,
     train_device: torch.device,
-    eval_device: torch.device
+    eval_device: torch.device,
+    attack_epsilon: float,
+    attack_step_size: float,
+    attack_num_steps: int,
 ) -> tuple[nn.Module, Dict[str, List[float]]]:
-    """Train the student via knowledge distillation from the teacher.
+    """Train the student with Adversarially Robust Distillation (ARD).
 
-    Each epoch runs a distillation pass (``loss_fn``) to update the student and
-    then evaluates the student against the hard ground-truth masks with a plain
-    Dice loss. The teacher is used only as the source of soft targets and is
-    never updated.
+    Each training epoch constructs PGD adversarial examples against the student,
+    matches the student's adversarial predictions to the teacher's clean soft
+    targets, and retains the existing clean compound segmentation supervision.
+    Validation remains clean and uses only the compound hard loss so model
+    selection stays comparable with the original script.
+
+    Steps
+    -----
+    1. Train one epoch with PGD-based ARD.
+    2. Evaluate the student on clean validation images with the compound loss.
+    3. Step the scheduler, log metrics, and retain the best validation checkpoint.
+    4. Restore and return the best student weights after all epochs.
 
     Parameters
     ----------
@@ -805,6 +1021,12 @@ def train(
         Device used for training.
     eval_device : torch.device
         Device used for evaluation.
+    attack_epsilon : float
+        Maximum L-infinity PGD perturbation radius used during ARD training.
+    attack_step_size : float
+        PGD sign-gradient ascent step size.
+    attack_num_steps : int
+        Number of PGD attack steps per training batch.
 
     Returns
     -------
@@ -840,7 +1062,10 @@ def train(
             train_dataloader,
             optimizer,
             loss_fn,
-            train_device
+            train_device,
+            attack_epsilon,
+            attack_step_size,
+            attack_num_steps,
         )
 
         # Evaluate Model
@@ -1175,13 +1400,10 @@ def main() -> None:
         print(f"Utilizing {torch.cuda.device_count()} GPUs with DataParallel!")
         student = nn.DataParallel(student)
 
-    # Define Loss Function
-    # Mirror the teacher's clean loss: a compound Dice + Focal loss. This is
-    # the hard signal inside :class:`DistillationLoss`, so the student starts
-    # from the same clean objective the teacher was trained with before the
-    # soft KL-distillation term is blended in. An :class:`CompoundLoss`
-    # ``nn.Module`` is used so it automatically collapses the one-hot masks into
-    # class indices for the SMP losses.
+    # Define the segmentation losses used by ARD. The compound Dice + Focal loss
+    # remains the supervised task objective for both the clean student term and
+    # PGD attack construction; the existing KL term distills the clean teacher
+    # distribution into the adversarial student's prediction.
     compound_loss = CompoundLoss(
         dice_weight=0.5,
         focal_weight=1.0,
@@ -1204,8 +1426,14 @@ def main() -> None:
         patience=Configuration.PATIENCE
     )
 
-    print('Distilling Knowledge From Teacher To Student')
+    print('Adversarially Robust Distillation From Teacher To Student')
     print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
+    print(
+        'PGD attack: '
+        f'epsilon={Configuration.ARD_EPSILON:.6f}, '
+        f'step_size={Configuration.ARD_STEP_SIZE:.6f}, '
+        f'steps={Configuration.ARD_NUM_STEPS}'
+    )
     print('----------------------------------')
 
     # Generate training session config
@@ -1220,6 +1448,9 @@ def main() -> None:
         'epochs'              : Configuration.EPOCHS,
         'train_device'        : Configuration.DEVICE,
         'eval_device'         : Configuration.DEVICE,
+        'attack_epsilon'      : Configuration.ARD_EPSILON,
+        'attack_step_size'    : Configuration.ARD_STEP_SIZE,
+        'attack_num_steps'    : Configuration.ARD_NUM_STEPS,
     }
 
     # Execute Training Session
