@@ -1,0 +1,1488 @@
+import glob
+import os
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import torch
+import torchvision
+import torch.optim.lr_scheduler as lr_scheduler
+
+from torch import Tensor, nn
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchinfo import summary
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+from PIL import Image
+from tqdm import tqdm
+from typing import Callable, Dict, List, cast
+
+from sklearn.model_selection import train_test_split
+import segmentation_models_pytorch as smp
+
+from jaxtyping import Float, UInt8, jaxtyped
+from beartype import beartype
+
+from precompute_weights import (
+    BOUNDARY_CLASS_IDS,
+    calculate_and_save_sample_weights,
+)
+
+
+# Shape aliases that document the tensor layout at each stage of the pipeline.
+#
+# ``h``/``w`` are the spatial dimensions, ``b`` is the batch size and ``c`` is
+# the number of channels/classes. These aliases are enforced at runtime by
+# ``jaxtyped`` + ``beartype``, so a shape mismatch raises a ``TypeCheckError``
+# instead of a confusing downstream broadcast error.
+ImageTensor = Float[Tensor, "3 h w"]  # single image, channel-first layout
+MaskTensor = Float[Tensor, "c h w"]  # one-hot mask, ``c == NUM_CLASSES``
+BatchImage = Float[Tensor, "b 3 h w"]  # collated batch of images
+BatchMask = Float[Tensor, "b c h w"]  # collated batch of one-hot masks
+Logits = Float[Tensor, "b c h w"]  # model output, ``c == NUM_CLASSES``
+ClassMask = Float[Tensor, "c h w"]  # per-sample probability/binary mask, ``c`` channels
+Scalar = Float[Tensor, ""]  # scalar (0-dim) tensor
+NumpyImage = Float[np.ndarray, "h w 3"]  # single image, channels-last layout
+ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class id map (numpy)
+
+
+# BDD100k color-label palette. The row index is the class id (0-19), matching
+# ``Configuration.NUM_CLASSES``. Predicted class maps are coloured with this
+# same palette so they render side by side with the ground-truth color labels
+# stored on disk. The exact colour per class only needs to be distinct and
+# consistent; it mirrors the default BDD100k colours.
+CLASS_COLORS = np.array([
+    [128,  64, 128],   # 0  - Road
+    [244,  35, 232],   # 1  - Sidewalk
+    [ 70,  70,  70],   # 2  - Building
+    [102, 102, 156],   # 3  - Wall
+    [190, 153, 153],   # 4  - Fence
+    [153, 153, 153],   # 5  - Pole
+    [250, 170,  30],   # 6  - Traffic Light
+    [220, 220,   0],   # 7  - Traffic Sign
+    [107, 142,  35],   # 8  - Vegetation
+    [152, 251, 152],   # 9  - Terrain
+    [ 70, 130, 180],   # 10 - Sky
+    [220,  20,  60],   # 11 - Person
+    [255,   0,   0],   # 12 - Rider
+    [  0,   0, 142],   # 13 - Car
+    [  0,   0,  70],   # 14 - Truck
+    [  0,  60, 100],   # 15 - Bus
+    [  0,  80, 100],   # 16 - Train
+    [  0,   0, 230],   # 17 - Motorcycle
+    [119,  11,  32],   # 18 - Bicycle
+    [  0,   0,   0],   # 19 - Unknown
+], dtype=np.uint8)
+
+
+# Human-readable names for each palette row, kept in lock-step with
+# ``CLASS_COLORS`` so class ids can be logged without consulting the palette
+# comments by hand.
+CLASS_NAMES = [
+    "road", "sidewalk", "building", "wall", "fence", "pole",
+    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
+    "bicycle", "unknown",
+]
+
+
+def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
+    """Map an RGB color-label image to a per-pixel class-index map.
+
+    BDD100k stores segmentation masks as RGB PNGs whose colours are exactly
+    the entries of ``CLASS_COLORS``. Semantic segmentation needs the class id
+    per pixel (shape ``(H, W)``) rather than the RGB representation (shape
+    ``(H, W, 3)``), so this conversion must happen before the mask is turned
+    into a tensor and one-hot encoded.
+
+    Steps
+    -----
+    1. Initialise the output with the id of the last palette entry so that any
+       unknown colour degrades to ``Unknown`` instead of producing an invalid
+       index.
+    2. For each palette colour, boolean-mask the pixels whose RGB values match
+       it exactly and assign the corresponding class id. The loop is over only
+       ``NUM_CLASSES`` colours and each iteration is fully vectorised.
+
+    Parameters
+    ----------
+    label : np.ndarray
+        RGB color-label array of shape ``(H, W, 3)`` with integer values.
+
+    Returns
+    -------
+    np.ndarray
+        Class-index array of shape ``(H, W)`` and dtype ``uint8``, whose values
+        are in ``[0, NUM_CLASSES)``.
+    """
+    # Default to the last class id so unknown colours fall back gracefully
+    # instead of indexing the palette out of bounds later.
+    class_ids = np.full(label.shape[:2], CLASS_COLORS.shape[0] - 1, dtype=np.uint8)
+
+    # Match each palette colour via exact RGB equality. This stays fast because
+    # every comparison operates on the whole image at once.
+    for class_id, (red, green, blue) in enumerate(CLASS_COLORS):
+        match = (
+            (label[..., 0] == red)
+            & (label[..., 1] == green)
+            & (label[..., 2] == blue)
+        )
+        class_ids[match] = class_id
+
+    return class_ids
+
+
+class Configuration:
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    NUM_DEVICES = torch.cuda.device_count()
+    NUM_WORKERS = 2
+
+    NUM_CLASSES = 20
+    EPOCHS = 20
+    # Total batch size across both GPUs.
+    # 16 total = 8 images on GPU 0 and 8 images on GPU 1.
+    BATCH_SIZE = 16 if torch.cuda.device_count() >= 2 else 8
+    LR = 1e-4
+    PATIENCE = 8
+
+    # ARD follows Goldblum et al.'s PGD setup: adversarial student inputs are
+    # initialized inside an L-infinity epsilon-ball and iteratively moved in the
+    # direction that maximizes the task loss. The image tensors in this script
+    # live in [0, 1], so the attack magnitudes are expressed on that same scale.
+    ARD_EPSILON = 8.0 / 255.0
+    ARD_STEP_SIZE = 2.0 / 255.0
+    ARD_NUM_STEPS = 10
+
+    APPLY_SHUFFLE=True
+    SEED = 768
+    # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
+    # The BDD100k images used here are 720 rows (height) by 1280 columns
+    # (width)
+    ORIGINAL_IMAGE_HEIGHT = 720
+    ORIGINAL_IMAGE_WIDTH = 1280
+
+    # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the resolution after downscale the images.
+    IMAGE_HEIGHT = 360
+    IMAGE_WIDTH = 640
+    CHANNELS = 3 # RGB
+
+
+class Path:
+    BASE = "./data/bdd100k"
+
+    SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
+    SEGMENTATION_MASK_TRAIN_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/train"
+    SEGMENTATION_MASK_VAL_PATH = SEGMENTATION_MASK_LABEL_FOLDER + "/val"
+
+    IMAGE_FOLDER = BASE + "/images_10k"
+    IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
+    IMAGE_VAL_PATH = IMAGE_FOLDER + "/val"
+
+    SAMPLE_WEIGHTS_PATH = "./data/sample_weights.npy"
+
+
+class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
+    def __init__(self, df: pd.DataFrame, transform: A.Compose | None = None):
+        super(BDDSegmentationDataset, self).__init__()
+
+        self.image_paths: List[str] = df["image_paths"].to_list()
+        self.mask_paths: List[str] = df["mask_paths"].to_list()
+        self.transform = transform
+
+
+    @jaxtyped(typechecker=beartype)
+    def load_sample(self, index: int) -> tuple[NumpyImage, ClassIndexArray]:
+        """Load the image and its per-pixel class-index mask at ``index``.
+
+        The image is opened as RGB and normalised to ``[0, 1]``. The mask PNG
+        is likewise forced to RGB (some BDD100k color-labels carry an alpha
+        channel) before being collapsed from the RGB color-label format to a
+        single class id per pixel via :func:`color_label_to_class_index`. This
+        class-index representation is what the one-hot encoder and Dice loss
+        expect downstream.
+
+        Steps
+        -----
+        1. Open both files as RGB and convert them to NumPy arrays.
+        2. Normalise the image pixels to ``[0, 1]``.
+        3. Map the mask's RGB colours to class indices.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based position of the sample to load.
+
+        Returns
+        -------
+        tuple[NumpyImage, ClassIndexArray]
+            The ``(image, mask)`` pair where ``image`` has shape ``(H, W, 3)``
+            with float32 values in ``[0, 1]`` and ``mask`` has shape ``(H, W)``
+            with uint8 class ids.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is out of the range of the dataset lists.
+        """
+        image_path = self.image_paths[index]
+        mask_path = self.mask_paths[index]
+
+        # Force RGB so that RGBA sources (e.g. some BDD100k color-label PNGs
+        # carry an alpha channel) are reduced to 3 channels.
+        image_pil = Image.open(image_path).convert("RGB")
+        mask_pil = Image.open(mask_path).convert("RGB")
+
+        image = np.array(image_pil).astype(np.float32) / 255.0
+        class_mask = color_label_to_class_index(np.array(mask_pil))
+
+        return image, class_mask
+
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+
+    @jaxtyped(typechecker=beartype)
+    def __getitem__(self, index: int) -> tuple[ImageTensor, MaskTensor]:
+        """Return the transformed ``(image, mask)`` pair at position ``index``.
+
+        ``ToTensorV2`` converts the image from ``(H, W, 3)`` to ``(3, H, W)``
+        and leaves the 2-D class-index mask as ``(H, W)``. The mask is then
+        one-hot encoded to ``(NUM_CLASSES, H, W)`` so that its channel axis
+        lines up with the model logits and the Dice loss. The DataLoader adds
+        the batch dimension when collating samples.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based position of the sample to load.
+
+        Returns
+        -------
+        tuple[ImageTensor, MaskTensor]
+            The ``(image, mask)`` pair where ``image`` has shape ``(3, H, W)``
+            and ``mask`` is a one-hot tensor of shape ``(NUM_CLASSES, H, W)``.
+        """
+        image, class_mask = self.load_sample(index)
+
+        # Transform if necessary. The mask is a 2-D class map, so no channel
+        # transposition is needed for it.
+        if self.transform:
+            transformed = self.transform(image=image, mask=class_mask)
+        else:
+            transformed = ToTensorV2()(image=image, mask=class_mask)
+
+        # One-hot encode the (H, W) class ids into (NUM_CLASSES, H, W) floats
+        # so the mask matches the model's (B, NUM_CLASSES, H, W) output and the
+        # Dice loss. ``one_hot`` needs int64 input, hence the cast.
+        mask_one_hot = torch.nn.functional.one_hot(
+            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
+        ).permute(2, 0, 1).float()
+
+        return transformed["image"], mask_one_hot
+
+
+def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
+    file_path_split = complete_mask_path.split("/")
+    mask_file_name = file_path_split[-1].split("_")[0]
+
+    image_path = base_image_path + "/" + mask_file_name + ".jpg"
+    return image_path
+
+
+def find_train_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_TRAIN_PATH)
+
+
+def find_val_image_path_from_mask(complete_mask_path: str) -> str:
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
+
+
+def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
+    file_path_split = complete_image_path.split("/")
+    mask_file_name = file_path_split[-1].split(".")[0]
+
+    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
+    return mask_path
+
+
+def find_train_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
+
+
+def find_val_mask_path_from_image(complete_image_path: str) -> str:
+    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
+
+
+def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # load train, then split into train-test
+    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    problematic_masks = []
+    for complete_mask_path in train_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_masks.append(complete_mask_path)
+                train_mask_paths.remove(complete_mask_path)
+    print(f"Problematic masks: {problematic_masks}")
+
+    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    problematic_images = []
+    for complete_image_path in train_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_images.append(complete_image_path)
+                train_image_paths.remove(complete_image_path)
+                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+    print(f"Problematic images: {problematic_images}")
+
+    train_test_df = pd.DataFrame({
+        "image_paths": train_image_paths,
+        "mask_paths": train_mask_paths,
+    })
+    train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
+
+    # load val
+    val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    problematic_val_masks = []
+    for complete_mask_path in val_mask_paths:
+        with Image.open(complete_mask_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_masks.append(complete_mask_path)
+                val_mask_paths.remove(complete_mask_path)
+    print(f"Problematic val masks: {problematic_val_masks}")
+
+    val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    problematic_val_images = []
+    for complete_image_path in val_image_paths:
+        with Image.open(complete_image_path) as img:
+            width, height = img.size
+            if width != 1280 or height != 720:
+                problematic_val_images.append(complete_image_path)
+                val_image_paths.remove(complete_image_path)
+                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+    print(f"Problematic val images: {problematic_val_images}")
+
+    val_df = pd.DataFrame({
+        "image_paths": val_image_paths,
+        "mask_paths": val_mask_paths,
+    })
+
+    return train_df, val_df, test_df
+
+
+@jaxtyped(typechecker=beartype)
+def forward(model: nn.Module, x: BatchImage) -> Logits:
+    """Run a single forward pass and assert the input/output shapes.
+
+    Centralising the forward pass here lets ``jaxtyping`` verify that the
+    input batch is always ``(B, 3, H, W)`` and that the model produces
+    ``(B, NUM_CLASSES, H, W)`` logits, which is where shape confusion most
+    often arises.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The segmentation model to run.
+    x : BatchImage
+        Input batch of images with shape ``(B, 3, H, W)``.
+
+    Returns
+    -------
+    Logits
+        Raw model logits with shape ``(B, NUM_CLASSES, H, W)``.
+    """
+    return cast(Logits, model(x))
+
+
+class CompoundLoss(nn.Module):
+    """Compound loss combining Dice Loss and Focal Loss for semantic segmentation.
+
+    Semantic segmentation on class-imbalanced datasets benefits from combining a
+    region-based loss (Dice loss) and a distribution-based loss (Focal loss).
+    Dice loss optimizes overall mask overlap to handle class imbalance, while
+    Focal loss down-weights easy background pixels to focus gradient updates on
+    hard boundaries and minority classes.
+
+    Steps
+    -----
+    1. Initialize the underlying SMP DiceLoss and FocalLoss modules in multiclass mode.
+    2. In the forward pass, inspect target tensor dimensionality; if 4D (one-hot encoded),
+       collapse the channel dimension to 2D class indices via ``argmax(dim=1)``.
+    3. Compute multi-class Dice loss from raw logits.
+    4. Compute multi-class Focal loss from raw logits.
+    5. Return the weighted sum: ``dice_weight * dice + focal_weight * focal``.
+
+    Parameters
+    ----------
+    dice_weight : float, optional
+        Weight factor applied to the Dice loss component. Defaults to 0.5.
+    focal_weight : float, optional
+        Weight factor applied to the Focal loss component. Defaults to 1.0.
+    ignore_index : int, optional
+        Class index to ignore during loss computation. Defaults to 19.
+    """
+
+    def __init__(
+        self,
+        dice_weight: float = 0.5,
+        focal_weight: float = 1.0,
+        ignore_index: int = 19,
+    ) -> None:
+        super().__init__()
+        # Store loss weighting factors to adjust the relative contribution of each loss term
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+
+        # SMP DiceLoss operates directly on raw logits when from_logits=True,
+        # avoiding an explicit external softmax step
+        self.dice_loss = smp.losses.DiceLoss(
+            mode=smp.losses.MULTICLASS_MODE,
+            from_logits=True,
+            ignore_index=ignore_index,
+        )
+
+        # SMP FocalLoss handles multiclass cross-entropy while masking out
+        # the designated unknown/ignored class id
+        self.focal_loss = smp.losses.FocalLoss(
+            mode=smp.losses.MULTICLASS_MODE,
+            ignore_index=ignore_index,
+        )
+
+    def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
+        """Compute the weighted compound loss between predictions and targets.
+
+        Steps
+        -----
+        1. Check if targets are 4D (one-hot encoded); if so, collapse to class indices.
+        2. Evaluate Dice loss and Focal loss independently.
+        3. Weight and sum both loss terms.
+
+        Parameters
+        ----------
+        logits : Tensor
+            Raw unnormalized model predictions of shape ``(B, C, H, W)``.
+        targets : Tensor
+            Ground-truth masks, either one-hot encoded tensors of shape ``(B, C, H, W)``
+            or class indices of shape ``(B, H, W)``.
+
+        Returns
+        -------
+        Tensor
+            Scalar compound loss tensor suitable for gradient backpropagation.
+        """
+        # Collapse one-hot targets (B, C, H, W) to class indices (B, H, W) because
+        # SMP multiclass loss functions with ignore_index require integer class indices
+        if targets.ndim == 4:
+            targets = targets.argmax(dim=1)
+
+        dice = cast(Scalar, self.dice_loss(logits, targets))
+        focal = cast(Scalar, self.focal_loss(logits, targets))
+
+        # Combine weighted losses to balance boundary refinement and region overlap
+        return self.dice_weight * dice + self.focal_weight * focal
+
+
+class DistillationLoss(nn.Module):
+    """Compute ARD-style segmentation distillation with the existing losses.
+
+    Adversarially Robust Distillation (ARD) trains the student to reproduce the
+    teacher's clean prediction when the student is evaluated on an adversarial
+    version of the same input. The clean supervised term remains present so the
+    student is also tied directly to the ground-truth segmentation mask. Unlike
+    the classification loss used by Goldblum et al., this implementation keeps
+    the existing compound Dice + Focal loss for segmentation.
+
+    The KL term is multiplied by ``temperature ** 2`` as in knowledge
+    distillation so temperature scaling does not shrink its gradients. To avoid
+    changing the public behavior of this existing class, ``alpha`` keeps its
+    original meaning in this codebase: it weights the clean hard loss and
+    ``1 - alpha`` weights the ARD KL term. Goldblum et al. use the opposite
+    naming convention, where their ``alpha`` weights the KL term.
+
+    Because segmentation logits are ``(B, C, H, W)`` rather than a plain
+    classification vector, the softmax and log-softmax are taken over the class
+    axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
+
+    Steps
+    -----
+    1. Soften the clean teacher logits and adversarial student logits.
+    2. Compute per-pixel KL divergence from the teacher distribution to the
+       adversarial student distribution and scale it by ``temperature ** 2``.
+    3. Compute the existing compound hard loss from the clean student logits.
+    4. Blend the clean hard loss and adversarial distillation loss with
+       ``alpha`` using the existing weighting convention.
+
+    Parameters
+    ----------
+    hard_loss : Callable[[Logits, BatchMask], Scalar]
+        Clean supervision loss evaluated against the ground-truth masks, e.g.
+        the compound Dice + Focal loss used to train the teacher.
+    temperature : float, optional
+        Softening temperature applied to both distributions. Defaults to 3.0.
+    alpha : float, optional
+        Weight of the hard loss; ``1 - alpha`` weights the KL term.
+        Defaults to 0.5.
+
+    Raises
+    ------
+    ValueError
+        If ``temperature`` is not positive or ``alpha`` is outside ``[0, 1]``.
+    """
+
+    def __init__(
+        self,
+        hard_loss: Callable[[Logits, BatchMask], Scalar],
+        temperature: float = 3.0,
+        alpha: float = 0.5,
+    ) -> None:
+        super().__init__()
+
+        # Distillation temperature must be positive because it divides logits,
+        # while alpha is a convex-combination weight by construction.
+        if temperature <= 0.0:
+            raise ValueError("temperature must be greater than 0.")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0 and 1, inclusive.")
+
+        self.temperature = temperature
+        self.alpha = alpha
+        self.hard_loss = hard_loss
+
+    @jaxtyped(typechecker=beartype)
+    def forward(
+        self,
+        student_adversarial_logits: Logits,
+        target: BatchMask,
+        teacher_clean_logits: Logits,
+        student_clean_logits: Logits,
+    ) -> Scalar:
+        """Compute the ARD objective for one segmentation batch.
+
+        The adversarial student prediction is matched to the teacher prediction
+        on the corresponding clean image, while the clean student prediction is
+        supervised by the ground-truth mask through the existing compound loss.
+
+        Steps
+        -----
+        1. Temperature-soften clean teacher and adversarial student logits.
+        2. Compute the temperature-scaled, per-pixel KL divergence.
+        3. Compute clean Dice + Focal supervision with ``hard_loss``.
+        4. Return the weighted sum using this class's existing alpha convention.
+
+        Parameters
+        ----------
+        student_adversarial_logits : Logits
+            Raw student output for adversarial inputs, shape ``(B, C, H, W)``.
+        target : BatchMask
+            One-hot ground-truth mask of shape ``(B, C, H, W)``.
+        teacher_clean_logits : Logits
+            Raw teacher output for clean inputs, shape ``(B, C, H, W)``.
+        student_clean_logits : Logits
+            Raw student output for clean inputs, shape ``(B, C, H, W)``.
+
+        Returns
+        -------
+        Scalar
+            Weighted sum of clean compound loss and adversarial KL loss.
+        """
+        # ARD uses the teacher's prediction on the clean image as the soft target
+        # for the student's prediction on the adversarial image. Segmentation
+        # classes occupy dim=1, so all softening happens over that channel axis.
+        soft_targets = torch.softmax(teacher_clean_logits / self.temperature, dim=1)
+        soft_prob = torch.log_softmax(
+            student_adversarial_logits / self.temperature,
+            dim=1,
+        )
+
+        # Preserve the script's existing KL formulation exactly: sum over
+        # classes per pixel, average across batch/spatial positions, and scale
+        # by T**2. ARD changes which logits enter this term, not its definition.
+        kl_loss = torch.sum(
+            soft_targets * (soft_targets.log() - soft_prob),
+            dim=1,
+        ).mean() * (self.temperature ** 2)
+
+        # Goldblum et al. retain a clean supervised term alongside adversarial
+        # distillation. For segmentation, keep the existing Dice + Focal
+        # compound objective instead of replacing it with cross-entropy.
+        hard_loss = self.hard_loss(student_clean_logits, target)
+
+        return self.alpha * hard_loss + (1.0 - self.alpha) * kl_loss
+
+
+@jaxtyped(typechecker=beartype)
+def generate_adversarial_examples(
+    student: nn.Module,
+    images: BatchImage,
+    targets: BatchMask,
+    attack_loss: Callable[[Logits, BatchMask], Scalar],
+    epsilon: float,
+    step_size: float,
+    num_steps: int,
+) -> BatchImage:
+    """Generate L-infinity PGD examples for ARD segmentation training.
+
+    ARD constructs adversarial inputs by maximizing the student's supervised
+    task loss inside an epsilon-ball around each clean sample. Goldblum et al.
+    use cross-entropy for classification; this segmentation adaptation instead
+    maximizes the existing compound Dice + Focal loss so the attack objective
+    matches the task's current supervision.
+
+    Steps
+    -----
+    1. Randomly initialize each example inside its L-infinity epsilon-ball.
+    2. Repeatedly differentiate the compound segmentation loss with respect to
+       the perturbed image only.
+    3. Take a sign-gradient ascent step, project back into the epsilon-ball, and
+       clamp to the valid ``[0, 1]`` image range.
+    4. Detach the final adversarial batch so the outer ARD update differentiates
+       through the final student forward pass, not through the PGD construction.
+
+    Parameters
+    ----------
+    student : nn.Module
+        Student segmentation model used to construct the attack.
+    images : BatchImage
+        Clean image batch of shape ``(B, 3, H, W)`` with values in ``[0, 1]``.
+    targets : BatchMask
+        One-hot segmentation masks of shape ``(B, C, H, W)``.
+    attack_loss : Callable[[Logits, BatchMask], Scalar]
+        Supervised segmentation loss maximized by PGD.
+    epsilon : float
+        Maximum L-infinity perturbation radius on the ``[0, 1]`` image scale.
+    step_size : float
+        Size of each PGD sign-gradient ascent step.
+    num_steps : int
+        Number of projected gradient-ascent iterations.
+
+    Returns
+    -------
+    BatchImage
+        Detached adversarial images with the same shape as ``images``.
+
+    Raises
+    ------
+    ValueError
+        If ``epsilon`` is negative, ``step_size`` is not positive, or
+        ``num_steps`` is less than one.
+    """
+    # Validate attack hyperparameters early so a malformed configuration cannot
+    # silently turn ARD into an unconstrained or no-op attack.
+    if epsilon < 0.0:
+        raise ValueError("epsilon must be greater than or equal to 0.")
+    if step_size <= 0.0:
+        raise ValueError("step_size must be greater than 0.")
+    if num_steps < 1:
+        raise ValueError("num_steps must be at least 1.")
+
+    # A random start is part of the PGD setup used by ARD and prevents every
+    # attack trajectory from beginning at the exact clean image.
+    clean_images = images.detach()
+    adversarial_images = clean_images + torch.empty_like(clean_images).uniform_(
+        -epsilon,
+        epsilon,
+    )
+    adversarial_images = torch.clamp(adversarial_images, 0.0, 1.0).detach()
+
+    # Only the image gradient is requested. ``autograd.grad`` therefore avoids
+    # accumulating parameter gradients during attack construction; the student
+    # parameters are updated later from the final ARD objective.
+    for _ in range(num_steps):
+        adversarial_images.requires_grad_(True)
+        adversarial_logits = forward(student, adversarial_images)
+        loss = attack_loss(adversarial_logits, targets)
+        image_gradient = torch.autograd.grad(loss, adversarial_images)[0]
+
+        # Take an ascent step because PGD is maximizing the segmentation loss,
+        # then project into both the epsilon-ball and valid image domain.
+        adversarial_images = (
+            adversarial_images.detach()
+            + step_size * image_gradient.detach().sign()
+        )
+        perturbation = torch.clamp(
+            adversarial_images - clean_images,
+            min=-epsilon,
+            max=epsilon,
+        )
+        adversarial_images = torch.clamp(
+            clean_images + perturbation,
+            0.0,
+            1.0,
+        ).detach()
+
+    return cast(BatchImage, adversarial_images)
+
+
+@torch.no_grad()
+def compute_batch_macro_iou(
+    y_pred: torch.Tensor,      # (B, C, H, W) logits
+    y_true: torch.Tensor,      # (B, C, H, W) one-hot
+    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    eps: float = 1e-7,
+) -> float:
+    """Compute the mean macro IoU over a batch, excluding ignored classes.
+
+    The model outputs raw logits while the ground truth is one-hot, so both are
+    first reduced to a single class id per pixel via ``argmax``. IoU is then
+    computed class by class and averaged only over the classes that actually
+    occur in either the prediction or the ground truth; empty classes are
+    skipped rather than counted as zero, which would otherwise drag the mean
+    down on batches dominated by a few classes.
+
+    Steps
+    -----
+    1. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps.
+    2. For each class in ``[0, num_classes)``, compute intersection over union.
+    3. Average the IoU of every class whose union is non-zero.
+
+    Parameters
+    ----------
+    y_pred : torch.Tensor
+        Model logits of shape ``(B, C, H, W)``.
+    y_true : torch.Tensor
+        One-hot targets of shape ``(B, C, H, W)``.
+    num_classes : int, optional
+        Number of classes to score, excluding the ``Unknown`` class. Defaults
+        to ``19`` (classes 0-18).
+    eps : float, optional
+        Smoothing constant added to intersection and union to avoid division by
+        zero. Defaults to ``1e-7``.
+
+    Returns
+    -------
+    float
+        Mean IoU over the classes present in the batch, or ``0.0`` if no class
+        has a non-empty union.
+    """
+    preds = y_pred.argmax(dim=1)  # (B, H, W)
+    targets = y_true.argmax(dim=1)  # (B, H, W)
+
+    iou_per_class = []
+    for cls in range(num_classes):
+        pred_mask = preds == cls
+        true_mask = targets == cls
+
+        intersection = (pred_mask & true_mask).sum().float().item()
+        union = (pred_mask | true_mask).sum().float().item()
+
+        # Only include the class in the mean if it exists in GT or Prediction
+        if union > 0:
+            iou_per_class.append((intersection + eps) / (union + eps))
+
+    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
+
+
+@jaxtyped(typechecker=beartype)
+def execute_epoch(
+    teacher: nn.Module,
+    student: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    optimizer: torch.optim.Optimizer,
+    loss_fn: DistillationLoss,
+    device: torch.device,
+    attack_epsilon: float,
+    attack_step_size: float,
+    attack_num_steps: int,
+) -> tuple[float, float]:
+    """Run one Adversarially Robust Distillation training epoch.
+
+    For each batch, PGD first creates an adversarial input by maximizing the
+    student's compound segmentation loss. The teacher then supplies soft targets
+    from the clean image, while the student is evaluated on both clean and
+    adversarial inputs. The resulting objective keeps the existing clean
+    compound loss and distillation KL term, but applies the KL term according to
+    ARD: adversarial student prediction versus clean teacher prediction.
+
+    Steps
+    -----
+    1. Move the clean images and masks to the training device.
+    2. Generate PGD adversarial images using the student's compound hard loss.
+    3. Compute clean teacher logits without gradients.
+    4. Compute clean and adversarial student logits and the ARD loss.
+    5. Backpropagate only through the student and record clean macro IoU.
+
+    Parameters
+    ----------
+    teacher : nn.Module
+        Pre-trained model whose softened outputs supervise the student.
+    student : nn.Module
+        Model being trained.
+    dataloader : DataLoader
+        Training data loader yielding ``(image, one_hot_mask)`` pairs.
+    optimizer : torch.optim.Optimizer
+        Optimizer that updates the student's parameters.
+    loss_fn : DistillationLoss
+        ARD-aware distillation loss retaining the compound segmentation loss.
+    device : torch.device
+        Device the tensors are moved to before the forward pass.
+    attack_epsilon : float
+        Maximum L-infinity PGD perturbation radius.
+    attack_step_size : float
+        PGD sign-gradient ascent step size.
+    attack_num_steps : int
+        Number of PGD attack steps per training batch.
+
+    Returns
+    -------
+    tuple[float, float]
+        Mean training loss and mean macro IoU over the epoch.
+    """
+    # Set teacher model into eval mode
+    teacher.eval()
+
+    # Set student model into training mode
+    student.train()
+
+    # Initialize train loss & accuracy
+    train_loss, train_iou = 0.0, 0.0
+
+    # Execute training loop over train dataloader
+    for _, (X, y) in enumerate(dataloader):
+        # Load data onto target device
+        X, y = X.to(device), y.to(device)
+
+        # Clear previous parameter gradients before constructing the attack.
+        # PGD requests gradients only with respect to its image tensor, but
+        # clearing here mirrors the ARD reference implementation and keeps the
+        # batch's optimization state unambiguous.
+        optimizer.zero_grad()
+
+        # ARD attacks the student by maximizing the same supervised task loss
+        # used for segmentation training. The teacher is intentionally not part
+        # of attack construction.
+        adversarial_X = generate_adversarial_examples(
+            student=student,
+            images=X,
+            targets=y,
+            attack_loss=loss_fn.hard_loss,
+            epsilon=attack_epsilon,
+            step_size=attack_step_size,
+            num_steps=attack_num_steps,
+        )
+
+        # Match the reference ARD ordering by evaluating the final adversarial
+        # student example before the clean student pass. This also leaves any
+        # train-mode normalization statistics updated most recently by clean
+        # data, as in the reference implementation.
+        student_adversarial_logits = forward(student, adversarial_X)
+
+        # ARD's soft target is the frozen teacher prediction on the CLEAN input,
+        # not on the adversarial image.
+        with torch.no_grad():
+            teacher_clean_logits = forward(teacher, X)
+
+        # The clean student prediction supplies the compound hard-loss term.
+        # Keeping this pass after the adversarial pass mirrors Goldblum et al.'s
+        # public implementation when the student contains train-mode statistics.
+        student_clean_logits = forward(student, X)
+
+        # Keep both existing loss components, changing only where each is
+        # evaluated so the training objective follows ARD for segmentation.
+        loss = loss_fn(
+            student_adversarial_logits,
+            y,
+            teacher_clean_logits,
+            student_clean_logits,
+        )
+        train_loss += loss.item()
+
+        # Backpropagate the outer ARD objective through the student only.
+        loss.backward()
+
+        # Update Model Gradients
+        optimizer.step()
+
+        # Compute Macro IoU for the batch (excluding class 19)
+        train_iou += compute_batch_macro_iou(student_clean_logits, y, num_classes=19)
+
+
+    # Compute Step Metrics
+    train_loss = train_loss / len(dataloader)
+    train_iou = train_iou / len(dataloader)
+
+    return train_loss, train_iou
+
+
+@jaxtyped(typechecker=beartype)
+def evaluate(
+    model: nn.Module,
+    dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    loss_fn: Callable[[Logits, BatchMask], Scalar],
+    device: torch.device
+) -> tuple[float, float]:
+    """Evaluate the model on a dataloader and return mean loss and macro IoU.
+
+    The model is placed in eval mode and run under ``torch.inference_mode`` so
+    that no gradients are tracked. Each batch's clean loss and macro IoU are
+    accumulated and normalised by the number of batches.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model being evaluated.
+    dataloader : DataLoader[tuple[ImageTensor, MaskTensor]]
+        Batched validation data.
+    loss_fn : Callable[[Logits, BatchMask], Scalar]
+        Clean loss callable that consumes ``(logits, one-hot targets)``.
+    device : torch.device
+        Device the evaluation runs on.
+
+    Returns
+    -------
+    tuple[float, float]
+        Mean evaluation loss and mean macro IoU over the epoch.
+    """
+
+    # Set model into eval mode
+    model.eval()
+
+    # Initialize eval loss & accuracy
+    eval_loss, eval_iou = 0.0, 0.0
+
+    # Active inferene context manager
+    with torch.inference_mode():
+        # Execute eval loop over dataloader
+        for _, (X, y) in enumerate(dataloader):
+            # Load data onto target device
+            X, y = X.to(device), y.to(device)
+
+            # Feed-forward and compute metrics
+            y_pred = forward(model, X)
+            loss = loss_fn(y_pred, y)
+            eval_loss += loss.item()
+
+            # Compute Macro IoU for the batch (excluding class 19)
+            eval_iou += compute_batch_macro_iou(y_pred, y, num_classes=19)
+
+    # Compute Step Metrics
+    eval_loss = eval_loss / len(dataloader)
+    eval_iou = eval_iou / len(dataloader)
+
+    return eval_loss, eval_iou
+
+
+@jaxtyped(typechecker=beartype)
+def train(
+    teacher: nn.Module,
+    student: nn.Module,
+    train_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    eval_dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
+    optimizer: torch.optim.Optimizer,
+    scheduler: lr_scheduler.ReduceLROnPlateau | None,
+    loss_fn: DistillationLoss,
+    epochs: int,
+    train_device: torch.device,
+    eval_device: torch.device,
+    attack_epsilon: float,
+    attack_step_size: float,
+    attack_num_steps: int,
+) -> tuple[nn.Module, Dict[str, List[float]]]:
+    """Train the student with Adversarially Robust Distillation (ARD).
+
+    Each training epoch constructs PGD adversarial examples against the student,
+    matches the student's adversarial predictions to the teacher's clean soft
+    targets, and retains the existing clean compound segmentation supervision.
+    Validation remains clean and uses only the compound hard loss so model
+    selection stays comparable with the original script.
+
+    Steps
+    -----
+    1. Train one epoch with PGD-based ARD.
+    2. Evaluate the student on clean validation images with the compound loss.
+    3. Step the scheduler, log metrics, and retain the best validation checkpoint.
+    4. Restore and return the best student weights after all epochs.
+
+    Parameters
+    ----------
+    teacher : nn.Module
+        Pre-trained model producing the soft targets.
+    student : nn.Module
+        Model being trained.
+    train_dataloader : DataLoader
+        Training data loader.
+    eval_dataloader : DataLoader
+        Validation data loader.
+    optimizer : torch.optim.Optimizer
+        Optimizer updating the student.
+    scheduler : lr_scheduler.ReduceLROnPlateau | None
+        Optional learning-rate scheduler stepped on the eval loss.
+    loss_fn : DistillationLoss
+        Distillation loss combining Dice and KL divergence.
+    epochs : int
+        Number of training epochs.
+    train_device : torch.device
+        Device used for training.
+    eval_device : torch.device
+        Device used for evaluation.
+    attack_epsilon : float
+        Maximum L-infinity PGD perturbation radius used during ARD training.
+    attack_step_size : float
+        PGD sign-gradient ascent step size.
+    attack_num_steps : int
+        Number of PGD attack steps per training batch.
+
+    Returns
+    -------
+    tuple[nn.Module, Dict[str, List[float]]]
+        The unwrapped student with the best checkpoint restored, and the
+        per-epoch history of training/eval losses and macro IoU scores.
+    """
+    # Initialize training session
+    session: Dict[str, List[float]] = {
+        'loss'                 : [],
+        'macro_iou_score'      : [],
+        'eval_loss'            : [],
+        'eval_macro_iou_score' : []
+    }
+
+    # The student is scored against hard targets alone, so evaluation uses the
+    # clean compound loss (without the teacher's soft targets) rather than the
+    # combined distillation objective.
+    eval_loss_fn = loss_fn.hard_loss
+
+    # Track the checkpoint with the lowest validation loss so the final student
+    # can be reverted to the best-seen weights instead of the last epoch's.
+    best_eval_loss = float('inf')
+    best_model_state: Dict[str, Tensor] | None = None
+
+    # Training loop
+    for epoch in tqdm(range(epochs)):
+        # Execute Epoch
+        print(f'\nEpoch {epoch + 1}/{epochs}')
+        train_loss, train_macro_iou = execute_epoch(
+            teacher,
+            student,
+            train_dataloader,
+            optimizer,
+            loss_fn,
+            train_device,
+            attack_epsilon,
+            attack_step_size,
+            attack_num_steps,
+        )
+
+        # Evaluate Model
+        eval_loss, eval_macro_iou = evaluate(
+            student,
+            eval_dataloader,
+            eval_loss_fn,
+            eval_device
+        )
+
+        # Access the raw unwrapped student so saved weights are agnostic of DataParallel
+        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+
+        # Keep a snapshot whenever the validation loss improves so the best
+        # checkpoint is available for the final test evaluation.
+        if eval_loss < best_eval_loss:
+            best_eval_loss = eval_loss
+            best_model_state = {
+                name: param.detach().cpu().clone()
+                for name, param in raw_student.state_dict().items()
+            }
+
+        # Execute schedular step
+        current_lr = 0
+        if scheduler:
+            scheduler.step(eval_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+
+        # Log Epoch Metrics
+        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
+
+        if scheduler:
+            print(log_text + f' - lr: {current_lr}')
+        else:
+            print(log_text)
+
+        # Record Epoch Metrics
+        session['loss'].append(train_loss)
+        session['macro_iou_score'].append(train_macro_iou)
+        session['eval_loss'].append(eval_loss)
+        session['eval_macro_iou_score'].append(eval_macro_iou)
+
+    # Restore the best checkpoint so the student returned to the caller (and
+    # the one evaluated on the test set downstream) reflects the lowest eval
+    # loss.
+    if best_model_state is not None:
+        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+        raw_student.load_state_dict(best_model_state)
+
+    # Return raw student and session metrics
+    return raw_student, session
+
+
+def plot_training_curves(
+    history: Dict[str, List[float]],
+    fig_size: tuple[int, int] = (20, 10)
+) -> None:
+
+    loss = np.array(history['loss'])
+    val_loss = np.array(history['eval_loss'])
+
+    iou = np.array(history['macro_iou_score'])
+    val_iou = np.array(history['eval_macro_iou_score'])
+
+    epochs = range(len(history['loss']))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=fig_size)
+
+    # Plot loss
+    ax1.plot(epochs, loss, label='training_loss', marker='o', color='C5')
+    ax1.plot(epochs, val_loss, label='eval_loss', marker='o', color='C6')
+
+    # Fill area between losses
+    ax1.fill_between(epochs, loss, val_loss, where=(loss > val_loss), color='C5', alpha=0.4, interpolate=True)
+    ax1.fill_between(epochs, loss, val_loss, where=(loss < val_loss), color='C6', alpha=0.4, interpolate=True)
+
+    # Add Text & Formats
+    ax1.set_title('Loss (Lower Means Better)', fontsize=22)
+    ax1.set_xlabel('Epochs', fontsize=18)
+    ax1.set_ylabel('Loss', fontsize=18)
+    ax1.tick_params(axis='both', which='major', labelsize=14)
+    ax1.legend(fontsize=14)
+
+    # Plot metric
+    ax2.plot(epochs, iou, label='training_macro_iou', marker='o', color='C5')
+    ax2.plot(epochs, val_iou, label='eval_macro_iou', marker='o', color='C6')
+
+    # Fill area between metrics
+    ax2.fill_between(epochs, iou, val_iou, where=(iou > val_iou), color='C5', alpha=0.4, interpolate=True)
+    ax2.fill_between(epochs, iou, val_iou, where=(iou < val_iou), color='C6', alpha=0.4, interpolate=True)
+
+    # Add Text & Formats
+    ax2.set_title('Macro IoU (Higher Means Better)', fontsize=22)
+    ax2.set_xlabel('Epochs', fontsize=18)
+    ax2.set_ylabel('Macro IoU', fontsize=18)
+    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.legend(fontsize=14)
+    sns.despine()
+
+
+def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map a class-index mask to an RGB image using ``palette``.
+
+    Steps
+    -----
+    1. Cast ``class_mask`` to integer so it can be used as row indices.
+    2. Index ``palette`` with those indices, turning a ``(H, W)`` array of
+       class ids into a ``(H, W, 3)`` image.
+
+    Parameters
+    ----------
+    class_mask : np.ndarray
+        Array of shape ``(H, W)`` whose values are class indices.
+    palette : np.ndarray
+        Array of shape ``(NUM_CLASSES, 3)`` mapping a class id to an RGB
+        colour (the 0-255 range).
+
+    Returns
+    -------
+    np.ndarray
+        RGB image of shape ``(H, W, 3)`` matching the dtype of ``palette``.
+    """
+    return palette[class_mask.astype(np.int64)]
+
+
+def visualize_predictions(
+    model:nn.Module,
+    test_df:pd.DataFrame,
+    device:torch.device,
+    num_samples:int = 4,
+    output_path:str = "./predictions.png",
+) -> None:
+
+    """Render a fixed set of test samples next to their true and predicted masks.
+
+    The first ``num_samples`` rows of ``test_df`` are selected, every image is
+    run through ``model``, and a grid with three columns (image / image + true
+    mask / image + predicted mask) is exported to a PNG file. The model's
+    ``(20, H, W)`` logits are reduced to a single class id per pixel via
+    ``argmax`` so they can be coloured with ``CLASS_COLORS`` and compared to
+    the ground-truth color labels.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained segmentation model returning ``(B, 20, H, W)`` logits.
+    test_df : pd.DataFrame
+        DataFrame carrying the ``image_paths`` and ``mask_paths`` columns.
+    device : torch.device
+        Device used to run inference.
+    num_samples : int, optional
+        Number of samples to visualise. Defaults to 4.
+    output_path : str, optional
+        Destination of the exported PNG. Defaults to ``"./predictions.png"``.
+
+    Raises
+    ------
+    ValueError
+        If ``test_df`` has no rows to visualise.
+    """
+    # Take the first ``num_samples`` rows of the test frame (or fewer if the
+    # frame is smaller) so the visualisation is identical across training runs.
+    sample_df = test_df.head(min(num_samples, len(test_df))).reset_index(drop=True)
+
+    if sample_df.empty:
+        raise ValueError("test_df has no rows to visualise.")
+
+    num_rows = len(sample_df)
+    fig, axes = plt.subplots(num_rows, 3, figsize=(15, 5 * num_rows))
+
+    # plt.subplots returns a 1D array when there is a single row; promote it
+    # to 2D so the axes[row, col] indexing below is uniform.
+    if num_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    # Reuse the dataset loader so the visual path matches training: this
+    # guarantees the RGB collapse and [0, 1] scaling are identical.
+    sample_ds = BDDSegmentationDataset(sample_df)
+
+    # Switch to inference once for the whole grid; no gradients are needed.
+    # Use the underlying unwrapped module for batch_size=1 inference
+    eval_model = model.module if isinstance(model, nn.DataParallel) else model
+    eval_model.eval()
+
+    for row in range(num_rows):
+        # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
+        # and the mask as an (H, W) class-index array.
+        image, class_mask = sample_ds.load_sample(row)
+
+        # Replicate the ToTensorV2 conversion: transpose HWC -> CHW, add a
+        # batch dim and move to the device so the model sees the same format
+        # it received during training.
+        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous()
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+
+        # Foward pass, then collapse the 20-class logits to one class id per
+        # pixel so the output can be colourised.
+        with torch.inference_mode():
+            logits = eval_model(image_tensor)
+        pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
+
+        # Colour the predicted class map, then bring it back to [0, 1] for
+        # Matplotlib so it can be blended with the RGB image.
+        pred_color = colorize_mask(pred_class, CLASS_COLORS).astype(np.float32) / 255.0
+
+        # Colour the ground-truth class map the same way so the two overlays
+        # are directly comparable.
+        true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+
+        axes[row, 0].imshow(image)
+        axes[row, 0].set_title("Image")
+
+        axes[row, 1].imshow(image)
+        axes[row, 1].imshow(true_mask_color, alpha=0.5)
+        axes[row, 1].set_title("Image + True Mask")
+
+        axes[row, 2].imshow(image)
+        axes[row, 2].imshow(pred_color, alpha=0.5)
+        axes[row, 2].set_title("Image + Predicted Mask")
+
+        # Remove axis ticks/labels so only the pixels are shown.
+        for ax in axes[row]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def main() -> None:
+    # Print current Torch package versions
+    print('Package versions:')
+    print('*'*26)
+    print(f'torch \t\t - {torch.__version__}')
+    print(f'torchvision \t - {torchvision.__version__}')
+
+    train_df, val_df, test_df = load_dataset_from_files()
+
+    train_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
+        A.RandomBrightnessContrast(p=0.2),
+        A.HorizontalFlip(p=0.5),
+        # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
+        # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
+        # the image to (C, H, W).
+        ToTensorV2(),
+    ])
+
+    inference_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
+        ToTensorV2(),
+    ])
+    train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
+    val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
+
+    # Calculate sample weights only if the NPY file does not exist, and reuse if
+    # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
+    if os.path.exists(Path.SAMPLE_WEIGHTS_PATH):
+        print(f"Reusing precomputed sample weights from '{Path.SAMPLE_WEIGHTS_PATH}'...")
+        train_sample_weights = np.load(Path.SAMPLE_WEIGHTS_PATH)
+    else:
+        print(
+            f"Sample weights file '{Path.SAMPLE_WEIGHTS_PATH}' not found. "
+            "Calculating sample weights from training masks..."
+        )
+        train_sample_weights = calculate_and_save_sample_weights(
+            df=train_df,
+            output_path=Path.SAMPLE_WEIGHTS_PATH,
+            num_classes=Configuration.NUM_CLASSES,
+            boundary_class_ids=BOUNDARY_CLASS_IDS,
+        )
+
+    train_sampler = WeightedRandomSampler(
+        weights=train_sample_weights.tolist(),
+        num_samples=len(train_ds),
+        replacement=True,
+    )
+
+    # ``shuffle`` and ``sampler`` are mutually exclusive in ``DataLoader``; the
+    # sampler already provides the weighted random ordering.
+    train_loader = DataLoader(
+        dataset=train_ds,
+        batch_size=Configuration.BATCH_SIZE,
+        sampler=train_sampler,
+    )
+    val_loader = DataLoader(
+            dataset=val_ds,
+            batch_size=Configuration.BATCH_SIZE,
+            shuffle=Configuration.APPLY_SHUFFLE
+        )
+
+    # Load the pre-trained teacher from disk (saved by ``train_teacher.py``) and
+    # freeze it. The teacher only produces soft targets, so its parameters must
+    # not receive gradient updates.
+    teacher_path = "./model/teacher.pt"
+    teacher = cast(
+        nn.Module,
+        torch.load(teacher_path, map_location=Configuration.DEVICE, weights_only=False),
+    )
+    teacher = teacher.to(Configuration.DEVICE)
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad = False
+
+    # Build a smaller student network that learns to mimic the teacher's
+    # softened predictions. ``mobilenet_v2`` is a lighter backbone than the
+    # teacher's ``resnet18``.
+    student = smp.Unet(
+        encoder_name="mobilenet_v2",
+        encoder_weights="imagenet",
+        in_channels=Configuration.CHANNELS,
+        classes=Configuration.NUM_CLASSES
+    )
+    student = student.to(Configuration.DEVICE)
+
+    print(
+        summary(
+                model=student,
+                input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
+                col_names=["output_size", "num_params", "trainable"],
+                col_width=30,
+                row_settings=["var_names"],
+                depth=5
+            )
+    )
+
+    # Wrap student in DataParallel if 2 or more GPUs are present
+    if torch.cuda.device_count() > 1:
+        print(f"Utilizing {torch.cuda.device_count()} GPUs with DataParallel!")
+        student = nn.DataParallel(student)
+
+    # Define the segmentation losses used by ARD. The compound Dice + Focal loss
+    # remains the supervised task objective for both the clean student term and
+    # PGD attack construction; the existing KL term distills the clean teacher
+    # distribution into the adversarial student's prediction.
+    compound_loss = CompoundLoss(
+        dice_weight=0.5,
+        focal_weight=1.0,
+        ignore_index=19,
+    )
+
+    loss_fn = DistillationLoss(hard_loss=compound_loss, temperature=3.0, alpha=0.5)
+
+    # Define optimizer over the student's parameters only; the teacher is
+    # frozen and must stay out of the optimizer.
+    optimizer = torch.optim.AdamW(
+        student.parameters(),
+        lr=Configuration.LR
+    )
+
+    # Define Scheduler
+    scheduler = lr_scheduler.ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode='min',
+        patience=Configuration.PATIENCE
+    )
+
+    print('Adversarially Robust Distillation From Teacher To Student')
+    print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
+    print(
+        'PGD attack: '
+        f'epsilon={Configuration.ARD_EPSILON:.6f}, '
+        f'step_size={Configuration.ARD_STEP_SIZE:.6f}, '
+        f'steps={Configuration.ARD_NUM_STEPS}'
+    )
+    print('----------------------------------')
+
+    # Generate training session config
+    session_config = {
+        'teacher'             : teacher,
+        'student'             : student,
+        'train_dataloader'    : train_loader,
+        'eval_dataloader'     : val_loader,
+        'optimizer'           : optimizer,
+        'scheduler'           : scheduler,
+        'loss_fn'             : loss_fn,
+        'epochs'              : Configuration.EPOCHS,
+        'train_device'        : Configuration.DEVICE,
+        'eval_device'         : Configuration.DEVICE,
+        'attack_epsilon'      : Configuration.ARD_EPSILON,
+        'attack_step_size'    : Configuration.ARD_STEP_SIZE,
+        'attack_num_steps'    : Configuration.ARD_NUM_STEPS,
+    }
+
+    # Execute Training Session
+    student, student_session_history = train(**session_config)
+
+    # Create Model directory if it does not already exist (it is created by the
+    # teacher run, but this script should still work standalone).
+    model_name = 'student'
+    model_path = './model/'
+    os.makedirs(model_path, exist_ok=True)
+
+    # Save Model
+    torch.save(student, model_path + model_name + '.pt')
+
+    # Convert student history dict to DataFrame
+    student_session_history_df = pd.DataFrame(student_session_history)
+    print(student_session_history_df)
+
+    # Plot student Session Training History
+    plot_training_curves(
+        student_session_history,
+        fig_size=(20, 20)
+    )
+
+    # Export a grid of test samples (image / image+true mask /
+    # image+predicted mask) so the model output can be inspected visually.
+    visualize_predictions(
+        student,
+        test_df,
+        Configuration.DEVICE
+    )
+
+
+if __name__ == "__main__":
+    main()
