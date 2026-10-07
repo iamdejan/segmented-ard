@@ -1,33 +1,26 @@
 import gc
 import glob
 import os
+from typing import Dict, List, cast
 
-import pandas as pd
-import numpy as np
+import albumentations as A
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-
+import segmentation_models_pytorch as smp
 import torch
-import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
-
+import torchvision
+from albumentations.pytorch import ToTensorV2
+from beartype import beartype
+from jaxtyping import Float, Int64, UInt8, jaxtyped
+from PIL import Image
+from sklearn.model_selection import train_test_split
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchinfo import summary
-
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-
-from PIL import Image
 from tqdm import tqdm
-from typing import Dict, List, cast
-
-from sklearn.model_selection import train_test_split
-import segmentation_models_pytorch as smp
-
-from jaxtyping import Float, Int64, UInt8, jaxtyped
-from beartype import beartype
-
 
 # Shape aliases that document the tensor layout at each stage of the pipeline.
 #
@@ -81,10 +74,26 @@ CLASS_COLORS: np.ndarray = np.array(
 # ``CLASS_COLORS`` so class ids can be logged without consulting the palette
 # comments by hand.
 CLASS_NAMES: list[str] = [
-    "road", "sidewalk", "building", "wall", "fence", "pole",
-    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
-    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
-    "bicycle", "unknown",
+    "road",
+    "sidewalk",
+    "building",
+    "wall",
+    "fence",
+    "pole",
+    "traffic light",
+    "traffic sign",
+    "vegetation",
+    "terrain",
+    "sky",
+    "person",
+    "rider",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "motorcycle",
+    "bicycle",
+    "unknown",
 ]
 
 
@@ -154,7 +163,9 @@ def color_label_to_class_index(label: RawColorImage) -> ClassIndexArray:
 class Configuration:
     """Global configuration settings for data loading, training, and validation."""
 
-    DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    DEVICE: torch.device = torch.device(
+        "cuda:0" if torch.cuda.is_available() else "cpu"
+    )
     NUM_DEVICES: int = torch.cuda.device_count()
     # Two background workers overlap disk I/O with GPU execution.
     NUM_WORKERS: int = 2
@@ -256,7 +267,9 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, IndexMaskTensor]]):
             If ``index`` is out of the range of the dataset lists.
         """
         if index < 0 or index >= len(self.image_paths):
-            raise IndexError(f"Index {index} is out of bounds for dataset of length {len(self)}.")
+            raise IndexError(
+                f"Index {index} is out of bounds for dataset of length {len(self)}."
+            )
 
         image_path = self.image_paths[index]
         mask_path = self.mask_paths[index]
@@ -349,11 +362,15 @@ def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> 
 
 
 def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
+    return find_mask_path_from_image(
+        complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH
+    )
 
 
 def find_val_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
+    return find_mask_path_from_image(
+        complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH
+    )
 
 
 def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -376,14 +393,20 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
                 train_image_paths.remove(complete_image_path)
-                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+                train_mask_paths.remove(
+                    find_train_mask_path_from_image(complete_image_path)
+                )
     print(f"Problematic images: {problematic_images}")
 
-    train_test_df = pd.DataFrame({
-        "image_paths": train_image_paths,
-        "mask_paths": train_mask_paths,
-    })
-    train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
+    train_test_df = pd.DataFrame(
+        {
+            "image_paths": train_image_paths,
+            "mask_paths": train_mask_paths,
+        }
+    )
+    train_df, test_df = train_test_split(
+        train_test_df, test_size=0.2, random_state=Configuration.SEED
+    )
 
     # load val
     val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
@@ -404,13 +427,17 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             if width != 1280 or height != 720:
                 problematic_val_images.append(complete_image_path)
                 val_image_paths.remove(complete_image_path)
-                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+                val_mask_paths.remove(
+                    find_val_mask_path_from_image(complete_image_path)
+                )
     print(f"Problematic val images: {problematic_val_images}")
 
-    val_df = pd.DataFrame({
-        "image_paths": val_image_paths,
-        "mask_paths": val_mask_paths,
-    })
+    val_df = pd.DataFrame(
+        {
+            "image_paths": val_image_paths,
+            "mask_paths": val_mask_paths,
+        }
+    )
 
     return train_df, val_df, test_df
 
@@ -568,7 +595,9 @@ def kl_divergence(probs: Logits, adv_probs: Logits, eps: float = 1e-8) -> Scalar
     """
     # ``eps`` keeps the log well-defined when a class probability is exactly
     # zero after softmax (which happens for confident, wrong predictions).
-    kl_per_pixel = (probs * (torch.log(probs + eps) - torch.log(adv_probs + eps))).sum(dim=1)
+    kl_per_pixel = (probs * (torch.log(probs + eps) - torch.log(adv_probs + eps))).sum(
+        dim=1
+    )
 
     # Average over batch and spatial axes so the regulariser is resolution
     # independent and directly comparable to the natural loss magnitude.
@@ -641,7 +670,9 @@ class TradesLoss(nn.Module):
         self.num_steps: int = num_steps
         self.beta: float = beta
 
-    def forward(self, model: nn.Module, x: BatchImage, y: BatchIndexMask) -> tuple[Scalar, Logits]:
+    def forward(
+        self, model: nn.Module, x: BatchImage, y: BatchIndexMask
+    ) -> tuple[Scalar, Logits]:
         """Compute natural loss, craft a PGD adversary, and evaluate robustness loss.
 
         Steps
@@ -978,21 +1009,21 @@ def train(
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
-        'loss': [],
-        'macro_iou_score': [],
-        'eval_loss': [],
-        'eval_macro_iou_score': [],
+        "loss": [],
+        "macro_iou_score": [],
+        "eval_loss": [],
+        "eval_macro_iou_score": [],
     }
 
     # Track the checkpoint with the lowest validation loss so the final model
     # can be reverted to the best-seen weights instead of the last epoch's.
-    best_eval_loss = float('inf')
+    best_eval_loss = float("inf")
     best_model_state: Dict[str, Tensor] | None = None
 
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
-        print(f'\nEpoch {epoch + 1}/{epochs}')
+        print(f"\nEpoch {epoch + 1}/{epochs}")
         train_loss, train_iou = execute_epoch(
             model,
             train_dataloader,
@@ -1022,27 +1053,27 @@ def train(
             }
 
         # Execute scheduler step
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]["lr"]
         if scheduler:
             scheduler.step(eval_loss)
-            current_lr = optimizer.param_groups[0]['lr']
+            current_lr = optimizer.param_groups[0]["lr"]
 
         # Log Epoch Metrics
         log_text = (
-            f'loss: {train_loss:.4f} - train_macro_iou: {train_iou:.4f} - '
-            f'eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_iou:.4f}'
+            f"loss: {train_loss:.4f} - train_macro_iou: {train_iou:.4f} - "
+            f"eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_iou:.4f}"
         )
 
         if scheduler:
-            print(log_text + f' - lr: {current_lr}')
+            print(log_text + f" - lr: {current_lr}")
         else:
             print(log_text)
 
         # Record Epoch Metrics
-        session['loss'].append(train_loss)
-        session['macro_iou_score'].append(train_iou)
-        session['eval_loss'].append(eval_loss)
-        session['eval_macro_iou_score'].append(eval_iou)
+        session["loss"].append(train_loss)
+        session["macro_iou_score"].append(train_iou)
+        session["eval_loss"].append(eval_loss)
+        session["eval_macro_iou_score"].append(eval_iou)
 
         # Explicitly invoke garbage collection and release cached PyTorch memory.
         # This prevents fragmented tensors from steadily accumulating in host memory across epochs.
@@ -1065,44 +1096,76 @@ def plot_training_curves(
     fig_size: tuple[int, int] = (20, 10),
 ) -> None:
 
-    loss = np.array(history['loss'])
-    val_loss = np.array(history['eval_loss'])
+    loss = np.array(history["loss"])
+    val_loss = np.array(history["eval_loss"])
 
-    iou = np.array(history['macro_iou_score'])
-    val_iou = np.array(history['eval_macro_iou_score'])
+    iou = np.array(history["macro_iou_score"])
+    val_iou = np.array(history["eval_macro_iou_score"])
 
-    epochs = range(len(history['loss']))
+    epochs = range(len(history["loss"]))
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=fig_size)
 
     # Plot loss
-    ax1.plot(epochs, loss, label='training_loss', marker='o', color='C5')
-    ax1.plot(epochs, val_loss, label='eval_loss', marker='o', color='C6')
+    ax1.plot(epochs, loss, label="training_loss", marker="o", color="C5")
+    ax1.plot(epochs, val_loss, label="eval_loss", marker="o", color="C6")
 
     # Fill area between losses
-    ax1.fill_between(epochs, loss, val_loss, where=(loss > val_loss), color='C5', alpha=0.4, interpolate=True)
-    ax1.fill_between(epochs, loss, val_loss, where=(loss < val_loss), color='C6', alpha=0.4, interpolate=True)
+    ax1.fill_between(
+        epochs,
+        loss,
+        val_loss,
+        where=(loss > val_loss),
+        color="C5",
+        alpha=0.4,
+        interpolate=True,
+    )
+    ax1.fill_between(
+        epochs,
+        loss,
+        val_loss,
+        where=(loss < val_loss),
+        color="C6",
+        alpha=0.4,
+        interpolate=True,
+    )
 
     # Add Text & Formats
-    ax1.set_title('Loss (Lower Means Better)', fontsize=22)
-    ax1.set_xlabel('Epochs', fontsize=18)
-    ax1.set_ylabel('Loss', fontsize=18)
-    ax1.tick_params(axis='both', which='major', labelsize=14)
+    ax1.set_title("Loss (Lower Means Better)", fontsize=22)
+    ax1.set_xlabel("Epochs", fontsize=18)
+    ax1.set_ylabel("Loss", fontsize=18)
+    ax1.tick_params(axis="both", which="major", labelsize=14)
     ax1.legend(fontsize=14)
 
     # Plot metric
-    ax2.plot(epochs, iou, label='training_macro_iou', marker='o', color='C5')
-    ax2.plot(epochs, val_iou, label='eval_macro_iou', marker='o', color='C6')
+    ax2.plot(epochs, iou, label="training_macro_iou", marker="o", color="C5")
+    ax2.plot(epochs, val_iou, label="eval_macro_iou", marker="o", color="C6")
 
     # Fill area between metrics
-    ax2.fill_between(epochs, iou, val_iou, where=(iou > val_iou), color='C5', alpha=0.4, interpolate=True)
-    ax2.fill_between(epochs, iou, val_iou, where=(iou < val_iou), color='C6', alpha=0.4, interpolate=True)
+    ax2.fill_between(
+        epochs,
+        iou,
+        val_iou,
+        where=(iou > val_iou),
+        color="C5",
+        alpha=0.4,
+        interpolate=True,
+    )
+    ax2.fill_between(
+        epochs,
+        iou,
+        val_iou,
+        where=(iou < val_iou),
+        color="C6",
+        alpha=0.4,
+        interpolate=True,
+    )
 
     # Add Text & Formats
-    ax2.set_title('Macro IoU (Higher Means Better)', fontsize=22)
-    ax2.set_xlabel('Epochs', fontsize=18)
-    ax2.set_ylabel('Macro IoU', fontsize=18)
-    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.set_title("Macro IoU (Higher Means Better)", fontsize=22)
+    ax2.set_xlabel("Epochs", fontsize=18)
+    ax2.set_ylabel("Macro IoU", fontsize=18)
+    ax2.tick_params(axis="both", which="major", labelsize=14)
     ax2.legend(fontsize=14)
     sns.despine()
 
@@ -1220,7 +1283,9 @@ def visualize_predictions(
 
         # Colour the ground-truth class map the same way so the two overlays
         # are directly comparable.
-        true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+        true_mask_color = (
+            colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+        )
 
         axes[row, 0].imshow(image)
         axes[row, 0].set_title("Image")
@@ -1245,27 +1310,35 @@ def visualize_predictions(
 
 def main() -> None:
     # Print current Torch package versions
-    print('Package versions:')
-    print('*' * 26)
-    print(f'torch \t\t - {torch.__version__}')
-    print(f'torchvision \t - {torchvision.__version__}')
+    print("Package versions:")
+    print("*" * 26)
+    print(f"torch \t\t - {torch.__version__}")
+    print(f"torchvision \t - {torchvision.__version__}")
 
     train_df, val_df, test_df = load_dataset_from_files()
 
-    train_transforms = A.Compose([
-        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
-        A.RandomBrightnessContrast(p=0.2),
-        A.HorizontalFlip(p=0.5),
-        # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
-        # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
-        # the image to (C, H, W).
-        ToTensorV2(),
-    ])
+    train_transforms = A.Compose(
+        [
+            A.Resize(
+                height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH
+            ),
+            A.RandomBrightnessContrast(p=0.2),
+            A.HorizontalFlip(p=0.5),
+            # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
+            # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
+            # the image to (C, H, W).
+            ToTensorV2(),
+        ]
+    )
 
-    inference_transforms = A.Compose([
-        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
-        ToTensorV2(),
-    ])
+    inference_transforms = A.Compose(
+        [
+            A.Resize(
+                height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH
+            ),
+            ToTensorV2(),
+        ]
+    )
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
 
@@ -1310,7 +1383,12 @@ def main() -> None:
     print(
         summary(
             model=model,
-            input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
+            input_size=(
+                Configuration.BATCH_SIZE,
+                Configuration.CHANNELS,
+                Configuration.IMAGE_HEIGHT,
+                Configuration.IMAGE_WIDTH,
+            ),
             col_names=["output_size", "num_params", "trainable"],
             col_width=30,
             row_settings=["var_names"],
@@ -1344,38 +1422,38 @@ def main() -> None:
     # Define Scheduler
     scheduler = lr_scheduler.ReduceLROnPlateau(
         optimizer=optimizer,
-        mode='min',
+        mode="min",
         patience=Configuration.PATIENCE,
     )
 
-    print('Training U-Net Model')
-    print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
-    print('----------------------------------')
+    print("Training U-Net Model")
+    print(f"Train on {len(train_df)} samples, validate on {len(val_df)} samples.")
+    print("----------------------------------")
 
     # Generate training session config
     session_config = {
-        'model': model,
-        'train_dataloader': train_loader,
-        'eval_dataloader': val_loader,
-        'optimizer': optimizer,
-        'scheduler': scheduler,
-        'loss_fn': loss_fn,
-        'eval_loss_fn': loss_fn.natural_loss,
-        'epochs': Configuration.EPOCHS,
-        'train_device': Configuration.DEVICE,
-        'eval_device': Configuration.DEVICE,
+        "model": model,
+        "train_dataloader": train_loader,
+        "eval_dataloader": val_loader,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+        "loss_fn": loss_fn,
+        "eval_loss_fn": loss_fn.natural_loss,
+        "epochs": Configuration.EPOCHS,
+        "train_device": Configuration.DEVICE,
+        "eval_device": Configuration.DEVICE,
     }
 
     # Execute Training Session
     model, unet_session_history = train(**session_config)
 
     # Create Model directory
-    model_name = 'teacher'
-    model_path = './model/'
+    model_name = "teacher"
+    model_path = "./model/"
     os.makedirs(model_path, exist_ok=True)
 
     # Save Model
-    torch.save(model, os.path.join(model_path, model_name + '.pt'))
+    torch.save(model, os.path.join(model_path, model_name + ".pt"))
 
     # Convert U-Net history dict to DataFrame
     unet_session_history_df = pd.DataFrame(unet_session_history)

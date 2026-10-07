@@ -717,7 +717,7 @@ def generate_adversarial_examples(
             1.0,
         ).detach()
 
-    return cast(BatchImage, adversarial_images)
+    return adversarial_images
 
 
 @torch.no_grad()

@@ -14,16 +14,16 @@ import os
 from typing import Dict, List, Tuple, cast
 
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from beartype import beartype
-from jaxtyping import Float, UInt8, jaxtyped
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from PIL import Image
 import segmentation_models_pytorch as smp
-from sklearn.model_selection import train_test_split
 import torch
+from albumentations.pytorch import ToTensorV2
+from beartype import beartype
+from jaxtyping import Float, UInt8, jaxtyped
+from PIL import Image
+from sklearn.model_selection import train_test_split
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -780,7 +780,9 @@ def visualize_predictions(
     sample_ds = BDDSegmentationDataset(sample_df)
 
     # Switch to inference once for the whole grid; no gradients are needed.
-    model.eval()
+    # Use the underlying unwrapped module for batch_size=1 inference
+    eval_model = model.module if isinstance(model, nn.DataParallel) else model
+    eval_model.eval()
 
     for row in range(num_rows):
         # Load the raw pair: the image as an (H, W, 3) float array in [0, 1]
@@ -796,7 +798,7 @@ def visualize_predictions(
         # Forward pass, then collapse the 20-class logits to one class id per
         # pixel so the output can be colourised.
         with torch.inference_mode():
-            logits = model(image_tensor)
+            logits = eval_model(image_tensor)
         pred_class = logits.argmax(dim=1).squeeze(0).cpu().numpy()
 
         # Colour the predicted class map, then bring it back to [0, 1] for

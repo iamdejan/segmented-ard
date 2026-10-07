@@ -1,37 +1,26 @@
 import glob
 import os
+from typing import Callable, Dict, List, Tuple, cast
 
-import pandas as pd
-import numpy as np
+import albumentations as A
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-
+import segmentation_models_pytorch as smp
 import torch
-import torchvision
 import torch.optim.lr_scheduler as lr_scheduler
-
+import torchvision
+from albumentations.pytorch import ToTensorV2
+from beartype import beartype
+from jaxtyping import Float, UInt8, jaxtyped
+from PIL import Image
+from precompute_weights import BOUNDARY_CLASS_IDS, calculate_and_save_sample_weights
+from sklearn.model_selection import train_test_split
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchinfo import summary
-
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-
-from PIL import Image
 from tqdm import tqdm
-from typing import Callable, Dict, List, cast
-
-from sklearn.model_selection import train_test_split
-import segmentation_models_pytorch as smp
-
-from jaxtyping import Float, UInt8, jaxtyped
-from beartype import beartype
-
-from precompute_weights import (
-    BOUNDARY_CLASS_IDS,
-    calculate_and_save_sample_weights,
-)
-
 
 # Shape aliases that document the tensor layout at each stage of the pipeline.
 #
@@ -55,38 +44,57 @@ ClassIndexArray = UInt8[np.ndarray, "h w"]  # per-pixel class id map (numpy)
 # same palette so they render side by side with the ground-truth color labels
 # stored on disk. The exact colour per class only needs to be distinct and
 # consistent; it mirrors the default BDD100k colours.
-CLASS_COLORS = np.array([
-    [128,  64, 128],   # 0  - Road
-    [244,  35, 232],   # 1  - Sidewalk
-    [ 70,  70,  70],   # 2  - Building
-    [102, 102, 156],   # 3  - Wall
-    [190, 153, 153],   # 4  - Fence
-    [153, 153, 153],   # 5  - Pole
-    [250, 170,  30],   # 6  - Traffic Light
-    [220, 220,   0],   # 7  - Traffic Sign
-    [107, 142,  35],   # 8  - Vegetation
-    [152, 251, 152],   # 9  - Terrain
-    [ 70, 130, 180],   # 10 - Sky
-    [220,  20,  60],   # 11 - Person
-    [255,   0,   0],   # 12 - Rider
-    [  0,   0, 142],   # 13 - Car
-    [  0,   0,  70],   # 14 - Truck
-    [  0,  60, 100],   # 15 - Bus
-    [  0,  80, 100],   # 16 - Train
-    [  0,   0, 230],   # 17 - Motorcycle
-    [119,  11,  32],   # 18 - Bicycle
-    [  0,   0,   0],   # 19 - Unknown
-], dtype=np.uint8)
+CLASS_COLORS = np.array(
+    [
+        [128, 64, 128],  # 0  - Road
+        [244, 35, 232],  # 1  - Sidewalk
+        [70, 70, 70],  # 2  - Building
+        [102, 102, 156],  # 3  - Wall
+        [190, 153, 153],  # 4  - Fence
+        [153, 153, 153],  # 5  - Pole
+        [250, 170, 30],  # 6  - Traffic Light
+        [220, 220, 0],  # 7  - Traffic Sign
+        [107, 142, 35],  # 8  - Vegetation
+        [152, 251, 152],  # 9  - Terrain
+        [70, 130, 180],  # 10 - Sky
+        [220, 20, 60],  # 11 - Person
+        [255, 0, 0],  # 12 - Rider
+        [0, 0, 142],  # 13 - Car
+        [0, 0, 70],  # 14 - Truck
+        [0, 60, 100],  # 15 - Bus
+        [0, 80, 100],  # 16 - Train
+        [0, 0, 230],  # 17 - Motorcycle
+        [119, 11, 32],  # 18 - Bicycle
+        [0, 0, 0],  # 19 - Unknown
+    ],
+    dtype=np.uint8,
+)
 
 
 # Human-readable names for each palette row, kept in lock-step with
 # ``CLASS_COLORS`` so class ids can be logged without consulting the palette
 # comments by hand.
 CLASS_NAMES = [
-    "road", "sidewalk", "building", "wall", "fence", "pole",
-    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
-    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
-    "bicycle", "unknown",
+    "road",
+    "sidewalk",
+    "building",
+    "wall",
+    "fence",
+    "pole",
+    "traffic light",
+    "traffic sign",
+    "vegetation",
+    "terrain",
+    "sky",
+    "person",
+    "rider",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "motorcycle",
+    "bicycle",
+    "unknown",
 ]
 
 
@@ -127,9 +135,7 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
     # every comparison operates on the whole image at once.
     for class_id, (red, green, blue) in enumerate(CLASS_COLORS):
         match = (
-            (label[..., 0] == red)
-            & (label[..., 1] == green)
-            & (label[..., 2] == blue)
+            (label[..., 0] == red) & (label[..., 1] == green) & (label[..., 2] == blue)
         )
         class_ids[match] = class_id
 
@@ -149,7 +155,7 @@ class Configuration:
     LR = 1e-4
     PATIENCE = 8
 
-    APPLY_SHUFFLE=True
+    APPLY_SHUFFLE = True
     SEED = 768
     # ``ORIGINAL_IMAGE_HEIGHT``/``ORIGINAL_IMAGE_WIDTH`` describe the spatial extent of a sample.
     # The BDD100k images used here are 720 rows (height) by 1280 columns
@@ -160,7 +166,7 @@ class Configuration:
     # ``IMAGE_HEIGHT``/``IMAGE_WIDTH`` describe the resolution after downscale the images.
     IMAGE_HEIGHT = 360
     IMAGE_WIDTH = 640
-    CHANNELS = 3 # RGB
+    CHANNELS = 3  # RGB
 
 
 class Path:
@@ -184,7 +190,6 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
         self.image_paths: List[str] = df["image_paths"].to_list()
         self.mask_paths: List[str] = df["mask_paths"].to_list()
         self.transform = transform
-
 
     @jaxtyped(typechecker=beartype)
     def load_sample(self, index: int) -> tuple[NumpyImage, ClassIndexArray]:
@@ -233,10 +238,8 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
 
         return image, class_mask
 
-
     def __len__(self) -> int:
         return len(self.image_paths)
-
 
     @jaxtyped(typechecker=beartype)
     def __getitem__(self, index: int) -> tuple[ImageTensor, MaskTensor]:
@@ -271,9 +274,13 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, MaskTensor]]):
         # One-hot encode the (H, W) class ids into (NUM_CLASSES, H, W) floats
         # so the mask matches the model's (B, NUM_CLASSES, H, W) output and the
         # Dice loss. ``one_hot`` needs int64 input, hence the cast.
-        mask_one_hot = torch.nn.functional.one_hot(
-            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float()
+        mask_one_hot = (
+            torch.nn.functional.one_hot(
+                transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
+            )
+            .permute(2, 0, 1)
+            .float()
+        )
 
         return transformed["image"], mask_one_hot
 
@@ -303,17 +310,41 @@ def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> 
 
 
 def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
+    return find_mask_path_from_image(
+        complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH
+    )
 
 
 def find_val_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
+    return find_mask_path_from_image(
+        complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH
+    )
 
 
-def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # load train, then split into train-test
+def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Scan disk and load the BDD100k train, validation, and test splits.
+
+    This function duplicates the exact partitioning logic from the training
+    scripts so the model is evaluated on the identical test split that was held
+    out during training.
+
+    Steps
+    -----
+    1. Collect train masks and filter out corrupted or non-standard resolutions.
+    2. Map to corresponding train images and filter any missing or malformed pairs.
+    3. Partition the train-test pool using 80/20 ``train_test_split`` with the
+       fixed ``Configuration.SEED``.
+    4. Collect and validate validation masks and images.
+    5. Return DataFrames for train, validation, and test splits.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        DataFrames representing ``(train_df, val_df, test_df)``.
+    """
+    # Load train masks, dropping any that do not match the expected resolution.
     train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
-    problematic_masks = []
+    problematic_masks: List[str] = []
     for complete_mask_path in train_mask_paths:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
@@ -323,25 +354,31 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     print(f"Problematic masks: {problematic_masks}")
 
     train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
-    problematic_images = []
+    problematic_images: List[str] = []
     for complete_image_path in train_image_paths:
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
                 train_image_paths.remove(complete_image_path)
-                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+                train_mask_paths.remove(
+                    find_train_mask_path_from_image(complete_image_path)
+                )
     print(f"Problematic images: {problematic_images}")
 
-    train_test_df = pd.DataFrame({
-        "image_paths": train_image_paths,
-        "mask_paths": train_mask_paths,
-    })
-    train_df, test_df = train_test_split(train_test_df, test_size=0.2, random_state=Configuration.SEED)
+    train_test_df = pd.DataFrame(
+        {
+            "image_paths": train_image_paths,
+            "mask_paths": train_mask_paths,
+        }
+    )
+    train_df, test_df = train_test_split(
+        train_test_df, test_size=0.2, random_state=Configuration.SEED
+    )
 
-    # load val
+    # Load the BDD100k validation split, again filtering non-standard samples.
     val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
-    problematic_val_masks = []
+    problematic_val_masks: List[str] = []
     for complete_mask_path in val_mask_paths:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
@@ -351,20 +388,24 @@ def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     print(f"Problematic val masks: {problematic_val_masks}")
 
     val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
-    problematic_val_images = []
+    problematic_val_images: List[str] = []
     for complete_image_path in val_image_paths:
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_val_images.append(complete_image_path)
                 val_image_paths.remove(complete_image_path)
-                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+                val_mask_paths.remove(
+                    find_val_mask_path_from_image(complete_image_path)
+                )
     print(f"Problematic val images: {problematic_val_images}")
 
-    val_df = pd.DataFrame({
-        "image_paths": val_image_paths,
-        "mask_paths": val_mask_paths,
-    })
+    val_df = pd.DataFrame(
+        {
+            "image_paths": val_image_paths,
+            "mask_paths": val_mask_paths,
+        }
+    )
 
     return train_df, val_df, test_df
 
@@ -554,7 +595,7 @@ class DistillationLoss(nn.Module):
         # suggested by the authors of the paper.
         kl_loss = torch.sum(
             soft_targets * (soft_targets.log() - soft_prob), dim=1
-        ).mean() * (self.temperature ** 2)
+        ).mean() * (self.temperature**2)
 
         # Hard supervision keeps the student tied to the ground truth rather
         # than drifting toward whatever mistakes the teacher makes. ``self.
@@ -568,9 +609,9 @@ class DistillationLoss(nn.Module):
 
 @torch.no_grad()
 def compute_batch_macro_iou(
-    y_pred: torch.Tensor,      # (B, C, H, W) logits
-    y_true: torch.Tensor,      # (B, C, H, W) one-hot
-    num_classes: int = 19,     # Classes 0 to 18 (excludes 19: Unknown)
+    y_pred: torch.Tensor,  # (B, C, H, W) logits
+    y_true: torch.Tensor,  # (B, C, H, W) one-hot
+    num_classes: int = 19,  # Classes 0 to 18 (excludes 19: Unknown)
     eps: float = 1e-7,
 ) -> float:
     """Compute the mean macro IoU over a batch, excluding ignored classes.
@@ -632,7 +673,7 @@ def execute_epoch(
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
-    device: torch.device
+    device: torch.device,
 ) -> tuple[float, float]:
     """Run one distillation training epoch.
 
@@ -697,7 +738,6 @@ def execute_epoch(
         # Compute Macro IoU for the batch (excluding class 19)
         train_iou += compute_batch_macro_iou(student_logits, y, num_classes=19)
 
-
     # Compute Step Metrics
     train_loss = train_loss / len(dataloader)
     train_iou = train_iou / len(dataloader)
@@ -710,7 +750,7 @@ def evaluate(
     model: nn.Module,
     dataloader: DataLoader[tuple[ImageTensor, MaskTensor]],
     loss_fn: Callable[[Logits, BatchMask], Scalar],
-    device: torch.device
+    device: torch.device,
 ) -> tuple[float, float]:
     """Evaluate the model on a dataloader and return mean loss and macro IoU.
 
@@ -774,7 +814,7 @@ def train(
     loss_fn: DistillationLoss,
     epochs: int,
     train_device: torch.device,
-    eval_device: torch.device
+    eval_device: torch.device,
 ) -> tuple[nn.Module, Dict[str, List[float]]]:
     """Train the student via knowledge distillation from the teacher.
 
@@ -814,10 +854,10 @@ def train(
     """
     # Initialize training session
     session: Dict[str, List[float]] = {
-        'loss'                 : [],
-        'macro_iou_score'      : [],
-        'eval_loss'            : [],
-        'eval_macro_iou_score' : []
+        "loss": [],
+        "macro_iou_score": [],
+        "eval_loss": [],
+        "eval_macro_iou_score": [],
     }
 
     # The student is scored against hard targets alone, so evaluation uses the
@@ -827,32 +867,26 @@ def train(
 
     # Track the checkpoint with the lowest validation loss so the final student
     # can be reverted to the best-seen weights instead of the last epoch's.
-    best_eval_loss = float('inf')
+    best_eval_loss = float("inf")
     best_model_state: Dict[str, Tensor] | None = None
 
     # Training loop
     for epoch in tqdm(range(epochs)):
         # Execute Epoch
-        print(f'\nEpoch {epoch + 1}/{epochs}')
+        print(f"\nEpoch {epoch + 1}/{epochs}")
         train_loss, train_macro_iou = execute_epoch(
-            teacher,
-            student,
-            train_dataloader,
-            optimizer,
-            loss_fn,
-            train_device
+            teacher, student, train_dataloader, optimizer, loss_fn, train_device
         )
 
         # Evaluate Model
         eval_loss, eval_macro_iou = evaluate(
-            student,
-            eval_dataloader,
-            eval_loss_fn,
-            eval_device
+            student, eval_dataloader, eval_loss_fn, eval_device
         )
 
         # Access the raw unwrapped student so saved weights are agnostic of DataParallel
-        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+        raw_student = (
+            student.module if isinstance(student, nn.DataParallel) else student
+        )
 
         # Keep a snapshot whenever the validation loss improves so the best
         # checkpoint is available for the final test evaluation.
@@ -867,27 +901,29 @@ def train(
         current_lr = 0
         if scheduler:
             scheduler.step(eval_loss)
-            current_lr = optimizer.param_groups[0]['lr']
+            current_lr = optimizer.param_groups[0]["lr"]
 
         # Log Epoch Metrics
-        log_text = f'loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}'
+        log_text = f"loss: {train_loss:.4f} - train_macro_iou: {train_macro_iou:.4f} - eval_loss: {eval_loss:.4f} - eval_macro_iou_score: {eval_macro_iou:.4f}"
 
         if scheduler:
-            print(log_text + f' - lr: {current_lr}')
+            print(log_text + f" - lr: {current_lr}")
         else:
             print(log_text)
 
         # Record Epoch Metrics
-        session['loss'].append(train_loss)
-        session['macro_iou_score'].append(train_macro_iou)
-        session['eval_loss'].append(eval_loss)
-        session['eval_macro_iou_score'].append(eval_macro_iou)
+        session["loss"].append(train_loss)
+        session["macro_iou_score"].append(train_macro_iou)
+        session["eval_loss"].append(eval_loss)
+        session["eval_macro_iou_score"].append(eval_macro_iou)
 
     # Restore the best checkpoint so the student returned to the caller (and
     # the one evaluated on the test set downstream) reflects the lowest eval
     # loss.
     if best_model_state is not None:
-        raw_student = student.module if isinstance(student, nn.DataParallel) else student
+        raw_student = (
+            student.module if isinstance(student, nn.DataParallel) else student
+        )
         raw_student.load_state_dict(best_model_state)
 
     # Return raw student and session metrics
@@ -895,48 +931,79 @@ def train(
 
 
 def plot_training_curves(
-    history: Dict[str, List[float]],
-    fig_size: tuple[int, int] = (20, 10)
+    history: Dict[str, List[float]], fig_size: tuple[int, int] = (20, 10)
 ) -> None:
 
-    loss = np.array(history['loss'])
-    val_loss = np.array(history['eval_loss'])
+    loss = np.array(history["loss"])
+    val_loss = np.array(history["eval_loss"])
 
-    iou = np.array(history['macro_iou_score'])
-    val_iou = np.array(history['eval_macro_iou_score'])
+    iou = np.array(history["macro_iou_score"])
+    val_iou = np.array(history["eval_macro_iou_score"])
 
-    epochs = range(len(history['loss']))
+    epochs = range(len(history["loss"]))
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=fig_size)
 
     # Plot loss
-    ax1.plot(epochs, loss, label='training_loss', marker='o', color='C5')
-    ax1.plot(epochs, val_loss, label='eval_loss', marker='o', color='C6')
+    ax1.plot(epochs, loss, label="training_loss", marker="o", color="C5")
+    ax1.plot(epochs, val_loss, label="eval_loss", marker="o", color="C6")
 
     # Fill area between losses
-    ax1.fill_between(epochs, loss, val_loss, where=(loss > val_loss), color='C5', alpha=0.4, interpolate=True)
-    ax1.fill_between(epochs, loss, val_loss, where=(loss < val_loss), color='C6', alpha=0.4, interpolate=True)
+    ax1.fill_between(
+        epochs,
+        loss,
+        val_loss,
+        where=(loss > val_loss),
+        color="C5",
+        alpha=0.4,
+        interpolate=True,
+    )
+    ax1.fill_between(
+        epochs,
+        loss,
+        val_loss,
+        where=(loss < val_loss),
+        color="C6",
+        alpha=0.4,
+        interpolate=True,
+    )
 
     # Add Text & Formats
-    ax1.set_title('Loss (Lower Means Better)', fontsize=22)
-    ax1.set_xlabel('Epochs', fontsize=18)
-    ax1.set_ylabel('Loss', fontsize=18)
-    ax1.tick_params(axis='both', which='major', labelsize=14)
+    ax1.set_title("Loss (Lower Means Better)", fontsize=22)
+    ax1.set_xlabel("Epochs", fontsize=18)
+    ax1.set_ylabel("Loss", fontsize=18)
+    ax1.tick_params(axis="both", which="major", labelsize=14)
     ax1.legend(fontsize=14)
 
     # Plot metric
-    ax2.plot(epochs, iou, label='training_macro_iou', marker='o', color='C5')
-    ax2.plot(epochs, val_iou, label='eval_macro_iou', marker='o', color='C6')
+    ax2.plot(epochs, iou, label="training_macro_iou", marker="o", color="C5")
+    ax2.plot(epochs, val_iou, label="eval_macro_iou", marker="o", color="C6")
 
     # Fill area between metrics
-    ax2.fill_between(epochs, iou, val_iou, where=(iou > val_iou), color='C5', alpha=0.4, interpolate=True)
-    ax2.fill_between(epochs, iou, val_iou, where=(iou < val_iou), color='C6', alpha=0.4, interpolate=True)
+    ax2.fill_between(
+        epochs,
+        iou,
+        val_iou,
+        where=(iou > val_iou),
+        color="C5",
+        alpha=0.4,
+        interpolate=True,
+    )
+    ax2.fill_between(
+        epochs,
+        iou,
+        val_iou,
+        where=(iou < val_iou),
+        color="C6",
+        alpha=0.4,
+        interpolate=True,
+    )
 
     # Add Text & Formats
-    ax2.set_title('Macro IoU (Higher Means Better)', fontsize=22)
-    ax2.set_xlabel('Epochs', fontsize=18)
-    ax2.set_ylabel('Macro IoU', fontsize=18)
-    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.set_title("Macro IoU (Higher Means Better)", fontsize=22)
+    ax2.set_xlabel("Epochs", fontsize=18)
+    ax2.set_ylabel("Macro IoU", fontsize=18)
+    ax2.tick_params(axis="both", which="major", labelsize=14)
     ax2.legend(fontsize=14)
     sns.despine()
 
@@ -967,13 +1034,12 @@ def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
 
 
 def visualize_predictions(
-    model:nn.Module,
-    test_df:pd.DataFrame,
-    device:torch.device,
-    num_samples:int = 4,
-    output_path:str = "./predictions.png",
+    model: nn.Module,
+    test_df: pd.DataFrame,
+    device: torch.device,
+    num_samples: int = 4,
+    output_path: str = "./model/predictions.png",
 ) -> None:
-
     """Render a fixed set of test samples next to their true and predicted masks.
 
     The first ``num_samples`` rows of ``test_df`` are selected, every image is
@@ -994,7 +1060,8 @@ def visualize_predictions(
     num_samples : int, optional
         Number of samples to visualise. Defaults to 4.
     output_path : str, optional
-        Destination of the exported PNG. Defaults to ``"./predictions.png"``.
+        Destination of the exported PNG. Defaults to
+        ``"./model/predictions.png"``.
 
     Raises
     ------
@@ -1036,7 +1103,7 @@ def visualize_predictions(
         image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous()
         image_tensor = image_tensor.unsqueeze(0).to(device)
 
-        # Foward pass, then collapse the 20-class logits to one class id per
+        # Forward pass, then collapse the 20-class logits to one class id per
         # pixel so the output can be colourised.
         with torch.inference_mode():
             logits = eval_model(image_tensor)
@@ -1048,7 +1115,9 @@ def visualize_predictions(
 
         # Colour the ground-truth class map the same way so the two overlays
         # are directly comparable.
-        true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+        true_mask_color = (
+            colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
+        )
 
         axes[row, 0].imshow(image)
         axes[row, 0].set_title("Image")
@@ -1068,6 +1137,8 @@ def visualize_predictions(
             ax.set_xticklabels([])
             ax.set_yticklabels([])
 
+    # Ensure the output directory exists before writing the PNG.
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -1075,34 +1146,44 @@ def visualize_predictions(
 
 def main() -> None:
     # Print current Torch package versions
-    print('Package versions:')
-    print('*'*26)
-    print(f'torch \t\t - {torch.__version__}')
-    print(f'torchvision \t - {torchvision.__version__}')
+    print("Package versions:")
+    print("*" * 26)
+    print(f"torch \t\t - {torch.__version__}")
+    print(f"torchvision \t - {torchvision.__version__}")
 
     train_df, val_df, test_df = load_dataset_from_files()
 
-    train_transforms = A.Compose([
-        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
-        A.RandomBrightnessContrast(p=0.2),
-        A.HorizontalFlip(p=0.5),
-        # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
-        # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
-        # the image to (C, H, W).
-        ToTensorV2(),
-    ])
+    train_transforms = A.Compose(
+        [
+            A.Resize(
+                height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH
+            ),
+            A.RandomBrightnessContrast(p=0.2),
+            A.HorizontalFlip(p=0.5),
+            # The mask is now a 2-D class-index map, so ``ToTensorV2`` needs no
+            # ``transpose_mask``: it leaves the (H, W) mask as-is and only converts
+            # the image to (C, H, W).
+            ToTensorV2(),
+        ]
+    )
 
-    inference_transforms = A.Compose([
-        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
-        ToTensorV2(),
-    ])
+    inference_transforms = A.Compose(
+        [
+            A.Resize(
+                height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH
+            ),
+            ToTensorV2(),
+        ]
+    )
     train_ds = BDDSegmentationDataset(train_df, transform=train_transforms)
     val_ds = BDDSegmentationDataset(val_df, transform=inference_transforms)
 
     # Calculate sample weights only if the NPY file does not exist, and reuse if
     # that file exists. This bypasses the slow PNG mask decoding pass on repeated runs.
     if os.path.exists(Path.SAMPLE_WEIGHTS_PATH):
-        print(f"Reusing precomputed sample weights from '{Path.SAMPLE_WEIGHTS_PATH}'...")
+        print(
+            f"Reusing precomputed sample weights from '{Path.SAMPLE_WEIGHTS_PATH}'..."
+        )
         train_sample_weights = np.load(Path.SAMPLE_WEIGHTS_PATH)
     else:
         print(
@@ -1130,10 +1211,10 @@ def main() -> None:
         sampler=train_sampler,
     )
     val_loader = DataLoader(
-            dataset=val_ds,
-            batch_size=Configuration.BATCH_SIZE,
-            shuffle=Configuration.APPLY_SHUFFLE
-        )
+        dataset=val_ds,
+        batch_size=Configuration.BATCH_SIZE,
+        shuffle=Configuration.APPLY_SHUFFLE,
+    )
 
     # Load the pre-trained teacher from disk (saved by ``train_teacher.py``) and
     # freeze it. The teacher only produces soft targets, so its parameters must
@@ -1155,19 +1236,24 @@ def main() -> None:
         encoder_name="mobilenet_v2",
         encoder_weights="imagenet",
         in_channels=Configuration.CHANNELS,
-        classes=Configuration.NUM_CLASSES
+        classes=Configuration.NUM_CLASSES,
     )
     student = student.to(Configuration.DEVICE)
 
     print(
         summary(
-                model=student,
-                input_size=(Configuration.BATCH_SIZE, Configuration.CHANNELS, Configuration.IMAGE_HEIGHT, Configuration.IMAGE_WIDTH),
-                col_names=["output_size", "num_params", "trainable"],
-                col_width=30,
-                row_settings=["var_names"],
-                depth=5
-            )
+            model=student,
+            input_size=(
+                Configuration.BATCH_SIZE,
+                Configuration.CHANNELS,
+                Configuration.IMAGE_HEIGHT,
+                Configuration.IMAGE_WIDTH,
+            ),
+            col_names=["output_size", "num_params", "trainable"],
+            col_width=30,
+            row_settings=["var_names"],
+            depth=5,
+        )
     )
 
     # Wrap student in DataParallel if 2 or more GPUs are present
@@ -1192,34 +1278,29 @@ def main() -> None:
 
     # Define optimizer over the student's parameters only; the teacher is
     # frozen and must stay out of the optimizer.
-    optimizer = torch.optim.AdamW(
-        student.parameters(),
-        lr=Configuration.LR
-    )
+    optimizer = torch.optim.AdamW(student.parameters(), lr=Configuration.LR)
 
     # Define Scheduler
     scheduler = lr_scheduler.ReduceLROnPlateau(
-        optimizer=optimizer,
-        mode='min',
-        patience=Configuration.PATIENCE
+        optimizer=optimizer, mode="min", patience=Configuration.PATIENCE
     )
 
-    print('Distilling Knowledge From Teacher To Student')
-    print(f'Train on {len(train_df)} samples, validate on {len(val_df)} samples.')
-    print('----------------------------------')
+    print("Distilling Knowledge From Teacher To Student")
+    print(f"Train on {len(train_df)} samples, validate on {len(val_df)} samples.")
+    print("----------------------------------")
 
     # Generate training session config
     session_config = {
-        'teacher'             : teacher,
-        'student'             : student,
-        'train_dataloader'    : train_loader,
-        'eval_dataloader'     : val_loader,
-        'optimizer'           : optimizer,
-        'scheduler'           : scheduler,
-        'loss_fn'             : loss_fn,
-        'epochs'              : Configuration.EPOCHS,
-        'train_device'        : Configuration.DEVICE,
-        'eval_device'         : Configuration.DEVICE,
+        "teacher": teacher,
+        "student": student,
+        "train_dataloader": train_loader,
+        "eval_dataloader": val_loader,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+        "loss_fn": loss_fn,
+        "epochs": Configuration.EPOCHS,
+        "train_device": Configuration.DEVICE,
+        "eval_device": Configuration.DEVICE,
     }
 
     # Execute Training Session
@@ -1227,30 +1308,23 @@ def main() -> None:
 
     # Create Model directory if it does not already exist (it is created by the
     # teacher run, but this script should still work standalone).
-    model_name = 'student'
-    model_path = './model/'
+    model_name = "student"
+    model_path = "./model/"
     os.makedirs(model_path, exist_ok=True)
 
     # Save Model
-    torch.save(student, model_path + model_name + '.pt')
+    torch.save(student, model_path + model_name + ".pt")
 
     # Convert student history dict to DataFrame
     student_session_history_df = pd.DataFrame(student_session_history)
     print(student_session_history_df)
 
     # Plot student Session Training History
-    plot_training_curves(
-        student_session_history,
-        fig_size=(20, 20)
-    )
+    plot_training_curves(student_session_history, fig_size=(20, 20))
 
     # Export a grid of test samples (image / image+true mask /
     # image+predicted mask) so the model output can be inspected visually.
-    visualize_predictions(
-        student,
-        test_df,
-        Configuration.DEVICE
-    )
+    visualize_predictions(student, test_df, Configuration.DEVICE)
 
 
 if __name__ == "__main__":
