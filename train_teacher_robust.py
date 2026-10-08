@@ -1200,7 +1200,7 @@ def visualize_predictions(
     test_df: pd.DataFrame,
     device: torch.device,
     num_samples: int = 4,
-    output_path: str = "./predictions.png",
+    output_path: str = "./model/predictions.png",
 ) -> None:
     """Render test samples side by side with ground-truth and predicted masks.
 
@@ -1229,7 +1229,7 @@ def visualize_predictions(
     num_samples : int, optional
         Number of samples to visualise. Defaults to 4.
     output_path : str, optional
-        Destination of the exported PNG. Defaults to ``"./predictions.png"``.
+        Destination of the exported PNG. Defaults to ``"./model/predictions.png"``.
 
     Raises
     ------
