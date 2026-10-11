@@ -530,7 +530,7 @@ $
 
 #set par(first-line-indent: (amount: 0cm))
 where:
-
+\
 #box(
   stroke: 0pt,
   inset: (left: tab_length)
@@ -709,6 +709,7 @@ $
 
 #set par(first-line-indent: (amount: 0cm))
 where:
+\
 #box(
   stroke: 0pt,
   inset: (left: tab_length)
@@ -732,6 +733,7 @@ $
 #set par(first-line-indent: (amount: 0cm))
 
 where:
+\
 #box(
   stroke: 0pt,
   inset: (left: tab_length)
@@ -780,7 +782,7 @@ Dice coefficient is widely used in use cases where there's a heavy imbalance in 
 ]
 #v(2 * line_spacing)
 
-Attack success rate is defined as the percentage of adversarial inputs that cause the model to output an incorrect class (Qiao et al., 2026). There are two ways to calculate ASR, either by using targeted ASR, in which the attack measures the model against a specific target output, or untargeted ASR, in which the attack only measures the incorrect rate of the prediction. For untargeted ASR, the formula goes like this:
+Attack success rate is defined as the percentage of adversarial inputs that cause the model to output an incorrect class (Qiao et al., 2026). There are two ways to calculate ASR, either by using targeted ASR, in which the attack measures the model against a specific target output, or untargeted ASR, in which the attack only measures the incorrect rate of the prediction. For untargeted ASR, the original formula goes like this:
 $
   text("ASR")_(text("untargeted")) = 1 - (text("Acc")_(text("adversarial"))) / (text("Acc")_(text("clean")))
 $
