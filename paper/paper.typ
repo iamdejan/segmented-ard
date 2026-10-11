@@ -311,6 +311,8 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
   + What is the impact of the proposed framework on inference latency and computational overhead in resource-constrained deployment settings?
 ]
 
+// TODO: decide if we want to keep RQ2 unchanged, or adjust to ensure narrower scope. Currently, in the evaluation scripts, we have yet to measure across diverse driving conditions.
+
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Research Objectives]
@@ -726,7 +728,7 @@ where:
 ]
 #v(2 * line_spacing)
 
-Class-wise pixel accuracy is an extension of pixel accuracy, in which the ratio of correct pixels are calculated per class. For each class, the pixel accuracy is calculated as follows:
+Class-wise Pixel Accuracy (also equivalent to per-class recall) is an extension of pixel accuracy, in which the ratio of correct pixels are calculated per class. For each class, the pixel accuracy is calculated as follows:
 $
   text("CPA")_(i) = (p_(\i\i)) / (sum_(j = 0)^(K) p_(\i\j))
 $
@@ -782,7 +784,7 @@ Dice coefficient is widely used in use cases where there's a heavy imbalance in 
 ]
 #v(2 * line_spacing)
 
-Attack success rate is defined as the percentage of adversarial inputs that cause the model to output an incorrect class (Qiao et al., 2026). There are two ways to calculate ASR, either by using targeted ASR, in which the attack measures the model against a specific target output, or untargeted ASR, in which the attack only measures the incorrect rate of the prediction. For untargeted ASR, the original formula goes like this:
+Attack success rate is defined as the percentage of adversarial inputs that cause the model to output an incorrect class (Qiao et al., 2026). There are two ways to calculate ASR, either by using targeted ASR, in which the attack measures the model against a specific target output, or untargeted ASR, in which the attack only measures the incorrect rate of the prediction. For untargeted ASR, the original formula for image classification task is defined as:
 $
   text("ASR")_(text("untargeted")) = 1 - (text("Acc")_(text("adversarial"))) / (text("Acc")_(text("clean")))
 $
@@ -793,13 +795,28 @@ where:
   stroke: 0pt,
   inset: (left: tab_length)
 )[
-  - $text("Acc")_(text("adversarial"))$ is defined as the accuracy of the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
-  - $text("Acc")_(text("clean"))$ is defined as the accuracy of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
+  - $text("Acc")_(text("adversarial"))$ is defined as the accuracy of the perturbed inputs.
+  - $text("Acc")_(text("clean"))$ is defined as the accuracy of the clean inputs. The clean inputs are inputs from the dataset, without any attack applied.
 ]
 
 #set par(first-line-indent: (amount: tab_length))
 
-In this study, lower ASR is preferrable, signaling high robustnesss that the model possesses.
+Since this study focuses on semantic segmentation, there should be an adjustment to the formula. The adjusted formula is:
+$
+  text("ASR")_(text("untargeted")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("mIoU")_(text("adversarial"))$ is defined as the mean intersection of union (mIoU) for the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
+  - $text("mIoU")_(text("clean"))$ is defined as the mean intersection of union (mIoU) of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
+]
+
+Lower ASR is preferrable, signaling high robustnesss that the model possesses.
 
 #v(2 * line_spacing)
 #heading(level: 3)[
