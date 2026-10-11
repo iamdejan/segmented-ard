@@ -313,7 +313,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 
 // TODO: decide if we want to keep RQ2 unchanged, or adjust to ensure narrower scope. Currently, in the evaluation scripts, we have yet to measure across diverse driving conditions.
 
-// TODO: measure computational overhead.
+// TODO: define computational overhead in the paper, Section 3.8.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
