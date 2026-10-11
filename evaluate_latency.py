@@ -1,33 +1,24 @@
-"""Latency and resource-overhead evaluation for segmentation models.
+"""Latency evaluation script for trained semantic segmentation models.
 
 This module loads a trained PyTorch segmentation checkpoint (a full ``nn.Module``
-serialized by the training scripts) and benchmarks steady-state *inference* on
-the BDD100k test split. Forward-pass latency is measured per image (batch size 1)
-with CUDA synchronisation where needed.
+serialized by the training scripts) and measures the *inference* latency of the
+model on the BDD100k test split. Latency is defined here as the total wall-clock
+time between submitting a single input image to the model and receiving the
+output logits, so it is measured per-image (batch size 1) rather than as batch
+throughput.
 
-In addition to latency percentiles, the benchmark records resource-use indicators
-that are useful when discussing deployment overhead:
-
-* peak process CPU utilisation during a measured forward pass;
-* peak process RAM (resident-set size / RSS);
-* peak CPU temperature when the operating system exposes a CPU sensor;
-* peak PyTorch-managed GPU memory (allocated and reserved) on CUDA;
-* peak NVIDIA GPU temperature and total device VRAM usage when NVML is available.
-
-The first warm-up iterations are excluded from both latency and resource summaries
-so that one-off CUDA/cuDNN/allocator initialisation costs do not dominate the
-steady-state results. Temperature support is platform dependent. NVIDIA
-temperature/NVML metrics require the optional ``nvidia-ml-py`` package
-(``import pynvml``). CPU/RAM metrics require ``psutil``; if an optional sensor is
-unavailable, the benchmark still runs and reports that metric as unavailable.
+The measured latencies are summarised on the console using common percentiles
+(P25, P50/median, P75, P90, P95, P99) plus the mean, all reported in
+milliseconds. A small warm-up phase is discarded so that one-off costs (CUDA
+context initialisation, cuDNN algorithm autotuning, memory allocator warm-up)
+do not distort the distribution.
 """
 
 import argparse
 import glob
 import os
-import threading
 import time
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Tuple, cast
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -40,16 +31,6 @@ from sklearn.model_selection import train_test_split
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-
-try:
-    import psutil
-except ImportError:  # Optional: latency and CUDA-memory metrics can still run.
-    psutil = None  # type: ignore[assignment]
-
-try:
-    import pynvml
-except ImportError:  # Optional: only needed for NVIDIA temperature/NVML metrics.
-    pynvml = None  # type: ignore[assignment]
 
 
 # Shape aliases documented alongside each pipeline stage. ``jaxtyped`` +
@@ -106,11 +87,6 @@ class Configuration:
     # the one-off costs of device warm-up so the reported distribution reflects
     # steady-state inference only.
     WARMUP_ITERATIONS = 20
-
-    # Hardware sensors are relatively slow to query, so they are sampled in a
-    # low-overhead background thread during the measured part of the benchmark.
-    RESOURCE_SAMPLE_INTERVAL_SECONDS = 0.25
-    BYTES_PER_MIB = 1024.0 ** 2
 
 
 class Path:
@@ -458,396 +434,85 @@ def load_trained_model(checkpoint_path: str, device: torch.device) -> nn.Module:
     return model
 
 
-def _read_max_cpu_temperature_c() -> Optional[float]:
-    """Return the hottest CPU-related sensor currently exposed by psutil.
-
-    CPU temperature availability is operating-system and hardware dependent. On
-    many Linux systems ``psutil.sensors_temperatures`` exposes ``coretemp``,
-    ``k10temp``, ``zenpower`` or similarly named sensors. Windows/macOS commonly
-    expose no value through psutil, in which case ``None`` is returned.
-    """
-    if psutil is None or not hasattr(psutil, "sensors_temperatures"):
-        return None
-
-    try:
-        temperature_groups = psutil.sensors_temperatures(fahrenheit=False)
-    except (AttributeError, NotImplementedError, OSError):
-        return None
-
-    if not temperature_groups:
-        return None
-
-    preferred_group_tokens = (
-        "coretemp",
-        "k10temp",
-        "zenpower",
-        "cpu_thermal",
-        "x86_pkg_temp",
-    )
-    preferred_label_tokens = ("cpu", "package", "core", "tdie", "tctl")
-
-    candidates: List[float] = []
-    for group_name, entries in temperature_groups.items():
-        group_lower = group_name.lower()
-        group_is_cpu = any(token in group_lower for token in preferred_group_tokens)
-
-        for entry in entries:
-            current = getattr(entry, "current", None)
-            if current is None:
-                continue
-
-            label = str(getattr(entry, "label", "") or "").lower()
-            label_is_cpu = any(token in label for token in preferred_label_tokens)
-            if group_is_cpu or label_is_cpu:
-                candidates.append(float(current))
-
-    return max(candidates) if candidates else None
-
-
-class ResourceMonitor:
-    """Low-overhead background sampler for RAM and temperature measurements.
-
-    The monitor deliberately does *not* use sampled CPU percentage as the primary
-    CPU metric, because the model's forward pass may be much shorter than a sensor
-    sampling interval. Peak CPU utilisation is instead derived in the benchmark
-    from process CPU-time deltas measured around every individual forward pass.
-    """
-
-    def __init__(self, device: torch.device, sample_interval_seconds: float) -> None:
-        self.device = device
-        self.sample_interval_seconds = max(float(sample_interval_seconds), 0.05)
-        self.process = psutil.Process(os.getpid()) if psutil is not None else None
-
-        self.baseline_process_rss_bytes: Optional[int] = None
-        self.peak_process_rss_bytes: Optional[int] = None
-        self.peak_system_ram_percent: Optional[float] = None
-        self.max_cpu_temperature_c: Optional[float] = None
-        self.max_gpu_temperature_c: Optional[float] = None
-        self.peak_nvml_device_vram_used_bytes: Optional[int] = None
-
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._nvml_handle = None
-        self._nvml_initialized = False
-
-        self._initialise_nvml()
-
-    def _initialise_nvml(self) -> None:
-        """Initialise NVML for NVIDIA temperature/device-memory sampling."""
-        if self.device.type != "cuda" or pynvml is None:
-            return
-
-        try:
-            pynvml.nvmlInit()
-            device_index = (
-                self.device.index
-                if self.device.index is not None
-                else torch.cuda.current_device()
-            )
-            self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-            self._nvml_initialized = True
-        except Exception:
-            # NVML may be unavailable inside containers, WSL, unsupported driver
-            # versions, or systems without permission to query the GPU.
-            self._nvml_handle = None
-            self._nvml_initialized = False
-            try:
-                pynvml.nvmlShutdown()
-            except Exception:
-                pass
-
-    @staticmethod
-    def _update_max(current: Optional[float], value: Optional[float]) -> Optional[float]:
-        if value is None:
-            return current
-        return value if current is None else max(current, value)
-
-    def sample_once(self) -> None:
-        """Capture one snapshot of RAM and available thermal/NVML sensors."""
-        if self.process is not None:
-            try:
-                rss_bytes = int(self.process.memory_info().rss)
-                if self.baseline_process_rss_bytes is None:
-                    self.baseline_process_rss_bytes = rss_bytes
-                self.peak_process_rss_bytes = (
-                    rss_bytes
-                    if self.peak_process_rss_bytes is None
-                    else max(self.peak_process_rss_bytes, rss_bytes)
-                )
-            except (psutil.Error, OSError):
-                pass
-
-            try:
-                system_ram_percent = float(psutil.virtual_memory().percent)
-                self.peak_system_ram_percent = self._update_max(
-                    self.peak_system_ram_percent, system_ram_percent
-                )
-            except (AttributeError, OSError):
-                pass
-
-            self.max_cpu_temperature_c = self._update_max(
-                self.max_cpu_temperature_c, _read_max_cpu_temperature_c()
-            )
-
-        if self._nvml_initialized and self._nvml_handle is not None:
-            try:
-                gpu_temp = float(
-                    pynvml.nvmlDeviceGetTemperature(
-                        self._nvml_handle, pynvml.NVML_TEMPERATURE_GPU
-                    )
-                )
-                self.max_gpu_temperature_c = self._update_max(
-                    self.max_gpu_temperature_c, gpu_temp
-                )
-            except Exception:
-                pass
-
-            try:
-                memory_info = pynvml.nvmlDeviceGetMemoryInfo(self._nvml_handle)
-                used_bytes = int(memory_info.used)
-                self.peak_nvml_device_vram_used_bytes = (
-                    used_bytes
-                    if self.peak_nvml_device_vram_used_bytes is None
-                    else max(self.peak_nvml_device_vram_used_bytes, used_bytes)
-                )
-            except Exception:
-                pass
-
-    def _sampling_loop(self) -> None:
-        while not self._stop_event.wait(self.sample_interval_seconds):
-            self.sample_once()
-
-    def start(self) -> None:
-        self.sample_once()
-        self._thread = threading.Thread(
-            target=self._sampling_loop,
-            name="resource-monitor",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(1.0, self.sample_interval_seconds * 4.0))
-        self.sample_once()
-
-        if self._nvml_initialized and pynvml is not None:
-            try:
-                pynvml.nvmlShutdown()
-            except Exception:
-                pass
-            self._nvml_initialized = False
-
-    def summary(self) -> Dict[str, Optional[float]]:
-        mib = Configuration.BYTES_PER_MIB
-        baseline_ram_mb = (
-            None
-            if self.baseline_process_rss_bytes is None
-            else self.baseline_process_rss_bytes / mib
-        )
-        peak_ram_mb = (
-            None
-            if self.peak_process_rss_bytes is None
-            else self.peak_process_rss_bytes / mib
-        )
-        incremental_ram_mb = (
-            None
-            if baseline_ram_mb is None or peak_ram_mb is None
-            else max(0.0, peak_ram_mb - baseline_ram_mb)
-        )
-        peak_nvml_vram_mb = (
-            None
-            if self.peak_nvml_device_vram_used_bytes is None
-            else self.peak_nvml_device_vram_used_bytes / mib
-        )
-
-        return {
-            "baseline_process_ram_mb": baseline_ram_mb,
-            "peak_process_ram_mb": peak_ram_mb,
-            "incremental_process_ram_mb": incremental_ram_mb,
-            "peak_system_ram_percent": self.peak_system_ram_percent,
-            "max_cpu_temperature_c": self.max_cpu_temperature_c,
-            "max_gpu_temperature_c": self.max_gpu_temperature_c,
-            # NVML device memory is *whole-device* usage and can include other
-            # processes. PyTorch-managed values below are better for model-level
-            # attribution when CUDA is used.
-            "peak_nvml_device_vram_used_mb": peak_nvml_vram_mb,
-        }
-
-
-def _process_cpu_seconds(process: object) -> Optional[float]:
-    """Return cumulative user+system CPU seconds for the benchmark process."""
-    if psutil is None or process is None:
-        return None
-
-    try:
-        cpu_times = process.cpu_times()
-        return float(cpu_times.user + cpu_times.system)
-    except (psutil.Error, OSError):
-        return None
-
-
 def measure_inference_latency_ms(
     model: nn.Module,
     dataloader: DataLoader[Tuple[ImageTensor, MaskTensor]],
     device: torch.device,
     warmup_iterations: int = Configuration.WARMUP_ITERATIONS,
-    resource_sample_interval_seconds: float = Configuration.RESOURCE_SAMPLE_INTERVAL_SECONDS,
-) -> Tuple[List[float], Dict[str, Optional[float]]]:
-    """Measure steady-state latency and resource overhead during inference.
+) -> List[float]:
+    """Measure per-image inference latency over a dataloader.
 
-    Forward-pass latency excludes image decoding, preprocessing, DataLoader work,
-    and the host-to-device transfer because ``X.to(device)`` happens before the
-    timer starts. The resource summary covers the measured steady-state portion
-    after warm-up. CPU utilisation is the *maximum per-forward average* derived
-    from process CPU-time deltas; it may exceed 100% when multiple CPU cores are
-    used. RAM is process RSS. CUDA memory uses PyTorch's exact peak allocator
-    counters. CPU/GPU temperatures are best-effort hardware-sensor measurements.
+    Each image is passed through the model one at a time (batch size 1) and the
+    wall-clock time of the forward pass is recorded after the device has been
+    synchronised. On CUDA, synchronising before and after the forward pass
+    guarantees the kernel queue is flushed so the measured interval includes the
+    full GPU execution time rather than just the host-side launch cost.
+
+    The first ``warmup_iterations`` samples are executed but not recorded so
+    that device warm-up (CUDA context creation, cuDNN algorithm selection,
+    memory allocator growth) does not inflate the reported distribution.
+
+    Steps
+    -----
+    1. Switch the model into inference mode.
+    2. For each batch, move the image to ``device``.
+    3. Synchronise the device, clock a forward pass, and synchronise again.
+    4. Skip the warm-up samples, then record the elapsed time in milliseconds.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model being benchmarked.
+    dataloader : DataLoader[Tuple[ImageTensor, MaskTensor]]
+        DataLoader yielding ``(image, mask)`` batches of size 1. The mask is
+        ignored because latency does not depend on it.
+    device : torch.device
+        Device the inference runs on.
+    warmup_iterations : int, optional
+        Number of leading samples discarded before recording. Defaults to
+        ``Configuration.WARMUP_ITERATIONS``.
 
     Returns
     -------
-    Tuple[List[float], Dict[str, Optional[float]]]
-        Per-image latency values and a resource-usage summary.
+    List[float]
+        Per-image inference latency in milliseconds, excluding warm-up samples.
+
+    Raises
+    ------
+    ValueError
+        If the dataloader yields fewer samples than ``warmup_iterations``, so no
+        latency would be recorded.
     """
     model.eval()
-    use_cuda = device.type == "cuda"
+
     latencies_ms: List[float] = []
+    use_cuda = device.type == "cuda"
 
-    if warmup_iterations < 0:
-        raise ValueError("warmup_iterations must be non-negative.")
-
-    data_iterator = iter(dataloader)
-
-    # Warm-up is intentionally separated from the measured phase so resource
-    # peaks describe steady-state inference rather than one-time initialisation.
+    # inference_mode disables autograd and version counters, which both reduces
+    # overhead and matches the runtime execution profile of deployment.
     with torch.inference_mode():
-        for _warmup_index in range(warmup_iterations):
-            try:
-                X, _ = next(data_iterator)
-            except StopIteration as exc:
-                raise ValueError(
-                    "The dataloader yielded too few samples to complete the "
-                    "requested warm-up iterations."
-                ) from exc
-
+        for batch_index, (X, _) in enumerate(dataloader):
             X = X.to(device)
+
+            # Synchronise so the start/end clocks bracket the actual GPU work.
+            if use_cuda:
+                torch.cuda.synchronize()
+            start = time.perf_counter()
             _ = forward(model, X)
             if use_cuda:
-                torch.cuda.synchronize(device)
+                torch.cuda.synchronize()
+            end = time.perf_counter()
 
-        # Discard references to the final warm-up tensors while preserving the
-        # CUDA caching allocator's warmed state.
-        if warmup_iterations > 0:
-            del X, _
-
-        monitor = ResourceMonitor(device, resource_sample_interval_seconds)
-        process = monitor.process
-        cpu_count = max(os.cpu_count() or 1, 1)
-        peak_process_cpu_percent: Optional[float] = None
-
-        baseline_vram_allocated_bytes: Optional[int] = None
-        baseline_vram_reserved_bytes: Optional[int] = None
-
-        if use_cuda:
-            torch.cuda.synchronize(device)
-            torch.cuda.reset_peak_memory_stats(device)
-            baseline_vram_allocated_bytes = int(torch.cuda.memory_allocated(device))
-            baseline_vram_reserved_bytes = int(torch.cuda.memory_reserved(device))
-
-        monitor.start()
-        try:
-            for X, _ in data_iterator:
-                # Transfer is outside the latency timer to preserve the original
-                # script's definition of model forward-pass latency.
-                X = X.to(device)
-
-                if use_cuda:
-                    torch.cuda.synchronize(device)
-
-                cpu_before = _process_cpu_seconds(process)
-                start = time.perf_counter()
-                _ = forward(model, X)
-                if use_cuda:
-                    torch.cuda.synchronize(device)
-                end = time.perf_counter()
-                cpu_after = _process_cpu_seconds(process)
-
-                elapsed_seconds = end - start
-                latencies_ms.append(elapsed_seconds * 1000.0)
-
-                if (
-                    cpu_before is not None
-                    and cpu_after is not None
-                    and elapsed_seconds > 0.0
-                ):
-                    # 100% means one logical CPU core was fully occupied during
-                    # this forward pass; multi-threaded CPU inference can exceed
-                    # 100%, matching psutil's process-CPU convention.
-                    process_cpu_percent = max(
-                        0.0, (cpu_after - cpu_before) / elapsed_seconds * 100.0
-                    )
-                    peak_process_cpu_percent = (
-                        process_cpu_percent
-                        if peak_process_cpu_percent is None
-                        else max(peak_process_cpu_percent, process_cpu_percent)
-                    )
-        finally:
-            monitor.stop()
+            if batch_index >= warmup_iterations:
+                latencies_ms.append((end - start) * 1000.0)
 
     if not latencies_ms:
         raise ValueError(
-            "The dataloader yielded no measured samples after the warm-up phase."
+            "The dataloader yielded too few samples to record any latency "
+            "after the warm-up phase."
         )
 
-    resource_stats = monitor.summary()
-    resource_stats["peak_process_cpu_percent"] = peak_process_cpu_percent
-    resource_stats["peak_cpu_total_capacity_percent"] = (
-        None
-        if peak_process_cpu_percent is None
-        else peak_process_cpu_percent / cpu_count
-    )
-
-    if use_cuda:
-        mib = Configuration.BYTES_PER_MIB
-        peak_allocated_bytes = int(torch.cuda.max_memory_allocated(device))
-        peak_reserved_bytes = int(torch.cuda.max_memory_reserved(device))
-
-        resource_stats.update({
-            "baseline_torch_vram_allocated_mb": (
-                None
-                if baseline_vram_allocated_bytes is None
-                else baseline_vram_allocated_bytes / mib
-            ),
-            "peak_torch_vram_allocated_mb": peak_allocated_bytes / mib,
-            "incremental_torch_vram_allocated_mb": (
-                None
-                if baseline_vram_allocated_bytes is None
-                else max(0, peak_allocated_bytes - baseline_vram_allocated_bytes) / mib
-            ),
-            "baseline_torch_vram_reserved_mb": (
-                None
-                if baseline_vram_reserved_bytes is None
-                else baseline_vram_reserved_bytes / mib
-            ),
-            "peak_torch_vram_reserved_mb": peak_reserved_bytes / mib,
-            "incremental_torch_vram_reserved_mb": (
-                None
-                if baseline_vram_reserved_bytes is None
-                else max(0, peak_reserved_bytes - baseline_vram_reserved_bytes) / mib
-            ),
-        })
-    else:
-        resource_stats.update({
-            "baseline_torch_vram_allocated_mb": None,
-            "peak_torch_vram_allocated_mb": None,
-            "incremental_torch_vram_allocated_mb": None,
-            "baseline_torch_vram_reserved_mb": None,
-            "peak_torch_vram_reserved_mb": None,
-            "incremental_torch_vram_reserved_mb": None,
-        })
-
-    return latencies_ms, resource_stats
+    return latencies_ms
 
 
 def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
@@ -883,12 +548,20 @@ def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse checkpoint and resource-sampling options."""
+    """Parse command line arguments for the latency evaluation script.
+
+    Steps
+    -----
+    1. Configure an ArgumentParser with an optional checkpoint path argument.
+    2. Parse and return the argument namespace.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed CLI arguments.
+    """
     parser = argparse.ArgumentParser(
-        description=(
-            "Measure inference latency plus CPU/RAM/VRAM/temperature overhead "
-            "of a trained model on the BDD100k test split."
-        )
+        description="Measure inference latency percentiles of a trained model on the BDD100k test split."
     )
     parser.add_argument(
         "--checkpoint",
@@ -896,62 +569,39 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
         help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
     )
-    parser.add_argument(
-        "--resource-sample-interval-ms",
-        type=float,
-        default=Configuration.RESOURCE_SAMPLE_INTERVAL_SECONDS * 1000.0,
-        help=(
-            "Background RAM/temperature/NVML sampling interval in milliseconds. "
-            "Defaults to 250 ms. Lower values may perturb latency more."
-        ),
-    )
     return parser.parse_args()
 
 
-def _format_optional(value: Optional[float], decimals: int = 2) -> str:
-    """Format an optional numeric resource metric for console output."""
-    return "N/A" if value is None else f"{value:.{decimals}f}"
-
-
 def main() -> None:
-    """Load a checkpoint and report latency plus resource-overhead metrics."""
+    """Load a checkpoint and report inference latency percentiles on the test split.
+
+    Steps
+    -----
+    1. Parse the checkpoint argument.
+    2. Load the trained model onto the target device.
+    3. Load the BDD100k test partition with the training-compatible transforms.
+    4. Build a batch-size-1 DataLoader.
+    5. Measure per-image latency and log the percentile summary in milliseconds.
+    """
     args = parse_arguments()
 
-    if args.resource_sample_interval_ms <= 0:
-        raise ValueError("--resource-sample-interval-ms must be greater than zero.")
+    print("\n" + "=" * 68)
+    print("LATENCY EVALUATION PIPELINE")
+    print("=" * 68)
 
-    print("\n" + "=" * 76)
-    print("LATENCY + RESOURCE OVERHEAD EVALUATION PIPELINE")
-    print("=" * 76)
-
+    # Load the checkpoint with the whole nn.Module serialized by the trainers.
     print(f"Loading checkpoint from: {args.checkpoint}")
     model = load_trained_model(args.checkpoint, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
-    if Configuration.DEVICE.type == "cuda":
-        device_index = (
-            Configuration.DEVICE.index
-            if Configuration.DEVICE.index is not None
-            else torch.cuda.current_device()
-        )
-        print(f"CUDA device: {torch.cuda.get_device_name(device_index)}")
-
-    if psutil is None:
-        print(
-            "WARNING: psutil is not installed; CPU utilisation, RAM, and CPU "
-            "temperature will be reported as N/A. Install with: pip install psutil"
-        )
-    if Configuration.DEVICE.type == "cuda" and pynvml is None:
-        print(
-            "NOTE: pynvml is not installed; NVIDIA GPU temperature and NVML "
-            "whole-device VRAM will be N/A. PyTorch VRAM peaks are still measured. "
-            "Install with: pip install nvidia-ml-py"
-        )
-
+    # Recreate the same train/test partitioning used during training so the test
+    # split benchmarked here is identical to the one held out at training time.
     print("Loading BDD100k test split...")
     test_df = load_test_split()
     print(f"Loaded {len(test_df)} test samples for evaluation.")
 
+    # Use the same inference transforms as performance evaluation so the model
+    # receives images at the resolution it was trained and evaluated on.
     inference_transforms = A.Compose([
         A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         ToTensorV2(),
@@ -960,25 +610,19 @@ def main() -> None:
     test_loader = DataLoader(
         dataset=test_ds,
         batch_size=Configuration.LATENCY_BATCH_SIZE,
-        shuffle=False,
+        shuffle=False,  # deterministic ordering for reproducible measurement
         num_workers=Configuration.NUM_WORKERS,
     )
 
-    latencies_ms, resources = measure_inference_latency_ms(
-        model,
-        test_loader,
-        Configuration.DEVICE,
-        resource_sample_interval_seconds=args.resource_sample_interval_ms / 1000.0,
+    latencies_ms = measure_inference_latency_ms(
+        model, test_loader, Configuration.DEVICE
     )
     stats = compute_latency_statistics(latencies_ms)
 
-    print(
-        f"\nMeasured {len(latencies_ms)} samples (batch size "
-        f"{Configuration.LATENCY_BATCH_SIZE}, after "
-        f"{Configuration.WARMUP_ITERATIONS} warm-up iterations)."
-    )
-    print("-" * 76)
-    print("Inference latency summary (forward pass only, ms):")
+    print(f"\nMeasured {len(latencies_ms)} samples (batch size "
+          f"{Configuration.LATENCY_BATCH_SIZE}, after {Configuration.WARMUP_ITERATIONS} warm-up iterations).")
+    print("-" * 68)
+    print("Inference latency summary (ms):")
     print(f"  P25      : {stats['p25']:.3f}")
     print(f"  P50      : {stats['p50']:.3f}  (median)")
     print(f"  Average  : {stats['average']:.3f}")
@@ -986,67 +630,7 @@ def main() -> None:
     print(f"  P90      : {stats['p90']:.3f}")
     print(f"  P95      : {stats['p95']:.3f}")
     print(f"  P99      : {stats['p99']:.3f}")
-
-    print("-" * 76)
-    print("Resource-overhead summary (steady-state measured phase):")
-    print(
-        "  Peak process CPU      : "
-        f"{_format_optional(resources['peak_process_cpu_percent'])}% "
-        "(100% = one logical CPU core)"
-    )
-    print(
-        "  Peak CPU total capacity: "
-        f"{_format_optional(resources['peak_cpu_total_capacity_percent'])}%"
-    )
-    print(
-        "  Peak process RAM      : "
-        f"{_format_optional(resources['peak_process_ram_mb'])} MiB"
-    )
-    print(
-        "  Incremental RAM peak  : "
-        f"{_format_optional(resources['incremental_process_ram_mb'])} MiB "
-        "(above measured-phase baseline)"
-    )
-    print(
-        "  Peak system RAM usage : "
-        f"{_format_optional(resources['peak_system_ram_percent'])}%"
-    )
-    print(
-        "  Maximum CPU temp      : "
-        f"{_format_optional(resources['max_cpu_temperature_c'])} °C"
-    )
-
-    if Configuration.DEVICE.type == "cuda":
-        print(
-            "  Peak PyTorch VRAM alloc: "
-            f"{_format_optional(resources['peak_torch_vram_allocated_mb'])} MiB"
-        )
-        print(
-            "  Peak PyTorch VRAM reserv: "
-            f"{_format_optional(resources['peak_torch_vram_reserved_mb'])} MiB"
-        )
-        print(
-            "  Incremental VRAM alloc : "
-            f"{_format_optional(resources['incremental_torch_vram_allocated_mb'])} MiB "
-            "(above model/baseline allocation)"
-        )
-        print(
-            "  Maximum GPU temp       : "
-            f"{_format_optional(resources['max_gpu_temperature_c'])} °C"
-        )
-        print(
-            "  Peak device VRAM (NVML): "
-            f"{_format_optional(resources['peak_nvml_device_vram_used_mb'])} MiB "
-            "(whole GPU; may include other processes)"
-        )
-
-    print("-" * 76)
-    print(
-        "Notes: CPU/GPU temperatures are best-effort sensor readings and may be "
-        "N/A on unsupported systems. PyTorch VRAM is model-process attributable; "
-        "NVML device VRAM is whole-device usage."
-    )
-    print("=" * 76 + "\n")
+    print("=" * 68 + "\n")
 
 
 if __name__ == "__main__":
