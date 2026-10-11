@@ -857,7 +857,7 @@ def visualize_adversarial_predictions(
     num_samples : int, optional
         Number of samples to visualize. Defaults to 4.
     output_path : str, optional
-        Destination image path. Defaults to "./adversarial_predictions.png".
+        Destination image path.
 
     Raises
     ------
@@ -1089,7 +1089,7 @@ def main() -> None:
     print("=" * 68 + "\n")
 
     if args.visualize:
-        print("Exporting visual sample predictions to ./adversarial_predictions.png...")
+        print("Exporting visual sample predictions...")
         visualize_adversarial_predictions(
             model=model,
             test_df=test_df,
