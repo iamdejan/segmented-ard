@@ -335,7 +335,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 ]
 #v(2 * line_spacing)
 
-This research will cover the development and experiments on . As part for this research, multiple adversarial attack techniques will be used to test the model's resistance against each type of the attack.
+This research will cover the development and experiments on distilled model. As part for this research, 10-step PGD attack will be used to test the model's resistance against each type of the attack.
 
 What is outside of the scope is the integration on the actual automotive system. Such integration should be conducted by car manufacturers in a highly-regulated environment, as improper integration may result in the failure of the car's internal systems.
 
