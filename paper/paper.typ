@@ -308,12 +308,8 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 )[
   + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
   + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
-  + What is the impact of the proposed framework on inference latency and computational overhead in resource-constrained deployment settings?
+  + What is the impact of the proposed framework on inference latency in resource-constrained deployment settings?
 ]
-
-// TODO: decide if we want to keep RQ2 unchanged, or adjust to ensure narrower scope. Currently, in the evaluation scripts, we have yet to measure across diverse driving conditions.
-
-// TODO: define computational overhead in the paper, Section 3.8.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
@@ -331,7 +327,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[Resesarch Scope and Contribution]
+  #text(size: 12pt)[Research Scope and Contribution]
 ]
 #v(2 * line_spacing)
 
