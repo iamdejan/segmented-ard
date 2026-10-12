@@ -800,8 +800,8 @@ def evaluate_robustness(
     adv_class_iou = cast(List[float], smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction=None).tolist())
 
     # Pixel accuracy and Dice (F1) scores
-    clean_pixel_acc = float(smp.metrics.accuracy(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="micro").item())
-    adv_pixel_acc = float(smp.metrics.accuracy(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="micro").item())
+    clean_pixel_acc = float(smp.metrics.recall(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="micro").item())
+    adv_pixel_acc = float(smp.metrics.recall(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="micro").item())
     clean_dice = float(smp.metrics.f1_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="macro").item())
     adv_dice = float(smp.metrics.f1_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="macro").item())
 
@@ -829,7 +829,7 @@ def visualize_adversarial_predictions(
     alpha: float = 0.01,
     num_steps: int = 10,
     num_samples: int = 4,
-    output_path: str = "./adversarial_predictions.png",
+    output_path: str = "./model/adversarial_predictions.png",
 ) -> None:
     """Render a visual side-by-side comparison of clean and adversarial predictions.
 
@@ -857,7 +857,7 @@ def visualize_adversarial_predictions(
     num_samples : int, optional
         Number of samples to visualize. Defaults to 4.
     output_path : str, optional
-        Destination image path. Defaults to "./adversarial_predictions.png".
+        Destination image path.
 
     Raises
     ------
@@ -994,7 +994,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--visualize",
         action="store_true",
-        help="Export side-by-side adversarial comparison to ./adversarial_predictions.png.",
+        default=True,
+        help="Export side-by-side adversarial comparison to ./model/adversarial_predictions.png.",
     )
     return parser.parse_args()
 
@@ -1088,7 +1089,7 @@ def main() -> None:
     print("=" * 68 + "\n")
 
     if args.visualize:
-        print("Exporting visual sample predictions to ./adversarial_predictions.png...")
+        print("Exporting visual sample predictions...")
         visualize_adversarial_predictions(
             model=model,
             test_df=test_df,
@@ -1096,7 +1097,7 @@ def main() -> None:
             epsilon=args.epsilon,
             alpha=args.alpha,
             num_steps=args.steps,
-            output_path="./adversarial_predictions.png",
+            output_path="./model/adversarial_predictions.png",
         )
         print("Visualization saved successfully.")
 

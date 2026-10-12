@@ -622,12 +622,12 @@ def evaluate_segmentation_metrics(
         raise ValueError("The evaluation dataloader yielded no batches.")
 
     # Pixel accuracy: ratio of correctly classified pixels over all pixels.
-    pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+    pixel_accuracy = tp_total.sum() / (tp_total + fn_total).sum()
 
     # Class-wise pixel accuracy: one accuracy value per class (no reduction).
     # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
     # is the accuracy of class ``i``.
-    class_pixel_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total).tolist()
+    class_pixel_accuracy = tp_total / (tp_total + fn_total).clamp_min(1)
 
     # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
     iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()

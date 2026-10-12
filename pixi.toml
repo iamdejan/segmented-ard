@@ -44,6 +44,8 @@ graphviz = ">=14.1.2,<15"
 segmentation-models-pytorch = ">=0.5.0,<0.6"
 jaxtyping = ">=0.3.11,<0.4"
 beartype = ">=0.22.9,<0.23"
+psutil = ">=7.2.2,<8"
+nvidia-ml-py = ">=13.615.71,<14"
 
 [target.default.dependencies]
 pytorch-gpu = "=2.10.0"
