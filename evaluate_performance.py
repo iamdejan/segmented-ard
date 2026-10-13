@@ -636,7 +636,7 @@ def evaluate_segmentation_metrics(
     # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
     # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
     # class ``i``.
-    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total).tolist()
+    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction=None).tolist()
 
     # Mean IoU: average of the class-wise IoU values (macro-averaging).
     mean_iou = np.mean(class_iou)
