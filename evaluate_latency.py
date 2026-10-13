@@ -521,7 +521,6 @@ class ResourceMonitor:
         self.baseline_process_rss_bytes: Optional[int] = None
         self.peak_process_rss_bytes: Optional[int] = None
         self.peak_system_ram_percent: Optional[float] = None
-        self.max_cpu_temperature_c: Optional[float] = None
         self.max_gpu_temperature_c: Optional[float] = None
         self.peak_nvml_device_vram_used_bytes: Optional[int] = None
 
@@ -584,10 +583,6 @@ class ResourceMonitor:
                 )
             except (AttributeError, OSError):
                 pass
-
-            self.max_cpu_temperature_c = self._update_max(
-                self.max_cpu_temperature_c, _read_max_cpu_temperature_c()
-            )
 
         if self._nvml_initialized and self._nvml_handle is not None:
             try:
@@ -667,7 +662,6 @@ class ResourceMonitor:
             "peak_process_ram_mb": peak_ram_mb,
             "incremental_process_ram_mb": incremental_ram_mb,
             "peak_system_ram_percent": self.peak_system_ram_percent,
-            "max_cpu_temperature_c": self.max_cpu_temperature_c,
             "max_gpu_temperature_c": self.max_gpu_temperature_c,
             # NVML device memory is *whole-device* usage and can include other
             # processes. PyTorch-managed values below are better for model-level
@@ -1010,10 +1004,6 @@ def main() -> None:
     print(
         "  Peak system RAM usage : "
         f"{_format_optional(resources['peak_system_ram_percent'])}%"
-    )
-    print(
-        "  Maximum CPU temp      : "
-        f"{_format_optional(resources['max_cpu_temperature_c'])} °C"
     )
 
     if Configuration.DEVICE.type == "cuda":
