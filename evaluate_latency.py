@@ -931,6 +931,7 @@ def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
         "p90": float(np.percentile(latencies, 90)),
         "p95": float(np.percentile(latencies, 95)),
         "p99": float(np.percentile(latencies, 99)),
+        "max": float(np.max(latencies)),
     }
 
 
@@ -956,13 +957,14 @@ def print_latency_statistics(title: str, stats: Dict[str, float]) -> None:
         This function writes formatted values to standard output.
     """
     print(title)
-    print(f"  P25      : {stats['p25']:.3f}")
-    print(f"  P50      : {stats['p50']:.3f}  (median)")
-    print(f"  Average  : {stats['average']:.3f}")
-    print(f"  P75      : {stats['p75']:.3f}")
-    print(f"  P90      : {stats['p90']:.3f}")
-    print(f"  P95      : {stats['p95']:.3f}")
-    print(f"  P99      : {stats['p99']:.3f}")
+    print(f"  P25         : {stats['p25']:.3f}")
+    print(f"  P50 (median): {stats['p50']:.3f}")
+    print(f"  Average     : {stats['average']:.3f}")
+    print(f"  P75         : {stats['p75']:.3f}")
+    print(f"  P90         : {stats['p90']:.3f}")
+    print(f"  P95         : {stats['p95']:.3f}")
+    print(f"  P99         : {stats['p99']:.3f}")
+    print(f"  Max         : {stats['max']:.3f}")
 
 
 def parse_arguments() -> argparse.Namespace:
