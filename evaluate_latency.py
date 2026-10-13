@@ -1,14 +1,24 @@
-"""Latency and resource-overhead evaluation for segmentation models.
+"""End-to-end latency and resource-overhead evaluation for segmentation models.
 
 This module loads a trained PyTorch segmentation checkpoint (a full ``nn.Module``
-serialized by the training scripts) and benchmarks steady-state *inference* on
-the BDD100k test split. Forward-pass latency is measured per image (batch size 1)
-with CUDA synchronisation where needed.
+serialized by the training scripts) and benchmarks steady-state inference on the
+BDD100k test split. Three aligned per-image latency distributions are reported:
+
+* inference latency: model forward pass only;
+* computational overhead: image decoding, preprocessing, DataLoader collation,
+  and host-to-device transfer;
+* end-to-end latency: computational overhead plus inference latency.
+
+The latency DataLoader runs synchronously with ``num_workers=0``. This is
+intentional: worker prefetching would overlap data preparation with model
+execution and make per-image preprocessing overhead impossible to attribute
+reliably. CUDA synchronisation is used where needed so GPU work is completed
+inside the corresponding timing interval.
 
 In addition to latency percentiles, the benchmark records resource-use indicators
 that are useful when discussing deployment overhead:
 
-* peak process CPU utilisation during a measured forward pass;
+* peak process CPU utilisation during a measured end-to-end sample;
 * peak process RAM (resident-set size / RSS);
 * peak CPU temperature when the operating system exposes a CPU sensor;
 * peak PyTorch-managed GPU memory (allocated and reserved) on CUDA;
@@ -56,49 +66,34 @@ except ImportError:  # Optional: only needed for NVIDIA temperature/NVML metrics
 # ``beartype`` enforce them at runtime, turning shape mismatches into clear
 # ``TypeCheckError`` exceptions rather than confusing downstream broadcasts.
 ImageTensor = Float[torch.Tensor, "3 h w"]  # single image, channel-first layout
-MaskTensor = Float[torch.Tensor, "c h w"]  # one-hot mask, c == NUM_CLASSES
 BatchImage = Float[torch.Tensor, "b 3 h w"]  # collated batch of images
-Logits = Float[torch.Tensor, "b c h w"]  # model output, c == NUM_CLASSES
-
-
-# BDD100k color-label palette. The row index is the class id (0-19), matching
-# ``Configuration.NUM_CLASSES``. It is required only to turn the RGB color-label
-# masks stored on disk into a single class id per pixel.
-CLASS_COLORS = np.array([
-    [128,  64, 128],   # 0  - Road
-    [244,  35, 232],   # 1  - Sidewalk
-    [ 70,  70,  70],   # 2  - Building
-    [102, 102, 156],   # 3  - Wall
-    [190, 153, 153],   # 4  - Fence
-    [153, 153, 153],   # 5  - Pole
-    [250, 170,  30],   # 6  - Traffic Light
-    [220, 220,   0],   # 7  - Traffic Sign
-    [107, 142,  35],   # 8  - Vegetation
-    [152, 251, 152],   # 9  - Terrain
-    [ 70, 130, 180],   # 10 - Sky
-    [220,  20,  60],   # 11 - Person
-    [255,   0,   0],   # 12 - Rider
-    [  0,   0, 142],   # 13 - Car
-    [  0,   0,  70],   # 14 - Truck
-    [  0,  60, 100],   # 15 - Bus
-    [  0,  80, 100],   # 16 - Train
-    [  0,   0, 230],   # 17 - Motorcycle
-    [119,  11,  32],   # 18 - Bicycle
-    [  0,   0,   0],   # 19 - Unknown
-], dtype=np.uint8)
+Logits = Float[torch.Tensor, "b c h w"]  # model output, channel count is model-defined
 
 
 class Configuration:
-    """Latency evaluation constants and dataset image dimension specifications."""
+    """Constants controlling end-to-end latency evaluation.
+
+    The benchmark uses these values to select the execution device, reconstruct
+    the deterministic test split, size model inputs, discard warm-up samples, and
+    configure low-overhead resource monitoring.
+
+    Steps
+    -----
+    1. Select CUDA when available, otherwise fall back to CPU.
+    2. Force a synchronous single-image DataLoader for attributable overhead
+       timing.
+    3. Define the fixed image size, warm-up count, and resource sampling cadence.
+    """
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    NUM_CLASSES = 20
-    NUM_WORKERS = 2
+    # End-to-end timing requires data preparation to execute inside the measured
+    # ``next(data_iterator)`` call. Multiple workers would prefetch samples and
+    # hide part of that work behind the previous model invocation.
+    NUM_WORKERS = 0
     SEED = 768
 
     IMAGE_HEIGHT = 360
     IMAGE_WIDTH = 640
-    CHANNELS = 3
 
     # Latency is measured per image, so inference is run with batch size 1.
     LATENCY_BATCH_SIZE = 1
@@ -125,116 +120,86 @@ class Path:
     IMAGE_TRAIN_PATH = IMAGE_FOLDER + "/train"
 
 
-def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
-    """Map an RGB color-label image to a per-pixel class-index map.
+class BDDInferenceDataset(Dataset[ImageTensor]):
+    """BDD100k image-only dataset used for deployment-style latency timing.
 
-    BDD100k stores segmentation masks as RGB PNGs whose colours are exactly the
-    entries of ``CLASS_COLORS``. The dataset loader collapses this RGB
-    representation into a single class id per pixel because the one-hot encoder
-    and model expect integer class ids rather than RGB triples.
+    Ground-truth masks are deliberately excluded from this dataset because mask
+    decoding and one-hot encoding are evaluation-only costs that would not occur
+    when a deployed model receives an image for inference. Keeping only the image
+    path makes the computational-overhead timer represent the work required to
+    prepare a real model input.
 
     Steps
     -----
-    1. Initialise the output with the id of the last palette entry so unknown
-       colours degrade to ``Unknown`` instead of producing an invalid index.
-    2. For each palette colour, boolean-mask the pixels whose RGB values match
-       it exactly and assign the corresponding class id.
-
-    Parameters
-    ----------
-    label : np.ndarray
-        RGB color-label array of shape ``(H, W, 3)`` with integer values.
-
-    Returns
-    -------
-    np.ndarray
-        Class-index array of shape ``(H, W)`` and dtype ``uint8``.
-    """
-    class_ids = np.full(label.shape[:2], CLASS_COLORS.shape[0] - 1, dtype=np.uint8)
-
-    for class_id, (red, green, blue) in enumerate(CLASS_COLORS):
-        match = (
-            (label[..., 0] == red)
-            & (label[..., 1] == green)
-            & (label[..., 2] == blue)
-        )
-        class_ids[match] = class_id
-
-    return class_ids
-
-
-class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
-    """BDD100k semantic segmentation dataset loader.
+    1. Read the image path selected by the reconstructed BDD100k test split.
+    2. Decode the image as RGB and normalise pixel values to ``[0, 1]`` floats.
+    3. Apply the inference transform pipeline and return a channel-first tensor.
 
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing ``image_paths`` and ``mask_paths`` columns.
+        DataFrame containing an ``image_paths`` column.
     transform : A.Compose | None, optional
-        Albumentations transform pipeline applied to image and mask. Defaults
-        to ``None``.
+        Albumentations transform pipeline applied to each image. Defaults to
+        ``None``.
+
+    Raises
+    ------
+    IndexError
+        If an index outside the dataset path list is requested.
     """
 
     def __init__(self, df: pd.DataFrame, transform: A.Compose | None = None) -> None:
         super().__init__()
 
+        # Store only image paths so deployment latency does not accidentally
+        # include label/mask work that is absent from real inference requests.
         self.image_paths: List[str] = df["image_paths"].to_list()
-        self.mask_paths: List[str] = df["mask_paths"].to_list()
         self.transform = transform
 
     def __len__(self) -> int:
-        """Return the total number of samples in the dataset."""
+        """Return the total number of inference images available for timing."""
         return len(self.image_paths)
 
     @jaxtyped(typechecker=beartype)
-    def __getitem__(self, index: int) -> Tuple[ImageTensor, MaskTensor]:
-        """Return the transformed ``(image, mask)`` pair at position ``index``.
+    def __getitem__(self, index: int) -> ImageTensor:
+        """Decode and preprocess one image into a model-ready tensor.
 
-        ``ToTensorV2`` converts the image from ``(H, W, 3)`` to ``(3, H, W)``
-        while leaving the 2-D class-index mask as ``(H, W)``. The mask is then
-        one-hot encoded to ``(NUM_CLASSES, H, W)`` so the returned pair mirrors
-        exactly what the model received during training and performance
-        evaluation.
+        Steps
+        -----
+        1. Decode the selected JPEG and force a three-channel RGB layout.
+        2. Convert the image to a normalised ``float32`` NumPy array.
+        3. Apply the configured inference transforms, or ``ToTensorV2`` when no
+           transform was supplied.
 
         Parameters
         ----------
         index : int
-            Zero-based position of the sample to load.
+            Zero-based position of the image to load.
 
         Returns
         -------
-        Tuple[ImageTensor, MaskTensor]
-            The ``(image, mask)`` pair where ``image`` has shape ``(3, H, W)``
-            and ``mask`` is a one-hot tensor of shape ``(NUM_CLASSES, H, W)``.
+        ImageTensor
+            Preprocessed image tensor with shape ``(3, H, W)``.
 
         Raises
         ------
         IndexError
-            If ``index`` is out of the range of the dataset path lists.
+            If ``index`` is outside the range of the dataset path list.
         """
         image_path = self.image_paths[index]
-        mask_path = self.mask_paths[index]
 
-        # Force RGB so that RGBA color-label PNGs with an alpha channel are
-        # reduced to three channels before being processed.
+        # RGB conversion makes input channel count deterministic even when a
+        # source image happens to carry grayscale or alpha-channel metadata.
         image_pil = Image.open(image_path).convert("RGB")
-        mask_pil = Image.open(mask_path).convert("RGB")
-
         image = np.array(image_pil).astype(np.float32) / 255.0
-        class_mask = color_label_to_class_index(np.array(mask_pil))
 
         if self.transform:
-            transformed = self.transform(image=image, mask=class_mask)
+            transformed = self.transform(image=image)
         else:
-            transformed = ToTensorV2()(image=image, mask=class_mask)
+            transformed = ToTensorV2()(image=image)
 
-        # One-hot encode the (H, W) class ids into (NUM_CLASSES, H, W) floats
-        # so the mask channel axis lines up with the model logits.
-        mask_one_hot = torch.nn.functional.one_hot(
-            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float()
-
-        return transformed["image"], mask_one_hot
+        return cast(ImageTensor, transformed["image"])
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
@@ -392,8 +357,7 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
 
     Centralising the forward pass here lets ``jaxtyping`` verify that the input
     batch is always ``(B, 3, H, W)`` and that the model produces
-    ``(B, NUM_CLASSES, H, W)`` logits, which is where shape confusion most often
-    arises.
+    ``(B, C, H, W)`` logits, which is where shape confusion most often arises.
 
     Parameters
     ----------
@@ -405,7 +369,7 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
     Returns
     -------
     Logits
-        Raw model logits with shape ``(B, NUM_CLASSES, H, W)``.
+        Raw model logits with shape ``(B, C, H, W)``.
     """
     return cast(Logits, model(x))
 
@@ -508,9 +472,26 @@ class ResourceMonitor:
     """Low-overhead background sampler for RAM and temperature measurements.
 
     The monitor deliberately does *not* use sampled CPU percentage as the primary
-    CPU metric, because the model's forward pass may be much shorter than a sensor
+    CPU metric, because an end-to-end sample may be much shorter than a sensor
     sampling interval. Peak CPU utilisation is instead derived in the benchmark
-    from process CPU-time deltas measured around every individual forward pass.
+    from process CPU-time deltas measured around every individual end-to-end
+    sample.
+
+    Steps
+    -----
+    1. Capture a baseline resource snapshot before measured samples begin.
+    2. Sample process RAM, system RAM, and available NVIDIA sensors in a daemon
+       thread at the configured interval.
+    3. Stop the thread after measurement and expose peak/baseline values through
+       :meth:`summary`.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used by the benchmark; CUDA enables optional NVML sampling.
+    sample_interval_seconds : float
+        Requested background sensor-sampling interval in seconds. Values below
+        50 ms are clamped to reduce measurement perturbation.
     """
 
     def __init__(self, device: torch.device, sample_interval_seconds: float) -> None:
@@ -682,43 +663,90 @@ def _process_cpu_seconds(process: object) -> Optional[float]:
         return None
 
 
-def measure_inference_latency_ms(
+def measure_latency_ms(
     model: nn.Module,
-    dataloader: DataLoader[Tuple[ImageTensor, MaskTensor]],
+    dataloader: DataLoader[ImageTensor],
     device: torch.device,
     warmup_iterations: int = Configuration.WARMUP_ITERATIONS,
     resource_sample_interval_seconds: float = Configuration.RESOURCE_SAMPLE_INTERVAL_SECONDS,
-) -> Tuple[List[float], Dict[str, Optional[float]]]:
-    """Measure steady-state latency and resource overhead during inference.
+) -> Tuple[Dict[str, List[float]], Dict[str, Optional[float]]]:
+    """Measure inference, computational-overhead, and end-to-end latency.
 
-    Forward-pass latency excludes image decoding, preprocessing, DataLoader work,
-    and the host-to-device transfer because ``X.to(device)`` happens before the
-    timer starts. The resource summary covers the measured steady-state portion
-    after warm-up. CPU utilisation is the *maximum per-forward average* derived
-    from process CPU-time deltas; it may exceed 100% when multiple CPU cores are
-    used. RAM is process RSS. CUDA memory uses PyTorch's exact peak allocator
-    counters. CPU/GPU temperatures are best-effort hardware-sensor measurements.
+    Computational overhead is the synchronous work required to turn the next
+    dataset sample into a model-ready device tensor: image decoding,
+    preprocessing, DataLoader collation, and host-to-device transfer. Inference
+    latency measures only the model forward pass. End-to-end latency is computed
+    per sample as ``computational_overhead + inference`` so the reported values
+    are exactly additive.
+
+    A synchronous DataLoader is required because worker prefetching would overlap
+    data preparation with earlier inference and therefore under-report the true
+    per-sample computational overhead. The resource summary covers the measured
+    steady-state portion after warm-up. CPU utilisation is the maximum
+    per-end-to-end-sample average derived from process CPU-time deltas; it may
+    exceed 100% when multiple CPU cores are used. RAM is process RSS. CUDA memory
+    uses PyTorch's exact peak allocator counters. CPU/GPU temperatures are
+    best-effort hardware-sensor measurements.
+
+    Steps
+    -----
+    1. Warm up the complete input-preparation and forward-pass path without
+       recording latency or resource peaks.
+    2. For each remaining sample, time synchronous data preparation/device
+       transfer and the model forward pass separately.
+    3. Sum the two per-sample timings into end-to-end latency and collect resource
+       peaks over the same measured phase.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Segmentation model to benchmark in evaluation mode.
+    dataloader : DataLoader[ImageTensor]
+        Synchronous image-only DataLoader with ``num_workers=0``.
+    device : torch.device
+        CPU or CUDA device on which inference executes.
+    warmup_iterations : int, optional
+        Number of leading complete samples to exclude from measurements.
+    resource_sample_interval_seconds : float, optional
+        Background interval for RAM and temperature sensor sampling.
 
     Returns
     -------
-    Tuple[List[float], Dict[str, Optional[float]]]
-        Per-image latency values and a resource-usage summary.
+    Tuple[Dict[str, List[float]], Dict[str, Optional[float]]]
+        A mapping containing aligned per-image ``inference``, ``overhead``, and
+        ``end_to_end`` latency lists in milliseconds, plus a resource-usage
+        summary.
+
+    Raises
+    ------
+    ValueError
+        If warm-up iterations are negative, the DataLoader uses background
+        workers, too few samples exist for warm-up, or no samples remain for the
+        measured phase.
     """
     model.eval()
     use_cuda = device.type == "cuda"
-    latencies_ms: List[float] = []
+    inference_latencies_ms: List[float] = []
+    overhead_latencies_ms: List[float] = []
+    end_to_end_latencies_ms: List[float] = []
 
     if warmup_iterations < 0:
         raise ValueError("warmup_iterations must be non-negative.")
+    if dataloader.num_workers != 0:
+        raise ValueError(
+            "End-to-end overhead timing requires dataloader.num_workers == 0 "
+            "so decoding and preprocessing are not hidden by worker prefetching."
+        )
 
     data_iterator = iter(dataloader)
 
-    # Warm-up is intentionally separated from the measured phase so resource
-    # peaks describe steady-state inference rather than one-time initialisation.
+    # Warm up the same end-to-end path that will be measured. This prevents
+    # one-time decoder, transform, allocator, CUDA, and cuDNN setup from
+    # dominating the steady-state distributions.
     with torch.inference_mode():
         for _warmup_index in range(warmup_iterations):
             try:
-                X, _ = next(data_iterator)
+                X = next(data_iterator)
             except StopIteration as exc:
                 raise ValueError(
                     "The dataloader yielded too few samples to complete the "
@@ -751,35 +779,56 @@ def measure_inference_latency_ms(
 
         monitor.start()
         try:
-            for X, _ in data_iterator:
-                # Transfer is outside the latency timer to preserve the original
-                # script's definition of model forward-pass latency.
-                X = X.to(device)
+            while True:
+                # CPU deltas span the complete measured sample so the utilisation
+                # metric corresponds to the same work as end-to-end latency.
+                cpu_before = _process_cpu_seconds(process)
 
+                # Start before requesting the next item. With num_workers=0 this
+                # synchronously captures JPEG decoding, NumPy conversion,
+                # Albumentations preprocessing, and DataLoader collation.
+                overhead_start = time.perf_counter()
+                try:
+                    X = next(data_iterator)
+                except StopIteration:
+                    break
+
+                # Device transfer is part of computational overhead rather than
+                # model inference. Synchronisation makes CUDA transfer completion
+                # fall inside this timing interval.
+                X = X.to(device)
                 if use_cuda:
                     torch.cuda.synchronize(device)
+                overhead_end = time.perf_counter()
 
-                cpu_before = _process_cpu_seconds(process)
-                start = time.perf_counter()
+                # The forward-pass interval begins only after the model-ready
+                # tensor is resident on the target device.
+                inference_start = time.perf_counter()
                 _ = forward(model, X)
                 if use_cuda:
                     torch.cuda.synchronize(device)
-                end = time.perf_counter()
+                inference_end = time.perf_counter()
                 cpu_after = _process_cpu_seconds(process)
 
-                elapsed_seconds = end - start
-                latencies_ms.append(elapsed_seconds * 1000.0)
+                overhead_seconds = overhead_end - overhead_start
+                inference_seconds = inference_end - inference_start
+                end_to_end_seconds = overhead_seconds + inference_seconds
+
+                overhead_latencies_ms.append(overhead_seconds * 1000.0)
+                inference_latencies_ms.append(inference_seconds * 1000.0)
+                end_to_end_latencies_ms.append(end_to_end_seconds * 1000.0)
 
                 if (
                     cpu_before is not None
                     and cpu_after is not None
-                    and elapsed_seconds > 0.0
+                    and end_to_end_seconds > 0.0
                 ):
                     # 100% means one logical CPU core was fully occupied during
-                    # this forward pass; multi-threaded CPU inference can exceed
-                    # 100%, matching psutil's process-CPU convention.
+                    # this end-to-end sample. Multi-threaded preprocessing or CPU
+                    # inference can exceed 100%, matching psutil's convention.
                     process_cpu_percent = max(
-                        0.0, (cpu_after - cpu_before) / elapsed_seconds * 100.0
+                        0.0,
+                        (cpu_after - cpu_before) / end_to_end_seconds * 100.0,
                     )
                     peak_process_cpu_percent = (
                         process_cpu_percent
@@ -789,7 +838,7 @@ def measure_inference_latency_ms(
         finally:
             monitor.stop()
 
-    if not latencies_ms:
+    if not end_to_end_latencies_ms:
         raise ValueError(
             "The dataloader yielded no measured samples after the warm-up phase."
         )
@@ -841,7 +890,16 @@ def measure_inference_latency_ms(
             "incremental_torch_vram_reserved_mb": None,
         })
 
-    return latencies_ms, resource_stats
+    # Keep the three lists aligned by sample index. ``end_to_end`` is constructed
+    # from the other two lists instead of timing a third overlapping interval, so
+    # it is mathematically equal to overhead + inference for every sample.
+    latency_measurements = {
+        "inference": inference_latencies_ms,
+        "overhead": overhead_latencies_ms,
+        "end_to_end": end_to_end_latencies_ms,
+    }
+
+    return latency_measurements, resource_stats
 
 
 def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
@@ -855,7 +913,7 @@ def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
     Parameters
     ----------
     latencies_ms : List[float]
-        Per-image inference latencies in milliseconds.
+        Per-image latency values in milliseconds for any one measured component.
 
     Returns
     -------
@@ -876,12 +934,54 @@ def compute_latency_statistics(latencies_ms: List[float]) -> Dict[str, float]:
     }
 
 
+def print_latency_statistics(title: str, stats: Dict[str, float]) -> None:
+    """Print one latency distribution using the benchmark's standard layout.
+
+    Steps
+    -----
+    1. Print the supplied section title.
+    2. Emit the percentile and mean values in a consistent order so inference,
+       overhead, and end-to-end sections are directly comparable.
+
+    Parameters
+    ----------
+    title : str
+        Human-readable heading describing the latency component.
+    stats : Dict[str, float]
+        Statistics returned by :func:`compute_latency_statistics`.
+
+    Returns
+    -------
+    None
+        This function writes formatted values to standard output.
+    """
+    print(title)
+    print(f"  P25      : {stats['p25']:.3f}")
+    print(f"  P50      : {stats['p50']:.3f}  (median)")
+    print(f"  Average  : {stats['average']:.3f}")
+    print(f"  P75      : {stats['p75']:.3f}")
+    print(f"  P90      : {stats['p90']:.3f}")
+    print(f"  P95      : {stats['p95']:.3f}")
+    print(f"  P99      : {stats['p99']:.3f}")
+
+
 def parse_arguments() -> argparse.Namespace:
-    """Parse checkpoint and resource-sampling options."""
+    """Parse command-line options for latency and resource evaluation.
+
+    Steps
+    -----
+    1. Require the trained model checkpoint path.
+    2. Accept an optional resource-monitor sampling interval in milliseconds.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed checkpoint and resource-sampling arguments.
+    """
     parser = argparse.ArgumentParser(
         description=(
-            "Measure inference latency plus CPU/RAM/VRAM/temperature overhead "
-            "of a trained model on the BDD100k test split."
+            "Measure inference, computational-overhead, and end-to-end latency "
+            "plus CPU/RAM/VRAM/temperature usage on the BDD100k test split."
         )
     )
     parser.add_argument(
@@ -908,14 +1008,35 @@ def _format_optional(value: Optional[float], decimals: int = 2) -> str:
 
 
 def main() -> None:
-    """Load a checkpoint and report latency plus resource-overhead metrics."""
+    """Run the complete end-to-end latency and resource evaluation pipeline.
+
+    Steps
+    -----
+    1. Parse options and load the trained segmentation checkpoint.
+    2. Reconstruct the BDD100k test split and build an image-only synchronous
+       DataLoader so preprocessing overhead is measurable per image.
+    3. Measure inference, computational overhead, and their additive end-to-end
+       latency while collecting resource peaks.
+    4. Print latency distributions and resource-use summaries.
+
+    Returns
+    -------
+    None
+        Results are written to standard output.
+
+    Raises
+    ------
+    ValueError
+        If the requested resource sampling interval is not positive or latency
+        measurement constraints are violated.
+    """
     args = parse_arguments()
 
     if args.resource_sample_interval_ms <= 0:
         raise ValueError("--resource-sample-interval-ms must be greater than zero.")
 
     print("\n" + "=" * 76)
-    print("LATENCY + RESOURCE OVERHEAD EVALUATION PIPELINE")
+    print("END-TO-END LATENCY + RESOURCE OVERHEAD EVALUATION PIPELINE")
     print("=" * 76)
 
     print(f"Loading checkpoint from: {args.checkpoint}")
@@ -950,7 +1071,9 @@ def main() -> None:
         A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
         ToTensorV2(),
     ])
-    test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
+    # Use the image-only dataset because ground-truth mask preparation belongs to
+    # offline evaluation, not the runtime inference path being benchmarked.
+    test_ds = BDDInferenceDataset(test_df, transform=inference_transforms)
     test_loader = DataLoader(
         dataset=test_ds,
         batch_size=Configuration.LATENCY_BATCH_SIZE,
@@ -958,28 +1081,37 @@ def main() -> None:
         num_workers=Configuration.NUM_WORKERS,
     )
 
-    latencies_ms, resources = measure_inference_latency_ms(
+    latency_measurements, resources = measure_latency_ms(
         model,
         test_loader,
         Configuration.DEVICE,
         resource_sample_interval_seconds=args.resource_sample_interval_ms / 1000.0,
     )
-    stats = compute_latency_statistics(latencies_ms)
+    inference_stats = compute_latency_statistics(latency_measurements["inference"])
+    overhead_stats = compute_latency_statistics(latency_measurements["overhead"])
+    end_to_end_stats = compute_latency_statistics(latency_measurements["end_to_end"])
 
     print(
-        f"\nMeasured {len(latencies_ms)} samples (batch size "
+        f"\nMeasured {len(latency_measurements['end_to_end'])} samples (batch size "
         f"{Configuration.LATENCY_BATCH_SIZE}, after "
         f"{Configuration.WARMUP_ITERATIONS} warm-up iterations)."
     )
     print("-" * 76)
-    print("Inference latency summary (forward pass only, ms):")
-    print(f"  P25      : {stats['p25']:.3f}")
-    print(f"  P50      : {stats['p50']:.3f}  (median)")
-    print(f"  Average  : {stats['average']:.3f}")
-    print(f"  P75      : {stats['p75']:.3f}")
-    print(f"  P90      : {stats['p90']:.3f}")
-    print(f"  P95      : {stats['p95']:.3f}")
-    print(f"  P99      : {stats['p99']:.3f}")
+    print_latency_statistics(
+        "Inference latency summary (forward pass only, ms):",
+        inference_stats,
+    )
+    print("-" * 76)
+    print_latency_statistics(
+        "Computational overhead summary "
+        "(decode + preprocess + collate + host-to-device, ms):",
+        overhead_stats,
+    )
+    print("-" * 76)
+    print_latency_statistics(
+        "End-to-end latency summary (overhead + inference, ms):",
+        end_to_end_stats,
+    )
 
     print("-" * 76)
     print("Resource-overhead summary (steady-state measured phase):")
