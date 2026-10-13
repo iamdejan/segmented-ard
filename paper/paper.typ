@@ -308,7 +308,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 )[
   + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
   + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
-  + What is the impact of the proposed framework on inference latency in resource-constrained deployment settings?
+  + What is the impact of the proposed framework on inference latency, hardware utilization, and memory consumption in resource-constrained deployment settings?
 ]
 
 #v(2 * line_spacing)
@@ -823,6 +823,14 @@ Lower ASR is preferrable, signaling high robustnesss that the model possesses.
 #v(2 * line_spacing)
 
 Latency is defined as the total time taken between submitting the input image and receiving the output. In real-time applications, especially in cruise control and self-driving, latency is important because the segmented output is used to assist the driving capability. Higher latency means longer duration needed for the vehicle to take decision, which increases the risk of accident. Therefore, this study aims to lower the latency.
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[Hardware Utilization and Memory Consumption]
+]
+#v(2 * line_spacing)
+
+Hardware utilization refers to the workload during inference, while memory consumption refers to the amount of memory that the program used. In the context of real-time autonomous driving systems, medium hardware utilization is preferred, since high utilization may block other systems to run in parallel and higher power consumption, while low utilization indicates that the system is unable to properly benefit from the hardware, which can result in longer latency time.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
