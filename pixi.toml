@@ -26,6 +26,12 @@ args = [
 ]
 cmd = "python3 evaluate_{{aspect}}.py"
 
+[tasks.explain]
+args = [
+    {"arg" = "mode", "choices" = ["choose"]}
+]
+cmd = "python3 explain_{{mode}}.py"
+
 [dependencies]
 python = ">=3.13,<3.14"
 mypy = ">=1.19.1,<2"
