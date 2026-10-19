@@ -1685,8 +1685,8 @@ def case_output_paths(
 
     Steps
     -----
-    1. Preserve the existing model/category layout for clean outputs.
-    2. Insert a ``robust`` directory for adversarial outputs to avoid collisions.
+    1. Insert the concrete input mode below the model directory.
+    2. Keep clean and adversarial outputs separated to avoid collisions.
     3. Encode source-row/rank/image/selected-class/target-class in the filename.
     4. Return separate paths for heatmap, overlay, and diagnostic panel.
 
@@ -1726,11 +1726,9 @@ def case_output_paths(
         f"row{source_row_index:04d}_rank{rank:02d}_img{image_index:04d}_"
         f"selected{selected_token}_target{target_class}"
     )
-    # Keep clean output paths backward-compatible with the original script while
-    # isolating robust artifacts so --input-mode all never overwrites clean files.
-    destination = output_dir / model_name / category
-    if input_mode == "robust":
-        destination = output_dir / model_name / "robust" / category
+    # Namespace every artifact by its concrete input mode so --input-mode all
+    # produces clean and robust trees side by side without overwriting either.
+    destination = output_dir / model_name / input_mode / category
     return (
         destination / f"{basename}_heatmap.png",
         destination / f"{basename}_overlay.png",
