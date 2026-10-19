@@ -8,6 +8,9 @@ model/**
 !model/**/
 !model/**/*.csv
 
+# untrack scores due to large size
+model/**/*_scores.csv
+
 # paper'sgenerated PDF
 paper/paper.pdf
 
