@@ -1,8 +1,12 @@
 # dataset
 data/
 
-# model
-model/
+# model checkpoint
+model/**
+
+# include XAI data in commit
+!model/**/
+!model/**/*.csv
 
 # paper'sgenerated PDF
 paper/paper.pdf
