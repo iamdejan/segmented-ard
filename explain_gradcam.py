@@ -1,9 +1,11 @@
-"""Generate Grad-CAM++ explanations for selected semantic-segmentation cases.
+"""Generate clean or PGD-robust Grad-CAM++ explanations for selected cases.
 
 The program consumes the ``selected_cases.csv`` manifest written by
 ``explain_choose.py`` and generates class/region-targeted Grad-CAM++ heatmaps for
-the corresponding trained segmentation checkpoints. Grad-CAM is used as a
-numerical fallback when a Grad-CAM++ map is undefined or degenerate.
+the corresponding trained segmentation checkpoints. Inputs can remain clean,
+be perturbed with the PGD attack shared by ``evaluate_robustness.py``, or include
+both variants in one run. Grad-CAM is used as a numerical fallback when a
+Grad-CAM++ map is undefined or degenerate.
 """
 
 import argparse
@@ -30,9 +32,11 @@ from evaluate_performance import (
     Configuration,
     load_trained_model,
 )
+from evaluate_robustness import pgd_attack
 
 
 BatchImage = Float[Tensor, "1 3 h w"]
+BatchMask = Float[Tensor, "1 c h w"]
 Logits = Float[Tensor, "1 c h w"]
 SingleLogits = Float[Tensor, "c h w"]
 Scalar = Float[Tensor, ""]
@@ -1620,18 +1624,71 @@ def load_single_sample(
     return cast(BatchImage, batch_image), cast(ClassMap, class_map)
 
 
+@jaxtyped(typechecker=beartype)
+def generate_robust_input(
+    model: nn.Module,
+    image: BatchImage,
+    target: ClassMap,
+) -> BatchImage:
+    """Perturb one dataset image with the repository's PGD robustness attack.
+
+    The ground-truth class map is converted back to the one-hot batch layout
+    expected by :func:`evaluate_robustness.pgd_attack`. The attack function is
+    called without overriding its attack parameters so Grad-CAM robustness uses
+    the same 10-step PGD defaults as the robustness-evaluation pipeline.
+
+    Steps
+    -----
+    1. One-hot encode the unchanged ground-truth class map into a batch mask.
+    2. Run the shared untargeted PGD implementation on the clean input image.
+    3. Detach the adversarial image before subsequent inference/CAM operations.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Loaded semantic-segmentation checkpoint to attack.
+    image : BatchImage
+        Clean dataset image with shape ``(1, 3, H, W)`` and values in ``[0, 1]``.
+    target : ClassMap
+        Unchanged ground-truth class-index map with shape ``(H, W)``.
+
+    Returns
+    -------
+    BatchImage
+        PGD-perturbed image with the same shape and valid value range as ``image``.
+    """
+    # PGD maximizes cross-entropy against a one-hot segmentation target, so rebuild
+    # exactly the batched target representation consumed by evaluate_robustness.py.
+    target_one_hot = F.one_hot(
+        target,
+        num_classes=Configuration.NUM_CLASSES,
+    ).permute(2, 0, 1).float().unsqueeze(0)
+    batch_target = cast(BatchMask, target_one_hot.to(device=image.device))
+
+    # Reusing the shared attack implementation keeps epsilon, step size, iteration
+    # count, clamping, and ignored-class handling identical to robustness evaluation.
+    robust_image = pgd_attack(
+        model=model,
+        images=image,
+        targets=batch_target,
+    )
+    return cast(BatchImage, robust_image.detach())
+
+
 def case_output_paths(
     output_dir: FilePath,
     row: pd.Series,
     target_class: int,
+    input_mode: str,
 ) -> Tuple[FilePath, FilePath, FilePath]:
     """Build deterministic output paths for one explanation case.
 
     Steps
     -----
-    1. Organise outputs by model then selection category.
-    2. Encode source-row/rank/image/selected-class/target-class in the filename.
-    3. Return separate paths for heatmap, overlay, and diagnostic panel.
+    1. Preserve the existing model/category layout for clean outputs.
+    2. Insert a ``robust`` directory for adversarial outputs to avoid collisions.
+    3. Encode source-row/rank/image/selected-class/target-class in the filename.
+    4. Return separate paths for heatmap, overlay, and diagnostic panel.
 
     Parameters
     ----------
@@ -1641,12 +1698,22 @@ def case_output_paths(
         Expanded selected-case row.
     target_class : int
         Actual model class explained by Grad-CAM.
+    input_mode : str
+        Concrete input variant being explained: ``clean`` or ``robust``.
 
     Returns
     -------
     Tuple[FilePath, FilePath, FilePath]
         Heatmap PNG path, overlay PNG path, and panel PNG path.
+
+    Raises
+    ------
+    ValueError
+        If ``input_mode`` is not ``clean`` or ``robust``.
     """
+    if input_mode not in {"clean", "robust"}:
+        raise ValueError("input_mode must be either 'clean' or 'robust'.")
+
     model_name = sanitise_filename(str(row["model_name"]))
     category = sanitise_filename(str(row["category"]))
     rank = int(float(row["rank"]))
@@ -1659,7 +1726,11 @@ def case_output_paths(
         f"row{source_row_index:04d}_rank{rank:02d}_img{image_index:04d}_"
         f"selected{selected_token}_target{target_class}"
     )
+    # Keep clean output paths backward-compatible with the original script while
+    # isolating robust artifacts so --input-mode all never overwrites clean files.
     destination = output_dir / model_name / category
+    if input_mode == "robust":
+        destination = output_dir / model_name / "robust" / category
     return (
         destination / f"{basename}_heatmap.png",
         destination / f"{basename}_overlay.png",
@@ -1673,13 +1744,14 @@ def build_case_title(
     target_class: int,
     target_region_name: str,
     method_used: str,
+    input_mode: str,
 ) -> str:
     """Build a compact, self-describing title for one explanation figure.
 
     Steps
     -----
     1. Resolve selected and actual target class ids into readable names.
-    2. Combine model, category, region, and method metadata into one title.
+    2. Combine model, input mode, category, region, and method metadata into one title.
 
     Parameters
     ----------
@@ -1693,6 +1765,8 @@ def build_case_title(
         Description of the pixel region used for the scalar target.
     method_used : str
         Grad-CAM method actually used after any fallback.
+    input_mode : str
+        Concrete input variant being explained: ``clean`` or ``robust``.
 
     Returns
     -------
@@ -1708,7 +1782,8 @@ def build_case_title(
         else f"class_{target_class}"
     )
     return (
-        f"{row['model_name']} | {row['category']} | selected={selected_name} | "
+        f"{row['model_name']} | input={input_mode} | {row['category']} | "
+        f"selected={selected_name} | "
         f"target={target_name} | region={target_region_name} | {method_used}"
     )
 
@@ -1728,20 +1803,24 @@ def explain_cases_for_model(
     colormap: str,
     overlay_alpha: float,
     epsilon: float,
+    input_mode: str,
 ) -> List[Dict[str, object]]:
     """Generate Grad-CAM explanations for every selected case of one model.
 
-    A cheap inference pass is reused per image to select the prediction-dependent
-    class/region target. Each selected case is then passed to ``pytorch-grad-cam``,
+    A cheap inference pass is reused per image and input variant to select the
+    prediction-dependent class/region target. Robust inputs are generated with
+    the shared PGD attack from ``evaluate_robustness.py`` while retaining the
+    original dataset mask. Each selected case is then passed to ``pytorch-grad-cam``,
     which performs the differentiable forward/backward pass needed by its own CAM
     hooks and algorithm implementation.
 
     Steps
     -----
     1. Discover the model target layer used by the CAM library.
-    2. Group selected rows by image/mask pair and run one inference-only forward.
-    3. Choose each case's class/region target and generate the requested library CAM.
-    4. Save figures and return one manifest row per explanation.
+    2. Group selected rows by image/mask pair and load the clean dataset sample once.
+    3. Build the requested clean/robust input variants, using shared PGD for robust.
+    4. Run inference for each variant and choose each case's class/region target.
+    5. Generate the requested library CAM, save figures, and return manifest rows.
 
     Parameters
     ----------
@@ -1774,6 +1853,8 @@ def explain_cases_for_model(
         Heatmap opacity for image overlays.
     epsilon : float
         Threshold used to detect degenerate library CAM outputs.
+    input_mode : str
+        Requested inputs: ``clean``, ``robust``, or ``all``.
 
     Returns
     -------
@@ -1787,10 +1868,14 @@ def explain_cases_for_model(
     TypeError
         If the segmentation model does not return a tensor.
     ValueError
-        If a model output/target region is incompatible with explanation.
+        If ``input_mode`` is invalid or a model output/target region is incompatible
+        with explanation.
     FileNotFoundError
         If selected source files are missing.
     """
+    if input_mode not in {"clean", "robust", "all"}:
+        raise ValueError("input_mode must be one of: clean, robust, all.")
+
     model.eval()
     layer_name, target_layer = choose_target_layer(
         model,
@@ -1808,121 +1893,146 @@ def explain_cases_for_model(
         image_path = resolve_project_path(str(image_path_value), project_root)
         mask_path = resolve_project_path(str(mask_path_value), project_root)
 
-        image, target = load_single_sample(image_path, mask_path, device)
+        clean_image, target = load_single_sample(image_path, mask_path, device)
 
-        # Target selection depends on the model prediction, but it does not need an
-        # autograd graph because pytorch-grad-cam performs its own forward pass.
-        with torch.no_grad():
-            logits_raw = model(image)
-        if not isinstance(logits_raw, Tensor):
-            raise TypeError("Segmentation model forward output must be a Tensor.")
-        logits = cast(Logits, logits_raw)
-        prediction = cast(ClassMap, logits.argmax(dim=1)[0])
-
-        for _, row in case_group.iterrows():
-            selected_class = optional_class_id(row["class_id"])
-            target_class, target_region, target_region_name = (
-                choose_target_class_and_region(
-                    prediction=prediction,
-                    target=target,
-                    category=str(row["category"]),
-                    selected_class=selected_class,
-                    num_output_classes=int(logits.shape[1]),
-                    ignored_class=19,
-                    boundary_radius=boundary_radius,
-                    region_mode=region_mode,
+        # Build robust input only when requested because PGD requires ten backward
+        # passes and would otherwise add substantial cost to clean-only explanations.
+        input_variants: List[Tuple[str, BatchImage]] = []
+        if input_mode in {"clean", "all"}:
+            input_variants.append(("clean", clean_image))
+        if input_mode in {"robust", "all"}:
+            input_variants.append(
+                (
+                    "robust",
+                    generate_robust_input(
+                        model=model,
+                        image=clean_image,
+                        target=target,
+                    ),
                 )
             )
 
-            # The custom target keeps the old mean-over-region semantics while
-            # allowing the external library to own all CAM-specific computation.
-            cam_target = MeanRegionSegmentationTarget(
-                target_class=target_class,
-                region=target_region,
-            )
-            target_score = cam_target(cast(SingleLogits, logits[0]))
-            heatmap, method_used = generate_cam(
-                model=model,
-                target_layer=target_layer,
-                image=image,
-                target=cam_target,
-                method=method,
-                epsilon=epsilon,
-            )
+        for concrete_input_mode, image in input_variants:
+            # Target selection depends on the prediction for the concrete input.
+            # No graph is needed here because pytorch-grad-cam runs its own forward.
+            with torch.no_grad():
+                logits_raw = model(image)
+            if not isinstance(logits_raw, Tensor):
+                raise TypeError("Segmentation model forward output must be a Tensor.")
+            logits = cast(Logits, logits_raw)
+            prediction = cast(ClassMap, logits.argmax(dim=1)[0])
 
-            heatmap_path, overlay_path, panel_path = case_output_paths(
-                output_dir=output_dir,
-                row=row,
-                target_class=target_class,
-            )
-            title = build_case_title(
-                row=row,
-                selected_class=selected_class,
-                target_class=target_class,
-                target_region_name=target_region_name,
-                method_used=method_used,
-            )
+            for _, row in case_group.iterrows():
+                selected_class = optional_class_id(row["class_id"])
+                target_class, target_region, target_region_name = (
+                    choose_target_class_and_region(
+                        prediction=prediction,
+                        target=target,
+                        category=str(row["category"]),
+                        selected_class=selected_class,
+                        num_output_classes=int(logits.shape[1]),
+                        ignored_class=19,
+                        boundary_radius=boundary_radius,
+                        region_mode=region_mode,
+                    )
+                )
 
-            input_numpy = tensor_image_to_numpy(image)
-            target_numpy = tensor_class_map_to_numpy(target)
-            prediction_numpy = tensor_class_map_to_numpy(prediction)
-            region_numpy = tensor_boolean_mask_to_numpy(target_region)
-            save_case_visualisations(
-                image=input_numpy,
-                target_map=target_numpy,
-                prediction_map=prediction_numpy,
-                target_region=region_numpy,
-                heatmap=heatmap,
-                heatmap_path=heatmap_path,
-                overlay_path=overlay_path,
-                panel_path=panel_path,
-                title=title,
-                colormap=colormap,
-                overlay_alpha=overlay_alpha,
-            )
+                # The custom target keeps the old mean-over-region semantics while
+                # allowing the external library to own all CAM-specific computation.
+                cam_target = MeanRegionSegmentationTarget(
+                    target_class=target_class,
+                    region=target_region,
+                )
+                target_score = cam_target(cast(SingleLogits, logits[0]))
+                heatmap, method_used = generate_cam(
+                    model=model,
+                    target_layer=target_layer,
+                    image=image,
+                    target=cam_target,
+                    method=method,
+                    epsilon=epsilon,
+                )
 
-            selected_class_name = ""
-            if selected_class is not None and selected_class < len(CLASS_NAMES):
-                selected_class_name = CLASS_NAMES[selected_class]
-            target_class_name = (
-                CLASS_NAMES[target_class]
-                if target_class < len(CLASS_NAMES)
-                else f"class_{target_class}"
-            )
+                heatmap_path, overlay_path, panel_path = case_output_paths(
+                    output_dir=output_dir,
+                    row=row,
+                    target_class=target_class,
+                    input_mode=concrete_input_mode,
+                )
+                title = build_case_title(
+                    row=row,
+                    selected_class=selected_class,
+                    target_class=target_class,
+                    target_region_name=target_region_name,
+                    method_used=method_used,
+                    input_mode=concrete_input_mode,
+                )
 
-            # The manifest captures both original selection metadata and the actual
-            # CAM target so every generated explanation remains auditable.
-            manifest_rows.append(
-                {
-                    "source_row_index": int(row["source_row_index"]),
-                    "source_model_name": str(row["source_model_name"]),
-                    "model_name": model_name,
-                    "category": str(row["category"]),
-                    "rank": int(float(row["rank"])),
-                    "image_index": image_index,
-                    "image_path": str(image_path),
-                    "mask_path": str(mask_path),
-                    "selection_score_name": str(row.get("score_name", "")),
-                    "selection_score": row.get("score", np.nan),
-                    "selected_class_id": selected_class,
-                    "selected_class_name": selected_class_name,
-                    "target_class_id": target_class,
-                    "target_class_name": target_class_name,
-                    "target_region": target_region_name,
-                    "target_region_pixels": int(target_region.sum().item()),
-                    "target_score": float(target_score.detach().item()),
-                    "target_layer": layer_name,
-                    "requested_method": method,
-                    "method_used": method_used,
-                    "heatmap_path": str(heatmap_path),
-                    "overlay_path": str(overlay_path),
-                    "panel_path": str(panel_path),
-                }
-            )
+                input_numpy = tensor_image_to_numpy(image)
+                target_numpy = tensor_class_map_to_numpy(target)
+                prediction_numpy = tensor_class_map_to_numpy(prediction)
+                region_numpy = tensor_boolean_mask_to_numpy(target_region)
+                save_case_visualisations(
+                    image=input_numpy,
+                    target_map=target_numpy,
+                    prediction_map=prediction_numpy,
+                    target_region=region_numpy,
+                    heatmap=heatmap,
+                    heatmap_path=heatmap_path,
+                    overlay_path=overlay_path,
+                    panel_path=panel_path,
+                    title=title,
+                    colormap=colormap,
+                    overlay_alpha=overlay_alpha,
+                )
+
+                selected_class_name = ""
+                if selected_class is not None and selected_class < len(CLASS_NAMES):
+                    selected_class_name = CLASS_NAMES[selected_class]
+                target_class_name = (
+                    CLASS_NAMES[target_class]
+                    if target_class < len(CLASS_NAMES)
+                    else f"class_{target_class}"
+                )
+
+                # Recording the concrete input mode is essential for --input-mode
+                # all because one source case deliberately produces two explanations.
+                manifest_rows.append(
+                    {
+                        "source_row_index": int(row["source_row_index"]),
+                        "source_model_name": str(row["source_model_name"]),
+                        "model_name": model_name,
+                        "input_mode": concrete_input_mode,
+                        "category": str(row["category"]),
+                        "rank": int(float(row["rank"])),
+                        "image_index": image_index,
+                        "image_path": str(image_path),
+                        "mask_path": str(mask_path),
+                        "selection_score_name": str(row.get("score_name", "")),
+                        "selection_score": row.get("score", np.nan),
+                        "selected_class_id": selected_class,
+                        "selected_class_name": selected_class_name,
+                        "target_class_id": target_class,
+                        "target_class_name": target_class_name,
+                        "target_region": target_region_name,
+                        "target_region_pixels": int(target_region.sum().item()),
+                        "target_score": float(target_score.detach().item()),
+                        "target_layer": layer_name,
+                        "requested_method": method,
+                        "method_used": method_used,
+                        "heatmap_path": str(heatmap_path),
+                        "overlay_path": str(overlay_path),
+                        "panel_path": str(panel_path),
+                    }
+                )
+
+            # Release variant-specific forward results before moving to the next
+            # input mode; CAM backward intermediates can consume substantial VRAM.
+            del logits, prediction
 
         # Release per-image tensors before the next group because manifests can
-        # contain hundreds of cases and CAM calls allocate backward intermediates.
-        del image, target, logits, prediction
+        # contain hundreds of cases and robust mode adds an adversarial tensor too.
+        del clean_image, target, input_variants, image
 
     return manifest_rows
 
@@ -1934,7 +2044,8 @@ def parse_arguments() -> argparse.Namespace:
     -----
     1. Accept the selected-case manifest and one or more named checkpoints.
     2. Configure optional model/category/class/rank filters to control workload.
-    3. Configure target-layer, Grad-CAM method, target-region, and rendering options.
+    3. Choose clean, PGD-robust, or combined input processing.
+    4. Configure target-layer, Grad-CAM method, target-region, and rendering options.
 
     Returns
     -------
@@ -2002,6 +2113,15 @@ def parse_arguments() -> argparse.Namespace:
         help="Optional global cap after all filters, useful for a quick smoke test.",
     )
     parser.add_argument(
+        "--input-mode",
+        choices=["clean", "robust", "all"],
+        default="clean",
+        help=(
+            "Input variant to explain: clean dataset images, robust images perturbed "
+            "with evaluate_robustness.py PGD defaults, or both. Defaults to clean."
+        ),
+    )
+    parser.add_argument(
         "--method",
         choices=["gradcam++", "gradcam"],
         default="gradcam++",
@@ -2056,14 +2176,15 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Generate Grad-CAM++ heatmaps for filtered selected semantic cases.
+    """Generate clean and/or PGD-robust Grad-CAM++ heatmaps for selected cases.
 
     Steps
     -----
     1. Load and filter ``selected_cases.csv`` against supplied checkpoint names.
     2. Expand cross-model cases so each supplied model explains the same image.
-    3. Load one checkpoint at a time and generate category-aware Grad-CAM++ maps.
-    4. Append each completed checkpoint's metadata to ``gradcam_manifest.csv``.
+    3. Load one checkpoint at a time and generate the requested clean/robust inputs.
+    4. Generate category-aware Grad-CAM++ maps for each concrete input variant.
+    5. Append each completed checkpoint's metadata to ``gradcam_manifest.csv``.
 
     Returns
     -------
@@ -2130,6 +2251,7 @@ def main() -> None:
     print(f"Execution device : {Configuration.DEVICE}")
     print(f"Selected cases   : {selected_cases_path}")
     print(f"Cases to explain : {len(cases)}")
+    print(f"Input mode       : {args.input_mode}")
     print(f"Requested method : {args.method}")
     print(f"Region mode      : {args.region_mode}")
     print(f"Output directory : {output_dir}")
@@ -2162,6 +2284,7 @@ def main() -> None:
             colormap=args.colormap,
             overlay_alpha=args.overlay_alpha,
             epsilon=args.epsilon,
+            input_mode=args.input_mode,
         )
         all_manifest_rows.extend(model_rows)
 
