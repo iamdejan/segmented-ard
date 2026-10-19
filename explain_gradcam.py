@@ -9,8 +9,7 @@ numerical fallback when a Grad-CAM++ map is undefined or degenerate.
 import argparse
 import re
 from pathlib import Path as FilePath
-from types import TracebackType
-from typing import Dict, List, Optional, Sequence, Tuple, Type, cast
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, cast
 
 import albumentations as A
 import matplotlib.pyplot as plt
@@ -21,6 +20,7 @@ import torch.nn.functional as F
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
 from jaxtyping import Bool, Float, Int64, jaxtyped
+from pytorch_grad_cam import GradCAM, GradCAMPlusPlus
 from torch import Tensor, nn
 
 from evaluate_performance import (
@@ -34,145 +34,15 @@ from evaluate_performance import (
 
 BatchImage = Float[Tensor, "1 3 h w"]
 Logits = Float[Tensor, "1 c h w"]
-FeatureMap = Float[Tensor, "1 c h w"]
+SingleLogits = Float[Tensor, "c h w"]
 Scalar = Float[Tensor, ""]
 ClassMap = Int64[Tensor, "h w"]
 BooleanMask = Bool[Tensor, "h w"]
-HeatmapTensor = Float[Tensor, "h w"]
 NumpyImage = Float[np.ndarray, "h w 3"]
+NumpyCamBatch = Float[np.ndarray, "b h w"]
 NumpyHeatmap = Float[np.ndarray, "h w"]
 NumpyClassMap = Int64[np.ndarray, "h w"]
 NumpyBooleanMask = Bool[np.ndarray, "h w"]
-
-
-class ActivationCapture:
-    """Capture the output activation of one target module during inference.
-
-    Grad-CAM methods require an intermediate convolutional activation that still
-    belongs to the autograd graph. A forward hook is used instead of changing
-    the segmentation architecture, keeping explanation generation independent
-    of the exact U-Net encoder used by a checkpoint.
-
-    Steps
-    -----
-    1. Register a forward hook on the requested target module.
-    2. Store its tensor output every time the model performs a forward pass.
-    3. Remove the hook when leaving the context manager.
-
-    Parameters
-    ----------
-    module : nn.Module
-        Model module whose forward output should be captured.
-
-    Attributes
-    ----------
-    activation : Optional[Tensor]
-        Most recently captured tensor output, or ``None`` before a forward pass.
-
-    Raises
-    ------
-    TypeError
-        If the target module returns a non-tensor output.
-    """
-
-    def __init__(self, module: nn.Module) -> None:
-        """Register the forward hook used to capture target-layer activations.
-
-        Steps
-        -----
-        1. Initialise the capture slot to ``None`` before any forward pass.
-        2. Register this instance's callback on the requested target module.
-
-        Parameters
-        ----------
-        module : nn.Module
-            Model layer whose output activation should be captured.
-        """
-        self.activation: Optional[Tensor] = None
-        self._handle = module.register_forward_hook(self._capture)
-
-    def _capture(
-        self,
-        module: nn.Module,
-        inputs: Tuple[object, ...],
-        output: object,
-    ) -> None:
-        """Store one hooked module output without detaching it from autograd.
-
-        Parameters
-        ----------
-        module : nn.Module
-            Module that triggered the hook. It is accepted for the PyTorch hook
-            interface and is not otherwise inspected.
-        inputs : Tuple[object, ...]
-            Positional inputs supplied to the hooked module. They are retained
-            only to satisfy the hook callback signature.
-        output : object
-            Hooked module output expected to be a tensor.
-
-        Steps
-        -----
-        1. Validate that the hooked output is a tensor.
-        2. Keep the graph-connected activation for later target differentiation.
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        TypeError
-            If ``output`` is not a ``torch.Tensor``.
-        """
-        del module, inputs
-        if not isinstance(output, Tensor):
-            raise TypeError(
-                "The selected Grad-CAM target layer must return a torch.Tensor."
-            )
-        self.activation = output
-
-    def __enter__(self) -> "ActivationCapture":
-        """Return this capture object after the hook has been registered.
-
-        Steps
-        -----
-        1. Return the already-initialised capture object without changing the hook.
-
-        Returns
-        -------
-        ActivationCapture
-            Active capture object used inside the context manager.
-        """
-        return self
-
-    def __exit__(
-        self,
-        exc_type: Optional[Type[BaseException]],
-        exc_value: Optional[BaseException],
-        traceback: Optional[TracebackType],
-    ) -> None:
-        """Remove the forward hook when explanation generation is finished.
-
-        Parameters
-        ----------
-        exc_type : object
-            Exception type propagated by the context manager, if any.
-        exc_value : object
-            Exception instance propagated by the context manager, if any.
-        traceback : object
-            Traceback propagated by the context manager, if any.
-
-        Steps
-        -----
-        1. Discard exception metadata because it does not affect hook cleanup.
-        2. Remove the PyTorch forward hook exactly once.
-
-        Returns
-        -------
-        None
-        """
-        del exc_type, exc_value, traceback
-        self._handle.remove()
 
 
 def parse_checkpoint_spec(specification: str) -> Tuple[str, str]:
@@ -967,273 +837,236 @@ def choose_target_class_and_region(
     return target_class, cast(BooleanMask, region), "dominant_prediction_fallback"
 
 
-@jaxtyped(typechecker=beartype)
-def segmentation_target_score(
-    logits: Logits,
-    target_class: int,
-    region: BooleanMask,
-) -> Scalar:
-    """Reduce dense segmentation logits to one scalar Grad-CAM target score.
+class MeanRegionSegmentationTarget:
+    """Select the mean logit of one semantic class inside a spatial region.
 
-    Grad-CAM requires a scalar output. Averaging the selected class logit only
-    over the case-specific region preserves the semantic question encoded by the
-    selection category while avoiding domination by unrelated image pixels.
+    ``pytorch-grad-cam`` accepts callable model targets for non-classification
+    tasks. This target preserves the repository's previous scoring semantics:
+    explain the mean target-class logit over the category-specific region rather
+    than changing the score definition to the library's built-in summed mask.
 
     Steps
     -----
-    1. Validate the requested class channel and non-empty spatial region.
-    2. Extract target-class logits over the region.
-    3. Return their mean as the scalar differentiation target.
+    1. Validate and store the target class and non-empty boolean region.
+    2. Move the stored region to the model-output device when called.
+    3. Return the mean target-class logit covered by the region.
 
     Parameters
     ----------
-    logits : Logits
-        Model output logits with shape ``(1, C, H, W)``.
     target_class : int
-        Class channel whose evidence should be explained.
+        Semantic class channel to explain.
     region : BooleanMask
-        Spatial mask of shape ``(H, W)`` defining the explained output region.
-
-    Returns
-    -------
-    Tensor
-        Scalar mean target-class logit.
+        Boolean mask of shape ``(H, W)`` defining the explained output region.
 
     Raises
     ------
     ValueError
-        If the class id is outside the logits range or the region is empty.
+        If ``target_class`` is negative or ``region`` is empty.
     """
-    if target_class < 0 or target_class >= logits.shape[1]:
-        raise ValueError(
-            f"Target class {target_class} is outside logits range "
-            f"[0, {logits.shape[1] - 1}]."
-        )
-    if not bool(region.any().item()):
-        raise ValueError("Grad-CAM target region must contain at least one pixel.")
 
-    class_logits = logits[0, target_class]
-    return class_logits[region].mean()
+    @jaxtyped(typechecker=beartype)
+    def __init__(self, target_class: int, region: BooleanMask) -> None:
+        """Store one validated semantic-segmentation CAM target.
+
+        Steps
+        -----
+        1. Reject negative class ids and empty target regions early.
+        2. Detach and clone the region so later tensor reuse cannot mutate it.
+
+        Parameters
+        ----------
+        target_class : int
+            Semantic class channel to explain.
+        region : BooleanMask
+            Boolean target region of shape ``(H, W)``.
+
+        Raises
+        ------
+        ValueError
+            If ``target_class`` is negative or ``region`` is empty.
+        """
+        if target_class < 0:
+            raise ValueError("Grad-CAM target class must be non-negative.")
+        if not bool(region.any().item()):
+            raise ValueError("Grad-CAM target region must contain at least one pixel.")
+
+        # Keep the target independent from the image-selection tensors because the
+        # CAM library performs a separate differentiable model forward pass.
+        self.target_class = target_class
+        self.region = cast(BooleanMask, region.detach().clone())
+
+    @jaxtyped(typechecker=beartype)
+    def __call__(self, model_output: SingleLogits) -> Scalar:
+        """Reduce one segmentation output to the scalar score explained by CAM.
+
+        Steps
+        -----
+        1. Validate the target channel and spatial size against model output.
+        2. Move the boolean region to the model output device.
+        3. Return the mean target-class logit inside that region.
+
+        Parameters
+        ----------
+        model_output : SingleLogits
+            Per-image segmentation logits with shape ``(C, H, W)``.
+
+        Returns
+        -------
+        Scalar
+            Mean target-class logit over the stored region.
+
+        Raises
+        ------
+        ValueError
+            If the class id is outside the model output range or the region shape
+            differs from the output spatial dimensions.
+        """
+        if self.target_class >= model_output.shape[0]:
+            raise ValueError(
+                f"Target class {self.target_class} is outside logits range "
+                f"[0, {model_output.shape[0] - 1}]."
+            )
+        if tuple(self.region.shape) != tuple(model_output.shape[1:]):
+            raise ValueError(
+                "Grad-CAM target region shape does not match model output: "
+                f"{tuple(self.region.shape)} vs {tuple(model_output.shape[1:])}."
+            )
+
+        # Moving only the mask keeps the target compatible with whichever device
+        # pytorch-grad-cam derives from the checkpoint parameters.
+        region = self.region.to(device=model_output.device)
+        score = model_output[self.target_class][region].mean()
+        return cast(Scalar, score)
 
 
 @jaxtyped(typechecker=beartype)
-def gradcam_plus_plus_map(
-    activation: FeatureMap,
-    gradient: FeatureMap,
-    epsilon: float,
-) -> Optional[HeatmapTensor]:
-    """Compute a practical Grad-CAM++ map from activations and first gradients.
-
-    This follows the commonly used Grad-CAM++ weighting form where squared and
-    cubed first-order gradients approximate the per-location alpha coefficients.
-    Positive gradients are then weighted and summed across channels. Returning
-    ``None`` for non-finite or degenerate results triggers the requested Grad-CAM
-    fallback instead of emitting a misleading blank heatmap.
-
-    Steps
-    -----
-    1. Compute squared/cubed gradients and Grad-CAM++ alpha coefficients.
-    2. Weight positive gradients spatially to obtain one weight per channel.
-    3. Sum weighted activations and apply ReLU to retain positive evidence.
-    4. Reject non-finite or effectively zero maps so Grad-CAM can be used instead.
-
-    Parameters
-    ----------
-    activation : FeatureMap
-        Target-layer activation with shape ``(1, C, H, W)``.
-    gradient : FeatureMap
-        Gradient of the scalar target score with respect to ``activation``.
-    epsilon : float
-        Numerical stability threshold used for denominator and map checks.
-
-    Returns
-    -------
-    Optional[HeatmapTensor]
-        Raw non-negative CAM at feature resolution, or ``None`` when unusable.
-
-    Raises
-    ------
-    ValueError
-        If activation and gradient shapes differ or batch size is not one.
-    """
-    if activation.shape != gradient.shape:
-        raise ValueError(
-            f"Activation/gradient shapes differ: {activation.shape} vs {gradient.shape}."
-        )
-    if activation.shape[0] != 1:
-        raise ValueError("Grad-CAM++ generation requires batch size 1.")
-
-    gradients_squared = gradient.pow(2)
-    gradients_cubed = gradient.pow(3)
-    activation_sum = activation.sum(dim=(2, 3), keepdim=True)
-    denominator = (2.0 * gradients_squared) + (activation_sum * gradients_cubed)
-
-    # Only divide where the denominator is numerically meaningful. Zero-alpha
-    # locations contribute nothing instead of introducing NaN/Inf artifacts.
-    safe_denominator = torch.where(
-        denominator.abs() > epsilon,
-        denominator,
-        torch.ones_like(denominator),
-    )
-    alpha = gradients_squared / safe_denominator
-    alpha = torch.where(
-        denominator.abs() > epsilon,
-        alpha,
-        torch.zeros_like(alpha),
-    )
-
-    positive_gradient = F.relu(gradient)
-    weights = (alpha * positive_gradient).sum(dim=(2, 3), keepdim=True)
-    cam = F.relu((weights * activation).sum(dim=1).squeeze(0))
-
-    if not bool(torch.isfinite(cam).all().item()):
-        return None
-    if float(cam.max().item()) <= epsilon:
-        return None
-    return cast(HeatmapTensor, cam)
-
-
-@jaxtyped(typechecker=beartype)
-def gradcam_map(
-    activation: FeatureMap,
-    gradient: FeatureMap,
-) -> HeatmapTensor:
-    """Compute the standard Grad-CAM map used as the numerical fallback.
-
-    Steps
-    -----
-    1. Global-average the target gradient into one weight per feature channel.
-    2. Sum the weighted target-layer activations.
-    3. Apply ReLU so the heatmap represents positive evidence for the target.
-
-    Parameters
-    ----------
-    activation : FeatureMap
-        Target-layer activation with shape ``(1, C, H, W)``.
-    gradient : FeatureMap
-        Gradient of the scalar target score with respect to ``activation``.
-
-    Returns
-    -------
-    HeatmapTensor
-        Raw non-negative Grad-CAM map at feature-map resolution.
-
-    Raises
-    ------
-    ValueError
-        If activation and gradient shapes differ or batch size is not one.
-    """
-    if activation.shape != gradient.shape:
-        raise ValueError(
-            f"Activation/gradient shapes differ: {activation.shape} vs {gradient.shape}."
-        )
-    if activation.shape[0] != 1:
-        raise ValueError("Grad-CAM generation requires batch size 1.")
-
-    weights = gradient.mean(dim=(2, 3), keepdim=True)
-    cam = F.relu((weights * activation).sum(dim=1).squeeze(0))
-    return cast(HeatmapTensor, cam)
-
-
-@jaxtyped(typechecker=beartype)
-def resize_and_normalise_cam(
-    cam: HeatmapTensor,
-    output_height: int,
-    output_width: int,
-    epsilon: float,
+def run_cam_algorithm(
+    cam: Callable[..., NumpyCamBatch],
+    image: BatchImage,
+    target: MeanRegionSegmentationTarget,
 ) -> NumpyHeatmap:
-    """Resize a raw CAM to input resolution and normalise it to ``[0, 1]``.
+    """Run one ``pytorch-grad-cam`` algorithm and validate its output shape.
+
+    The library owns activation hooks, gradient collection, CAM weighting,
+    resizing to input resolution, and normalisation. This helper only converts
+    the single-image result into the repository's typed NumPy representation.
 
     Steps
     -----
-    1. Bilinearly resize the feature-resolution CAM to image resolution.
-    2. Replace non-finite values with zeros before visualisation.
-    3. Min-max normalise non-constant maps and return float32 NumPy data.
+    1. Invoke the configured library CAM with the custom segmentation target.
+    2. Select the sole batch item and require a two-dimensional heatmap.
+    3. Return float32 data without copying when the library already provides it.
 
     Parameters
     ----------
-    cam : HeatmapTensor
-        Raw CAM of shape ``(h, w)``.
-    output_height : int
-        Desired image-space heatmap height.
-    output_width : int
-        Desired image-space heatmap width.
-    epsilon : float
-        Minimum value range required for min-max normalisation.
+    cam : Callable[..., NumpyCamBatch]
+        Configured ``pytorch-grad-cam`` algorithm bound to the model/layer.
+    image : BatchImage
+        Input image tensor with shape ``(1, 3, H, W)``.
+    target : MeanRegionSegmentationTarget
+        Scalar semantic-segmentation target used by the CAM library.
 
     Returns
     -------
     NumpyHeatmap
-        Normalised heatmap of shape ``(output_height, output_width)``.
+        Library-normalised heatmap of shape ``(H, W)``.
+
+    Raises
+    ------
+    RuntimeError
+        If the library returns an unexpected batch or spatial shape.
+    """
+    # The library performs its own differentiable forward/backward pass because
+    # its hooks must observe the exact activations used to build the CAM.
+    grayscale_cams = cam(input_tensor=image, targets=[target])
+    if grayscale_cams.ndim != 3 or grayscale_cams.shape[0] != 1:
+        raise RuntimeError(
+            "pytorch-grad-cam returned an unexpected CAM batch shape: "
+            f"{grayscale_cams.shape}."
+        )
+
+    heatmap = np.asarray(grayscale_cams[0], dtype=np.float32)
+    if heatmap.ndim != 2:
+        raise RuntimeError(
+            "pytorch-grad-cam returned an unexpected CAM spatial shape: "
+            f"{heatmap.shape}."
+        )
+    return cast(NumpyHeatmap, heatmap)
+
+
+@jaxtyped(typechecker=beartype)
+def cam_is_usable(heatmap: NumpyHeatmap, epsilon: float) -> bool:
+    """Return whether a normalised library CAM is finite and non-degenerate.
+
+    This check retains the script's previous Grad-CAM fallback policy without
+    reimplementing either CAM algorithm. A Grad-CAM++ map that is entirely zero,
+    non-finite, or below the configured threshold is retried with Grad-CAM.
+
+    Steps
+    -----
+    1. Reject CAMs containing NaN or infinite values.
+    2. Require at least one value greater than the degeneracy threshold.
+
+    Parameters
+    ----------
+    heatmap : NumpyHeatmap
+        Normalised CAM of shape ``(H, W)``.
+    epsilon : float
+        Positive threshold used to identify effectively empty heatmaps.
+
+    Returns
+    -------
+    bool
+        ``True`` when the CAM is finite and contains meaningful positive evidence.
 
     Raises
     ------
     ValueError
-        If either requested output dimension is less than one.
+        If ``epsilon`` is not positive.
     """
-    if output_height < 1 or output_width < 1:
-        raise ValueError("CAM output dimensions must be positive.")
-
-    resized = F.interpolate(
-        cam.unsqueeze(0).unsqueeze(0),
-        size=(output_height, output_width),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0).squeeze(0)
-    resized = torch.nan_to_num(resized, nan=0.0, posinf=0.0, neginf=0.0)
-
-    minimum = resized.min()
-    maximum = resized.max()
-    value_range = maximum - minimum
-    if float(value_range.item()) <= epsilon:
-        normalised = torch.zeros_like(resized)
-    else:
-        normalised = (resized - minimum) / value_range
-
-    array = normalised.detach().cpu().numpy().astype(np.float32, copy=False)
-    return cast(NumpyHeatmap, array)
+    if epsilon <= 0.0:
+        raise ValueError("epsilon must be greater than 0.")
+    return bool(np.isfinite(heatmap).all() and float(heatmap.max()) > epsilon)
 
 
 @jaxtyped(typechecker=beartype)
 def generate_cam(
-    score: Scalar,
-    activation: FeatureMap,
+    model: nn.Module,
+    target_layer: nn.Module,
+    image: BatchImage,
+    target: MeanRegionSegmentationTarget,
     method: str,
-    output_height: int,
-    output_width: int,
-    retain_graph: bool,
     epsilon: float,
 ) -> Tuple[NumpyHeatmap, str]:
-    """Differentiate one segmentation target and generate its explanation map.
+    """Generate a Grad-CAM/Grad-CAM++ map with ``pytorch-grad-cam``.
 
-    ``gradcam++`` is attempted first when requested. The same first-order gradient
-    is sufficient for both the practical Grad-CAM++ weighting and ordinary
-    Grad-CAM, so a numerical fallback requires no second model forward pass.
+    The established library now owns the algorithm implementation, including
+    activation/gradient hooks, channel weighting, image-space resizing, and
+    normalisation. The repository keeps only its existing policy of falling back
+    from a degenerate Grad-CAM++ result to standard Grad-CAM.
 
     Steps
     -----
-    1. Differentiate the scalar target score with respect to target activations.
-    2. Build Grad-CAM++ when requested and numerically valid.
-    3. Fall back to Grad-CAM otherwise.
-    4. Resize and normalise the chosen map to the input image dimensions.
+    1. Validate the requested method.
+    2. Run the matching ``pytorch-grad-cam`` implementation on the target layer.
+    3. When Grad-CAM++ is degenerate, retry the same target with Grad-CAM.
+    4. Return standard Grad-CAM even when it is degenerate so one difficult case
+       cannot abort the remaining explanation pipeline.
 
     Parameters
     ----------
-    score : Tensor
-        Scalar segmentation target score.
-    activation : FeatureMap
-        Captured target-layer activation with shape ``(1, C, h, w)``.
+    model : nn.Module
+        Loaded semantic-segmentation model.
+    target_layer : nn.Module
+        Model layer whose activations are used by the CAM library.
+    image : BatchImage
+        Input image tensor with shape ``(1, 3, H, W)``.
+    target : MeanRegionSegmentationTarget
+        Class/region scalar target supplied to the CAM implementation.
     method : str
         Requested method: ``gradcam++`` or ``gradcam``.
-    output_height : int
-        Input image height.
-    output_width : int
-        Input image width.
-    retain_graph : bool
-        Whether autograd should preserve the graph for additional cases from the
-        same image forward pass.
     epsilon : float
-        Numerical stability threshold.
+        Threshold used only to detect degenerate library-normalised CAMs.
 
     Returns
     -------
@@ -1243,46 +1076,55 @@ def generate_cam(
     Raises
     ------
     ValueError
-        If the requested method is invalid or captured activation is not 4-D.
-    RuntimeError
-        If autograd cannot differentiate the target score from the activation.
+        If ``method`` is unsupported or ``epsilon`` is not positive.
+    Notes
+    -----
+    A standard Grad-CAM map can legitimately become all-zero after the method's
+    final ReLU when the selected layer contains no positive evidence for the
+    requested class/region target. This is recorded in ``method_used`` instead of
+    being treated as a fatal error, matching the resilience of the previous local
+    implementation and allowing later cases/checkpoints to continue.
     """
     if method not in {"gradcam++", "gradcam"}:
         raise ValueError("method must be either 'gradcam++' or 'gradcam'.")
-    if activation.ndim != 4:
-        raise ValueError(
-            f"Target layer must produce a 4-D feature map, got {activation.shape}."
-        )
+    if epsilon <= 0.0:
+        raise ValueError("epsilon must be greater than 0.")
 
-    gradient = torch.autograd.grad(
-        score,
-        activation,
-        retain_graph=retain_graph,
-        create_graph=False,
-        allow_unused=False,
-    )[0]
-    typed_gradient = cast(FeatureMap, gradient)
-
-    method_used = "gradcam"
-    raw_cam: HeatmapTensor
     if method == "gradcam++":
-        plus_plus_cam = gradcam_plus_plus_map(activation, typed_gradient, epsilon)
-        if plus_plus_cam is not None:
-            raw_cam = plus_plus_cam
-            method_used = "gradcam++"
-        else:
-            raw_cam = gradcam_map(activation, typed_gradient)
-            method_used = "gradcam_fallback"
-    else:
-        raw_cam = gradcam_map(activation, typed_gradient)
+        # Use the maintained library implementation instead of reproducing the
+        # Grad-CAM++ alpha/gradient weighting equations in this repository.
+        with GradCAMPlusPlus(model=model, target_layers=[target_layer]) as cam:
+            heatmap = run_cam_algorithm(cam=cam, image=image, target=target)
+        if cam_is_usable(heatmap, epsilon):
+            return heatmap, "gradcam++"
 
-    heatmap = resize_and_normalise_cam(
-        raw_cam,
-        output_height=output_height,
-        output_width=output_width,
-        epsilon=epsilon,
-    )
-    return heatmap, method_used
+        # Preserve the previous numerical fallback behavior, but delegate the
+        # fallback algorithm itself to the same well-established library.
+        with GradCAM(model=model, target_layers=[target_layer]) as fallback_cam:
+            fallback_heatmap = run_cam_algorithm(
+                cam=fallback_cam,
+                image=image,
+                target=target,
+            )
+        if cam_is_usable(fallback_heatmap, epsilon):
+            return fallback_heatmap, "gradcam_fallback"
+
+        # A zero Grad-CAM is still a valid algorithm result: the final ReLU can
+        # remove all evidence when every weighted activation is non-positive.
+        # Do not let that numerical/semantic edge case terminate the checkpoint;
+        # preserve the zero heatmap and make its status explicit in the manifest.
+        return fallback_heatmap, "gradcam_fallback_degenerate"
+
+    # Standard Grad-CAM is delegated directly to pytorch-grad-cam as well, so no
+    # local gradient pooling or activation weighting remains in this script.
+    with GradCAM(model=model, target_layers=[target_layer]) as cam:
+        heatmap = run_cam_algorithm(cam=cam, image=image, target=target)
+    if cam_is_usable(heatmap, epsilon):
+        return heatmap, "gradcam"
+
+    # Keep processing later cases rather than raising for an all-zero standard
+    # Grad-CAM. The explicit method label keeps the condition auditable in CSV.
+    return heatmap, "gradcam_degenerate"
 
 
 @jaxtyped(typechecker=beartype)
@@ -1899,16 +1741,16 @@ def explain_cases_for_model(
 ) -> List[Dict[str, object]]:
     """Generate Grad-CAM explanations for every selected case of one model.
 
-    Cases are grouped by image path so one forward pass can serve several
-    selected categories/classes from the same image. Autograd retains that graph
-    only until the final case in the group, reducing repeated inference without
-    accumulating graphs across images.
+    A cheap inference pass is reused per image to select the prediction-dependent
+    class/region target. Each selected case is then passed to ``pytorch-grad-cam``,
+    which performs the differentiable forward/backward pass needed by its own CAM
+    hooks and algorithm implementation.
 
     Steps
     -----
-    1. Discover/register the model's target convolutional layer.
-    2. Group selected rows by image/mask pair and run one differentiable forward.
-    3. Choose a class/region target for each case and generate Grad-CAM++/fallback.
+    1. Discover the model target layer used by the CAM library.
+    2. Group selected rows by image/mask pair and run one inference-only forward.
+    3. Choose each case's class/region target and generate the requested library CAM.
     4. Save figures and return one manifest row per explanation.
 
     Parameters
@@ -1924,7 +1766,7 @@ def explain_cases_for_model(
     output_dir : FilePath
         Root directory receiving Grad-CAM outputs.
     device : torch.device
-        Device used for forward/backward computation.
+        Device used for model inference and CAM computation.
     layer_scope : str
         Automatic layer scope: ``decoder``, ``encoder``, or ``auto``.
     target_layer_path : Optional[str]
@@ -1941,7 +1783,7 @@ def explain_cases_for_model(
     overlay_alpha : float
         Heatmap opacity for image overlays.
     epsilon : float
-        Numerical stability threshold for CAM calculations.
+        Threshold used to detect degenerate library CAM outputs.
 
     Returns
     -------
@@ -1951,7 +1793,9 @@ def explain_cases_for_model(
     Raises
     ------
     RuntimeError
-        If the target-layer hook fails to capture a feature tensor.
+        If ``pytorch-grad-cam`` returns an unusable heatmap.
+    TypeError
+        If the segmentation model does not return a tensor.
     ValueError
         If a model output/target region is incompatible with explanation.
     FileNotFoundError
@@ -1967,137 +1811,128 @@ def explain_cases_for_model(
 
     manifest_rows: List[Dict[str, object]] = []
     grouping_columns = ["image_index", "image_path", "mask_path"]
+    grouped = model_cases.groupby(grouping_columns, sort=False, dropna=False)
 
-    with ActivationCapture(target_layer) as capture:
-        grouped = model_cases.groupby(grouping_columns, sort=False, dropna=False)
-        for (image_index_value, image_path_value, mask_path_value), case_group in grouped:
-            image_index = int(float(image_index_value))
-            image_path = resolve_project_path(str(image_path_value), project_root)
-            mask_path = resolve_project_path(str(mask_path_value), project_root)
+    for (image_index_value, image_path_value, mask_path_value), case_group in grouped:
+        image_index = int(float(image_index_value))
+        image_path = resolve_project_path(str(image_path_value), project_root)
+        mask_path = resolve_project_path(str(mask_path_value), project_root)
 
-            image, target = load_single_sample(image_path, mask_path, device)
+        image, target = load_single_sample(image_path, mask_path, device)
 
-            # Enable gradients for the model graph even though the checkpoint is
-            # in eval mode; only inference-time dropout/BN behavior is disabled.
-            with torch.enable_grad():
-                logits_raw = model(image)
-                if not isinstance(logits_raw, Tensor):
-                    raise TypeError("Segmentation model forward output must be a Tensor.")
-                logits = cast(Logits, logits_raw)
+        # Target selection depends on the model prediction, but it does not need an
+        # autograd graph because pytorch-grad-cam performs its own forward pass.
+        with torch.no_grad():
+            logits_raw = model(image)
+        if not isinstance(logits_raw, Tensor):
+            raise TypeError("Segmentation model forward output must be a Tensor.")
+        logits = cast(Logits, logits_raw)
+        prediction = cast(ClassMap, logits.argmax(dim=1)[0])
 
-                if capture.activation is None:
-                    raise RuntimeError(
-                        f"Target layer '{layer_name}' did not capture an activation."
-                    )
-                activation = cast(FeatureMap, capture.activation)
-                prediction = cast(ClassMap, logits.argmax(dim=1)[0])
+        for _, row in case_group.iterrows():
+            selected_class = optional_class_id(row["class_id"])
+            target_class, target_region, target_region_name = (
+                choose_target_class_and_region(
+                    prediction=prediction,
+                    target=target,
+                    category=str(row["category"]),
+                    selected_class=selected_class,
+                    num_output_classes=int(logits.shape[1]),
+                    ignored_class=19,
+                    boundary_radius=boundary_radius,
+                    region_mode=region_mode,
+                )
+            )
 
-                case_rows = [row for _, row in case_group.iterrows()]
-                for case_position, row in enumerate(case_rows):
-                    selected_class = optional_class_id(row["class_id"])
-                    target_class, target_region, target_region_name = (
-                        choose_target_class_and_region(
-                            prediction=prediction,
-                            target=target,
-                            category=str(row["category"]),
-                            selected_class=selected_class,
-                            num_output_classes=int(logits.shape[1]),
-                            ignored_class=19,
-                            boundary_radius=boundary_radius,
-                            region_mode=region_mode,
-                        )
-                    )
+            # The custom target keeps the old mean-over-region semantics while
+            # allowing the external library to own all CAM-specific computation.
+            cam_target = MeanRegionSegmentationTarget(
+                target_class=target_class,
+                region=target_region,
+            )
+            target_score = cam_target(cast(SingleLogits, logits[0]))
+            heatmap, method_used = generate_cam(
+                model=model,
+                target_layer=target_layer,
+                image=image,
+                target=cam_target,
+                method=method,
+                epsilon=epsilon,
+            )
 
-                    target_score = segmentation_target_score(
-                        logits=logits,
-                        target_class=target_class,
-                        region=target_region,
-                    )
-                    retain_graph = case_position < (len(case_rows) - 1)
-                    heatmap, method_used = generate_cam(
-                        score=target_score,
-                        activation=activation,
-                        method=method,
-                        output_height=int(image.shape[2]),
-                        output_width=int(image.shape[3]),
-                        retain_graph=retain_graph,
-                        epsilon=epsilon,
-                    )
+            heatmap_path, overlay_path, panel_path = case_output_paths(
+                output_dir=output_dir,
+                row=row,
+                target_class=target_class,
+            )
+            title = build_case_title(
+                row=row,
+                selected_class=selected_class,
+                target_class=target_class,
+                target_region_name=target_region_name,
+                method_used=method_used,
+            )
 
-                    heatmap_path, overlay_path, panel_path = case_output_paths(
-                        output_dir=output_dir,
-                        row=row,
-                        target_class=target_class,
-                    )
-                    title = build_case_title(
-                        row=row,
-                        selected_class=selected_class,
-                        target_class=target_class,
-                        target_region_name=target_region_name,
-                        method_used=method_used,
-                    )
+            input_numpy = tensor_image_to_numpy(image)
+            target_numpy = tensor_class_map_to_numpy(target)
+            prediction_numpy = tensor_class_map_to_numpy(prediction)
+            region_numpy = tensor_boolean_mask_to_numpy(target_region)
+            save_case_visualisations(
+                image=input_numpy,
+                target_map=target_numpy,
+                prediction_map=prediction_numpy,
+                target_region=region_numpy,
+                heatmap=heatmap,
+                heatmap_path=heatmap_path,
+                overlay_path=overlay_path,
+                panel_path=panel_path,
+                title=title,
+                colormap=colormap,
+                overlay_alpha=overlay_alpha,
+            )
 
-                    input_numpy = tensor_image_to_numpy(image)
-                    target_numpy = tensor_class_map_to_numpy(target)
-                    prediction_numpy = tensor_class_map_to_numpy(prediction)
-                    region_numpy = tensor_boolean_mask_to_numpy(target_region)
-                    save_case_visualisations(
-                        image=input_numpy,
-                        target_map=target_numpy,
-                        prediction_map=prediction_numpy,
-                        target_region=region_numpy,
-                        heatmap=heatmap,
-                        heatmap_path=heatmap_path,
-                        overlay_path=overlay_path,
-                        panel_path=panel_path,
-                        title=title,
-                        colormap=colormap,
-                        overlay_alpha=overlay_alpha,
-                    )
+            selected_class_name = ""
+            if selected_class is not None and selected_class < len(CLASS_NAMES):
+                selected_class_name = CLASS_NAMES[selected_class]
+            target_class_name = (
+                CLASS_NAMES[target_class]
+                if target_class < len(CLASS_NAMES)
+                else f"class_{target_class}"
+            )
 
-                    selected_class_name = ""
-                    if selected_class is not None and selected_class < len(CLASS_NAMES):
-                        selected_class_name = CLASS_NAMES[selected_class]
-                    target_class_name = (
-                        CLASS_NAMES[target_class]
-                        if target_class < len(CLASS_NAMES)
-                        else f"class_{target_class}"
-                    )
+            # The manifest captures both original selection metadata and the actual
+            # CAM target so every generated explanation remains auditable.
+            manifest_rows.append(
+                {
+                    "source_row_index": int(row["source_row_index"]),
+                    "source_model_name": str(row["source_model_name"]),
+                    "model_name": model_name,
+                    "category": str(row["category"]),
+                    "rank": int(float(row["rank"])),
+                    "image_index": image_index,
+                    "image_path": str(image_path),
+                    "mask_path": str(mask_path),
+                    "selection_score_name": str(row.get("score_name", "")),
+                    "selection_score": row.get("score", np.nan),
+                    "selected_class_id": selected_class,
+                    "selected_class_name": selected_class_name,
+                    "target_class_id": target_class,
+                    "target_class_name": target_class_name,
+                    "target_region": target_region_name,
+                    "target_region_pixels": int(target_region.sum().item()),
+                    "target_score": float(target_score.detach().item()),
+                    "target_layer": layer_name,
+                    "requested_method": method,
+                    "method_used": method_used,
+                    "heatmap_path": str(heatmap_path),
+                    "overlay_path": str(overlay_path),
+                    "panel_path": str(panel_path),
+                }
+            )
 
-                    # The manifest captures both original selection metadata and
-                    # the actual Grad-CAM target so every heatmap is auditable.
-                    manifest_rows.append(
-                        {
-                            "source_row_index": int(row["source_row_index"]),
-                            "source_model_name": str(row["source_model_name"]),
-                            "model_name": model_name,
-                            "category": str(row["category"]),
-                            "rank": int(float(row["rank"])),
-                            "image_index": image_index,
-                            "image_path": str(image_path),
-                            "mask_path": str(mask_path),
-                            "selection_score_name": str(row.get("score_name", "")),
-                            "selection_score": row.get("score", np.nan),
-                            "selected_class_id": selected_class,
-                            "selected_class_name": selected_class_name,
-                            "target_class_id": target_class,
-                            "target_class_name": target_class_name,
-                            "target_region": target_region_name,
-                            "target_region_pixels": int(target_region.sum().item()),
-                            "target_score": float(target_score.detach().item()),
-                            "target_layer": layer_name,
-                            "requested_method": method,
-                            "method_used": method_used,
-                            "heatmap_path": str(heatmap_path),
-                            "overlay_path": str(overlay_path),
-                            "panel_path": str(panel_path),
-                        }
-                    )
-
-            # Explicitly release per-image autograd tensors before the next image
-            # because selected manifests can contain hundreds of cases.
-            capture.activation = None
-            del image, target, logits, prediction, activation
+        # Release per-image tensors before the next group because manifests can
+        # contain hundreds of cases and CAM calls allocate backward intermediates.
+        del image, target, logits, prediction
 
     return manifest_rows
 
@@ -2231,7 +2066,7 @@ def parse_arguments() -> argparse.Namespace:
         "--epsilon",
         type=float,
         default=1e-8,
-        help="Numerical stability threshold for Grad-CAM calculations. Defaults to 1e-8.",
+        help="Threshold for detecting degenerate library CAMs. Defaults to 1e-8.",
     )
     return parser.parse_args()
 
@@ -2244,7 +2079,7 @@ def main() -> None:
     1. Load and filter ``selected_cases.csv`` against supplied checkpoint names.
     2. Expand cross-model cases so each supplied model explains the same image.
     3. Load one checkpoint at a time and generate category-aware Grad-CAM++ maps.
-    4. Save all explanation metadata into ``gradcam_manifest.csv``.
+    4. Append each completed checkpoint's metadata to ``gradcam_manifest.csv``.
 
     Returns
     -------
@@ -2316,6 +2151,7 @@ def main() -> None:
     print(f"Region mode      : {args.region_mode}")
     print(f"Output directory : {output_dir}")
 
+    manifest_path = output_dir / "gradcam_manifest.csv"
     all_manifest_rows: List[Dict[str, object]] = []
     for model_name in checkpoint_names:
         model_cases = cases[cases["model_name"] == model_name].copy()
@@ -2346,6 +2182,21 @@ def main() -> None:
         )
         all_manifest_rows.extend(model_rows)
 
+        # Persist each completed checkpoint immediately. If a later checkpoint
+        # runs out of memory, the work that already finished remains recorded and
+        # a subsequent invocation can safely append the remaining checkpoints.
+        model_manifest = pd.DataFrame(model_rows)
+        if not model_manifest.empty:
+            manifest_exists = (
+                manifest_path.is_file() and manifest_path.stat().st_size > 0
+            )
+            model_manifest.to_csv(
+                manifest_path,
+                mode="a",
+                header=not manifest_exists,
+                index=False,
+            )
+
         # Release the checkpoint before loading the next one. The explanation
         # workload uses backward graphs, so explicit cleanup avoids cumulative VRAM.
         del model
@@ -2353,8 +2204,6 @@ def main() -> None:
             torch.cuda.empty_cache()
 
     manifest = pd.DataFrame(all_manifest_rows)
-    manifest_path = output_dir / "gradcam_manifest.csv"
-    manifest.to_csv(manifest_path, index=False)
 
     print("\nGrad-CAM generation complete.")
     print(f"  Explanations generated : {len(manifest)}")
