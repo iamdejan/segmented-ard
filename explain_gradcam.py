@@ -1421,7 +1421,6 @@ def resolve_class_filters(class_specs: Sequence[str]) -> List[int]:
 def expand_and_filter_cases(
     selected_cases: pd.DataFrame,
     checkpoint_names: Sequence[str],
-    model_filters: Sequence[str],
     category_filters: Sequence[str],
     class_filters: Sequence[int],
     rank_max: Optional[int],
@@ -1446,8 +1445,6 @@ def expand_and_filter_cases(
         Raw ``selected_cases.csv`` contents.
     checkpoint_names : Sequence[str]
         Model labels available through ``--checkpoint``.
-    model_filters : Sequence[str]
-        Optional subset of model labels requested by the user.
     category_filters : Sequence[str]
         Optional selection categories requested by the user.
     class_filters : Sequence[int]
@@ -1488,13 +1485,6 @@ def expand_and_filter_cases(
         raise ValueError("max_cases must be at least 1 when provided.")
 
     checkpoint_set = set(checkpoint_names)
-    requested_models = set(model_filters) if model_filters else checkpoint_set
-    unavailable_models = requested_models - checkpoint_set
-    if unavailable_models:
-        raise ValueError(
-            "--model requested checkpoint labels that were not supplied: "
-            + ", ".join(sorted(unavailable_models))
-        )
 
     available_categories = set(map(str, selected_cases["category"].dropna().unique()))
     missing_categories = set(category_filters) - available_categories
@@ -1507,8 +1497,8 @@ def expand_and_filter_cases(
     for source_row_number, (_, row) in enumerate(selected_cases.iterrows()):
         source_model_name = str(row["model_name"])
         if source_model_name == "all_models":
-            targets = [name for name in checkpoint_names if name in requested_models]
-        elif source_model_name in checkpoint_set and source_model_name in requested_models:
+            targets = [name for name in checkpoint_names if name in checkpoint_set]
+        elif source_model_name in checkpoint_set:
             targets = [source_model_name]
         else:
             continue
@@ -1985,12 +1975,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Directory receiving heatmaps, overlays, panels, and output manifest.",
     )
     parser.add_argument(
-        "--model",
-        action="append",
-        default=[],
-        help="Optional model-name filter. Repeat to keep multiple checkpoint labels.",
-    )
-    parser.add_argument(
         "--category",
         action="append",
         default=[],
@@ -2129,7 +2113,6 @@ def main() -> None:
     cases = expand_and_filter_cases(
         selected_cases=selected_cases,
         checkpoint_names=checkpoint_names,
-        model_filters=args.model,
         category_filters=args.category,
         class_filters=class_filters,
         rank_max=args.rank_max,
