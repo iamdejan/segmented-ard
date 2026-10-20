@@ -1,12 +1,12 @@
-"""Generate clean or PGD-robust Grad-CAM++ explanations for selected cases.
+"""Generate global class-logit Grad-CAM++ explanations for selected cases.
 
 The program consumes the ``selected_cases.csv`` manifest written by
-``explain_choose.py`` and generates Grad-CAM++ heatmaps for the chosen semantic
-class over its ground-truth pixels. Inputs can remain clean, be perturbed with
-the PGD attack shared by ``evaluate_robustness.py``, or include both variants
-in one run. The explained class defaults to road and is configurable. Images
-without ground-truth pixels of that class, or with unusable Grad-CAM++ results,
-raise errors rather than silently changing the explanation target or method.
+``explain_choose.py`` and explains the mean logit of one semantic class over
+*all* output pixels, including pixels not labeled as that class. Inputs may be
+clean, PGD-perturbed using ``evaluate_robustness.py``, or both. The explained
+class defaults to road and can be changed with ``--target-class``. Ground-truth
+masks remain necessary for diagnostic figures and PGD, but never restrict the
+Grad-CAM++ score. Unusable Grad-CAM++ maps raise errors without a fallback.
 """
 
 import argparse
@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
-from jaxtyping import Bool, Float, Int64, jaxtyped
+from jaxtyping import Float, Int64, jaxtyped
 from pytorch_grad_cam import GradCAMPlusPlus
 from torch import Tensor, nn
 
@@ -42,12 +42,10 @@ Logits = Float[Tensor, "1 c h w"]
 SingleLogits = Float[Tensor, "c h w"]
 Scalar = Float[Tensor, ""]
 ClassMap = Int64[Tensor, "h w"]
-BooleanMask = Bool[Tensor, "h w"]
 NumpyImage = Float[np.ndarray, "h w 3"]
 NumpyCamBatch = Float[np.ndarray, "b h w"]
 NumpyHeatmap = Float[np.ndarray, "h w"]
 NumpyClassMap = Int64[np.ndarray, "h w"]
-NumpyBooleanMask = Bool[np.ndarray, "h w"]
 
 
 def parse_checkpoint_spec(specification: str) -> Tuple[str, str]:
@@ -356,112 +354,93 @@ def choose_target_layer(
     raise ValueError(f"Unable to find a Grad-CAM feature layer: {joined}")
 
 
-class MeanRegionSegmentationTarget:
-    """Select the mean logit of one semantic class inside a spatial region.
+class MeanClassSegmentationTarget:
+    """Reduce segmentation logits to a global mean for one semantic class.
 
-    ``pytorch-grad-cam`` accepts callable model targets for non-classification
-    tasks. The caller supplies a ground-truth class mask so the scalar being
-    explained is the mean selected-class logit over *actual* class pixels,
-    not the full image or a category-dependent region.
+    ``pytorch-grad-cam`` expects a callable returning a scalar for each image.
+    This target treats every output pixel equally, regardless of ground truth,
+    predictions, or case-selection category.
 
     Steps
     -----
-    1. Validate and store the target class and non-empty boolean region.
-    2. Move the stored region to the model-output device when called.
-    3. Return the mean target-class logit covered by the region.
+    1. Validate and store the requested semantic class id.
+    2. Select that class channel from the model's per-image logits.
+    3. Average the channel across its entire spatial extent for Grad-CAM++.
 
     Parameters
     ----------
     target_class : int
-        Semantic class channel to explain.
-    region : BooleanMask
-        Ground-truth target-class pixels of shape ``(H, W)`` that contribute
-        to the scalar score explained by Grad-CAM++.
+        Zero-based model output channel to explain, typically road (0).
 
     Raises
     ------
     ValueError
-        If ``target_class`` is negative or ``region`` is empty.
+        If ``target_class`` is negative.
     """
 
-    @jaxtyped(typechecker=beartype)
-    def __init__(self, target_class: int, region: BooleanMask) -> None:
-        """Store one validated semantic-segmentation CAM target.
+    def __init__(self, target_class: int) -> None:
+        """Store the requested global segmentation class target.
 
         Steps
         -----
-        1. Reject negative class ids and empty target regions early.
-        2. Detach and clone the region so later tensor reuse cannot mutate it.
+        1. Reject negative class ids before model inference begins.
+        2. Retain the class id for evaluation of every input variant.
 
         Parameters
         ----------
         target_class : int
-            Semantic class channel to explain.
-        region : BooleanMask
-            Non-empty boolean mask of ground-truth target-class pixels with
-            shape ``(H, W)``.
+            Zero-based semantic class channel whose spatial logits are averaged.
 
         Returns
         -------
         None
-            Initialises the target object without returning a value.
+            Initialises the callable target for Grad-CAM++.
 
         Raises
         ------
         ValueError
-            If ``target_class`` is negative or ``region`` is empty.
+            If ``target_class`` is negative.
         """
         if target_class < 0:
-            raise ValueError("Grad-CAM target class must be non-negative.")
-        if not bool(region.any().item()):
-            raise ValueError("Grad-CAM target region must contain at least one pixel.")
+            raise ValueError("Grad-CAM++ target class must be non-negative.")
 
-        # Keep the target independent from the image-selection tensors because the
-        # CAM library performs a separate differentiable model forward pass.
+        # The target is independent of the ground-truth map, allowing the same
+        # score definition for clean and PGD-robust variants of an image.
         self.target_class = target_class
-        self.region = cast(BooleanMask, region.detach().clone())
 
     @jaxtyped(typechecker=beartype)
     def __call__(self, model_output: SingleLogits) -> Scalar:
-        """Reduce one segmentation output to the scalar score explained by CAM.
+        """Calculate the mean target-class logit over all output pixels.
 
         Steps
         -----
-        1. Validate the target channel and spatial size against model output.
-        2. Move the boolean region to the model output device.
-        3. Return the mean target-class logit inside that region.
+        1. Check that the selected class channel exists in the model output.
+        2. Average its raw logits across height and width without masking.
 
         Parameters
         ----------
         model_output : SingleLogits
-            Per-image segmentation logits with shape ``(C, H, W)``.
+            One image's unnormalised segmentation logits, shaped ``(C, H, W)``.
 
         Returns
         -------
         Scalar
-            Mean target-class logit over the stored region.
+            Differentiable scalar mean of the selected class's ``H * W`` logits.
 
         Raises
         ------
         ValueError
-            If the class id is outside the model output range or the region shape
-            differs from the output spatial dimensions.
+            If the requested class id is outside the model's output channels.
         """
         if self.target_class >= model_output.shape[0]:
             raise ValueError(
                 f"Target class {self.target_class} is outside logits range "
                 f"[0, {model_output.shape[0] - 1}]."
             )
-        if tuple(self.region.shape) != tuple(model_output.shape[1:]):
-            raise ValueError(
-                "Grad-CAM target region shape does not match model output: "
-                f"{tuple(self.region.shape)} vs {tuple(model_output.shape[1:])}."
-            )
 
-        # Moving only the mask keeps the target compatible with whichever device
-        # pytorch-grad-cam derives from the checkpoint parameters.
-        region = self.region.to(device=model_output.device)
-        score = model_output[self.target_class][region].mean()
+        # An unmasked spatial mean explains the class response everywhere in
+        # the image, including locations the model assigns to other classes.
+        score = model_output[self.target_class].mean()
         return cast(Scalar, score)
 
 
@@ -469,7 +448,7 @@ class MeanRegionSegmentationTarget:
 def run_cam_algorithm(
     cam: Callable[..., NumpyCamBatch],
     image: BatchImage,
-    target: MeanRegionSegmentationTarget,
+    target: MeanClassSegmentationTarget,
 ) -> NumpyHeatmap:
     """Run one ``pytorch-grad-cam`` algorithm and validate its output shape.
 
@@ -489,8 +468,8 @@ def run_cam_algorithm(
         Configured ``pytorch-grad-cam`` algorithm bound to the model/layer.
     image : BatchImage
         Input image tensor with shape ``(1, 3, H, W)``.
-    target : MeanRegionSegmentationTarget
-        Scalar semantic-segmentation target used by the CAM library.
+    target : MeanClassSegmentationTarget
+        Callable whose scalar score is the mean class logit over all spatial pixels.
 
     Returns
     -------
@@ -559,7 +538,7 @@ def generate_cam(
     model: nn.Module,
     target_layer: nn.Module,
     image: BatchImage,
-    target: MeanRegionSegmentationTarget,
+    target: MeanClassSegmentationTarget,
     epsilon: float,
 ) -> NumpyHeatmap:
     """Generate a valid Grad-CAM++ heatmap using ``pytorch-grad-cam``.
@@ -570,7 +549,7 @@ def generate_cam(
     Steps
     -----
     1. Validate the degeneracy threshold.
-    2. Run Grad-CAM++ on the selected layer and class/region target.
+    2. Run Grad-CAM++ on the selected layer and global mean class-logit target.
     3. Reject non-finite, zero, or effectively empty CAMs instead of falling back.
 
     Parameters
@@ -581,8 +560,8 @@ def generate_cam(
         Feature-producing module observed by the Grad-CAM++ hooks.
     image : BatchImage
         Model input with shape ``(1, 3, H, W)``.
-    target : MeanRegionSegmentationTarget
-        Callable reducing the selected class logits over the selected pixels.
+    target : MeanClassSegmentationTarget
+        Callable averaging the selected class logits over every output pixel.
     epsilon : float
         Positive threshold below which the normalised CAM is degenerate.
 
@@ -664,28 +643,6 @@ def tensor_class_map_to_numpy(class_map: ClassMap) -> NumpyClassMap:
 
 
 @jaxtyped(typechecker=beartype)
-def tensor_boolean_mask_to_numpy(mask: BooleanMask) -> NumpyBooleanMask:
-    """Convert a torch boolean region mask to a NumPy boolean array.
-
-    Steps
-    -----
-    1. Detach the mask, move it to CPU, and preserve boolean semantics.
-
-    Parameters
-    ----------
-    mask : BooleanMask
-        Boolean tensor of shape ``(H, W)``.
-
-    Returns
-    -------
-    NumpyBooleanMask
-        CPU boolean array with shape ``(H, W)``.
-    """
-    array = mask.detach().cpu().numpy().astype(bool, copy=False)
-    return cast(NumpyBooleanMask, array)
-
-
-@jaxtyped(typechecker=beartype)
 def colourise_class_map(class_map: NumpyClassMap) -> NumpyImage:
     """Convert class ids to the repository's BDD100k RGB palette.
 
@@ -720,7 +677,6 @@ def save_case_visualisations(
     image: NumpyImage,
     target_map: NumpyClassMap,
     prediction_map: NumpyClassMap,
-    target_region: NumpyBooleanMask,
     heatmap: NumpyHeatmap,
     heatmap_path: FilePath,
     overlay_path: FilePath,
@@ -732,9 +688,9 @@ def save_case_visualisations(
     """Save raw heatmap, image overlay, and diagnostic four-panel figure.
 
     The panel keeps the input, GT, prediction, and Grad-CAM evidence together so
-    a heatmap cannot be interpreted without seeing whether the segmentation was
-    actually correct. The target-region contour additionally documents exactly
-    which output pixels were reduced into the scalar Grad-CAM score.
+    a heatmap can be interpreted alongside the predicted segmentation. No
+    spatial target contour is needed because the score averages the selected
+    class's logits across every pixel of the model output.
 
     Steps
     -----
@@ -750,12 +706,8 @@ def save_case_visualisations(
         Ground-truth semantic class map of shape ``(H, W)``.
     prediction_map : NumpyClassMap
         Predicted semantic class map of shape ``(H, W)``.
-    target_region : NumpyBooleanMask
-        Ground-truth pixels of the explained class. The contour identifies
-        the pixels used to average the target-class logits, not a spatial
-        restriction on where Grad-CAM++ may highlight evidence.
     heatmap : NumpyHeatmap
-        Normalised Grad-CAM heatmap of shape ``(H, W)``.
+        Normalised Grad-CAM++ heatmap of shape ``(H, W)``.
     heatmap_path : FilePath
         Destination for the standalone heatmap PNG.
     overlay_path : FilePath
@@ -796,10 +748,6 @@ def save_case_visualisations(
         vmin=0.0,
         vmax=1.0,
     )
-    if bool(target_region.any()):
-        overlay_axis.contour(
-            target_region.astype(np.uint8), levels=[0.5], linewidths=1.0
-        )
     overlay_axis.set_title(title)
     overlay_axis.set_axis_off()
     overlay_figure.tight_layout()
@@ -829,8 +777,6 @@ def save_case_visualisations(
         vmin=0.0,
         vmax=1.0,
     )
-    if bool(target_region.any()):
-        axes[3].contour(target_region.astype(np.uint8), levels=[0.5], linewidths=1.0)
     axes[3].set_title("Grad-CAM++ explanation")
 
     for axis in axes:
@@ -1203,8 +1149,8 @@ def build_case_title(
     Steps
     -----
     1. Resolve selected and actual target class ids into readable names.
-    2. Combine the model, input variant, case metadata, ground-truth target,
-       and fixed Grad-CAM++ method into a title.
+    2. Combine the model, input variant, selection metadata, globally averaged
+       class-logit target, and fixed Grad-CAM++ method into a title.
 
     Parameters
     ----------
@@ -1233,7 +1179,7 @@ def build_case_title(
     return (
         f"{row['model_name']} | input={input_mode} | {row['category']} | "
         f"selected={selected_name} | "
-        f"target={target_name} | region=ground_truth_class | Grad-CAM++"
+        f"target={target_name} | score=global_mean_logit | Grad-CAM++"
     )
 
 
@@ -1254,19 +1200,18 @@ def explain_cases_for_model(
 ) -> List[Dict[str, object]]:
     """Generate Grad-CAM++ explanations for every selected case of one model.
 
-    Each image uses exactly its ground-truth target-class pixels for scoring,
-    regardless of the selection category or model prediction. Robust inputs
-    come from the shared PGD attack in ``evaluate_robustness.py`` while using
-    the same unchanged ground-truth mask. Grad-CAM++ runs once per image and
-    input variant; case-specific images retain their selection metadata.
+    Every output pixel contributes to the mean target-class logit, regardless
+    of its ground-truth or predicted label. Ground-truth masks are retained for
+    visual diagnostics and the shared PGD attack in ``evaluate_robustness.py``.
+    Grad-CAM++ runs once per image and input variant; individual selection rows
+    retain their source metadata and separate figure paths.
 
     Steps
     -----
     1. Discover the model target layer used by the CAM library.
     2. Group selected rows by image/mask pair and load the clean dataset sample once.
     3. Build the requested clean/robust input variants, using shared PGD for robust.
-    4. Require ground-truth pixels of the requested class, then obtain the
-       variant prediction to show alongside the explanation.
+    4. Obtain each variant's diagnostic prediction and global class-logit score.
     5. Generate each variant's Grad-CAM++ map once, save case-specific figures,
        and return the manifest rows.
 
@@ -1287,8 +1232,8 @@ def explain_cases_for_model(
     layer_scope : str
         Automatic layer scope: ``decoder``, ``encoder``, or ``auto``.
     target_class : int
-        Fixed semantic class channel. Only pixels with this ground-truth
-        label are included in the CAM target score.
+        Fixed semantic class channel whose logit is averaged across the entire
+        model output map, including pixels of other classes.
     colormap : str
         Matplotlib heatmap colormap.
     overlay_alpha : float
@@ -1313,8 +1258,8 @@ def explain_cases_for_model(
     TypeError
         If the segmentation model does not return a tensor.
     ValueError
-        If ``input_mode`` is invalid, the target class is absent from a
-        ground-truth mask, or the model output is incompatible with the target.
+        If ``input_mode`` is invalid or the requested target class is outside
+        the model's output-channel range.
     FileNotFoundError
         If selected source files are missing.
     """
@@ -1329,6 +1274,9 @@ def explain_cases_for_model(
     )
     print(f"  Target layer: {layer_name}")
 
+    # The global target depends only on the requested class, so create it once
+    # and reuse its identical score definition for every image and input mode.
+    cam_target = MeanClassSegmentationTarget(target_class=target_class)
     manifest_rows: List[Dict[str, object]] = []
     grouping_columns = ["image_index", "image_path", "mask_path"]
     grouped = model_cases.groupby(grouping_columns, sort=False, dropna=False)
@@ -1340,23 +1288,9 @@ def explain_cases_for_model(
 
         clean_image, target = load_single_sample(image_path, mask_path, device)
 
-        # Explain only the model's logit at ground-truth pixels of the chosen
-        # semantic class. This mask is independent of prediction, case category,
-        # and PGD input mode, so reuse it for every explanation of this image.
-        target_region = cast(BooleanMask, target == target_class)
-        if not bool(target_region.any().item()):
-            raise ValueError(
-                f"Image '{image_path}' contains no ground-truth pixels for "
-                f"target class '{CLASS_NAMES[target_class]}' ({target_class}); "
-                "a ground-truth-only Grad-CAM++ target cannot be constructed."
-            )
-        cam_target = MeanRegionSegmentationTarget(
-            target_class=target_class,
-            region=target_region,
-        )
-        target_region_pixels = int(target_region.sum().item())
+        # Ground truth is still needed for the diagnostic panel and PGD attack,
+        # but does not define or restrict the global Grad-CAM++ target score.
         target_numpy = tensor_class_map_to_numpy(target)
-        region_numpy = tensor_boolean_mask_to_numpy(target_region)
 
         # Build robust input only when requested because PGD requires ten backward
         # passes and would otherwise add substantial cost to clean-only explanations.
@@ -1376,8 +1310,8 @@ def explain_cases_for_model(
             )
 
         for concrete_input_mode, image in input_variants:
-            # Inference supplies a diagnostic prediction and a logit score for
-            # the fixed GT mask. CAM computes its own gradient-enabled forward.
+            # Inference supplies the diagnostic prediction and full-image mean
+            # class logit; CAM performs its own gradient-enabled forward pass.
             with torch.no_grad():
                 logits_raw = model(image)
             if not isinstance(logits_raw, Tensor):
@@ -1407,8 +1341,8 @@ def explain_cases_for_model(
             prediction_numpy = tensor_class_map_to_numpy(prediction)
 
             for _, row in case_group.iterrows():
-                # Retain the selection class and category as provenance only;
-                # neither is allowed to change the Grad-CAM++ scoring mask.
+                # Selection class/category are provenance only and do not
+                # influence the spatially global Grad-CAM++ target score.
                 selected_class = optional_class_id(row["class_id"])
 
                 heatmap_path, overlay_path, panel_path = case_output_paths(
@@ -1428,7 +1362,6 @@ def explain_cases_for_model(
                     image=input_numpy,
                     target_map=target_numpy,
                     prediction_map=prediction_numpy,
-                    target_region=region_numpy,
                     heatmap=heatmap,
                     heatmap_path=heatmap_path,
                     overlay_path=overlay_path,
@@ -1466,8 +1399,6 @@ def explain_cases_for_model(
                         "selected_class_name": selected_class_name,
                         "target_class_id": target_class,
                         "target_class_name": target_class_name,
-                        "target_region": "ground_truth_class",
-                        "target_region_pixels": target_region_pixels,
                         "target_score": float(target_score.detach().item()),
                         "target_layer": layer_name,
                         "method_used": "gradcam++",
@@ -1496,8 +1427,8 @@ def parse_arguments() -> argparse.Namespace:
     1. Accept the selected-case manifest and one or more named checkpoints.
     2. Choose a fixed target class (road by default) and optional case limit.
     3. Choose clean, PGD-robust, or combined input processing.
-    4. Configure the feature layer and Grad-CAM++ rendering options. Target
-       pixels are always selected from the ground-truth class mask.
+    4. Configure the feature layer and rendering options. The target class's
+       logits are averaged over the entire spatial output, without a mask.
 
     Returns
     -------
@@ -1542,9 +1473,8 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default="road",
         help=(
-            "Semantic class name or numeric id to explain for every case "
-            "using its ground-truth pixels (default: road). This does not "
-            "filter selected-case rows; images lacking that class raise an error."
+            "Semantic class name or numeric id whose logits are averaged across "
+            "the entire output image for every case (default: road)."
         ),
     )
     parser.add_argument(
@@ -1610,8 +1540,8 @@ def main() -> None:
     1. Read selected cases, expand cross-model rows, and apply the case limit.
     2. Save the resulting rows to ``expanded_cases.csv`` before any XAI work.
     3. Load checkpoints and generate clean/robust inputs for the chosen class.
-    4. Explain only pixels of that class in the original ground-truth mask,
-       requiring a usable Grad-CAM++ map without any method/region fallback.
+    4. Explain the mean selected-class logit across all model output pixels,
+       requiring a usable Grad-CAM++ map without any method fallback.
     5. Append each completed checkpoint's metadata to ``gradcam_manifest.csv``.
 
     Returns
@@ -1658,8 +1588,8 @@ def main() -> None:
         checkpoint_map[model_name] = resolved_checkpoint
 
     target_class = resolve_target_class(args.target_class)
-    # The dataset's ignored label is not a semantic class suitable for a
-    # focused explanation, so reject it rather than scoring ignored pixels.
+    # The dataset's ignored label is not a scored semantic category, so do not
+    # use its output channel as the global class-logit explanation target.
     if target_class == 19:
         raise ValueError("The ignored ground-truth class cannot be the CAM target.")
     selected_cases = pd.read_csv(selected_cases_path)
@@ -1688,7 +1618,7 @@ def main() -> None:
     print(f"Target class     : {CLASS_NAMES[target_class]} ({target_class})")
     print(f"Input mode       : {args.input_mode}")
     print("Method           : Grad-CAM++")
-    print("Target region    : ground_truth_class")
+    print("Target score     : mean class logit across all output pixels")
     print(f"Output directory : {output_dir}")
 
     manifest_path = output_dir / "gradcam_manifest.csv"
