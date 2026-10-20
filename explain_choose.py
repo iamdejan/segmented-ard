@@ -4,11 +4,12 @@ The program evaluates one or more trained checkpoints on the same BDD100k test
 split used by ``evaluate_performance.py``. It stores per-image and per-class
 statistics, then selects representative images for attribution and
 counterfactual explanation experiments without requiring manual browsing.
+Only images with at least one ground-truth road pixel at evaluation resolution
+are eligible for any selected-case category, matching ``explain_gradcam.py``.
 """
 
 import argparse
 import math
-
 import shutil
 from pathlib import Path as FilePath
 from typing import Dict, List, Optional, Sequence, Tuple, cast
@@ -896,6 +897,73 @@ def select_multi_model_cases(
     return selections
 
 
+def filter_cases_with_ground_truth_class(
+    image_scores: pd.DataFrame,
+    class_scores: pd.DataFrame,
+    required_class_id: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Retain only case candidates containing a ground-truth semantic class.
+
+    Presence is determined by ``gt_area_pixels`` in the class-level scores,
+    which were computed from the resized ground-truth masks. Filtering before
+    ranking preserves the requested number of cases whenever enough eligible
+    images exist, including for cross-model and non-road class categories.
+
+    Steps
+    -----
+    1. Identify model/image pairs with at least one ground-truth pixel of the
+       required class.
+    2. Retain only those pairs in the image-level candidate scores.
+    3. Apply the same restriction to class-level candidate scores.
+
+    Parameters
+    ----------
+    image_scores : pd.DataFrame
+        Per-model, per-image metrics with ``model_name`` and ``image_index``.
+    class_scores : pd.DataFrame
+        Per-model, per-class metrics containing ``class_id`` and
+        ``gt_area_pixels`` as well as the image identity columns.
+    required_class_id : int
+        Semantic class id that must be present in the ground-truth mask.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame]
+        Filtered image-level and class-level candidate metric tables. Both
+        tables are empty if no image has the required ground-truth class.
+
+    Raises
+    ------
+    KeyError
+        If the score tables lack a required column.
+    """
+    # A predicted road region does not qualify: Grad-CAM++ targets the *ground
+    # truth* road region and cannot use an image with no such pixels.
+    eligible_images = class_scores.loc[
+        (class_scores["class_id"] == required_class_id)
+        & (class_scores["gt_area_pixels"] > 0),
+        ["model_name", "image_index"],
+    ].drop_duplicates()
+
+    # Filter by both model and image identity to avoid mixing score rows from
+    # different checkpoints when constructing per-model and cross-model ranks.
+    image_candidates = image_scores.merge(
+        eligible_images,
+        on=["model_name", "image_index"],
+        how="inner",
+        sort=False,
+        validate="many_to_one",
+    )
+    class_candidates = class_scores.merge(
+        eligible_images,
+        on=["model_name", "image_index"],
+        how="inner",
+        sort=False,
+        validate="many_to_one",
+    )
+    return image_candidates, class_candidates
+
+
 def build_unique_image_manifest(selections: pd.DataFrame) -> pd.DataFrame:
     """Collapse category-level selections into one row per unique image.
 
@@ -1192,9 +1260,10 @@ def main() -> None:
     -----
     1. Recreate the held-out BDD100k test split and deterministic inference loader.
     2. Evaluate each supplied checkpoint once and save raw per-image/class scores.
-    3. Select image-level, class-level, and optional cross-model representative cases.
-    4. Save category-level and unique-image manifests for downstream XAI scripts.
-    5. Optionally copy selected source files into a convenient review directory.
+    3. Restrict every selection category to images with ground-truth road pixels.
+    4. Rank image-level, class-level, and cross-model cases from eligible images.
+    5. Save category-level and unique-image manifests for downstream XAI scripts.
+    6. Optionally copy selected source files into a convenient review directory.
 
     Returns
     -------
@@ -1203,7 +1272,8 @@ def main() -> None:
     Raises
     ------
     ValueError
-        If CLI selection parameters or class/checkpoint specifications are invalid.
+        If CLI selection parameters or class/checkpoint specifications are invalid,
+        or if no evaluated test image contains ground-truth road pixels.
     """
     args = parse_arguments()
 
@@ -1297,18 +1367,37 @@ def main() -> None:
     image_scores.to_csv(image_scores_path, index=False)
     class_scores.to_csv(class_scores_path, index=False)
 
-    # Selection happens entirely from saved scalar statistics, so changing top-k
-    # logic later never requires another expensive model inference pass.
-    selections = select_image_level_cases(image_scores, args.top_k)
+    # Keep the complete score CSVs for auditing, but never rank a case whose
+    # resized ground-truth mask lacks road. Filtering *before* ranking means
+    # excluded images cannot consume one of the requested top-k positions.
+    eligible_image_scores, eligible_class_scores = filter_cases_with_ground_truth_class(
+        image_scores,
+        class_scores,
+        road_class,
+    )
+    if eligible_image_scores.empty:
+        raise ValueError(
+            "No evaluated test images contain ground-truth road pixels; "
+            "cannot select images for road-targeted Grad-CAM++."
+        )
+    print(
+        "Images eligible for road explanations: "
+        f"{eligible_image_scores['image_index'].nunique()} / "
+        f"{image_scores['image_index'].nunique()}"
+    )
+
+    # Select only from the eligible subset in every category, including
+    # class-specific and cross-model cases whose criteria are not road-specific.
+    selections = select_image_level_cases(eligible_image_scores, args.top_k)
     selections.extend(
         select_class_level_cases(
-            class_scores,
+            eligible_class_scores,
             target_classes,
             args.top_k,
             args.small_region_quantile,
         )
     )
-    selections.extend(select_multi_model_cases(image_scores, args.top_k))
+    selections.extend(select_multi_model_cases(eligible_image_scores, args.top_k))
 
     selection_frame = pd.DataFrame(selections)
     selected_cases_path = output_dir / "selected_cases.csv"
@@ -1317,11 +1406,6 @@ def main() -> None:
     unique_images = build_unique_image_manifest(selection_frame)
     unique_images_path = output_dir / "selected_unique_images.csv"
     unique_images.to_csv(unique_images_path, index=False)
-
-    if args.copy_selected:
-        copy_destination = str(output_dir / "selected_files")
-        copy_selected_files(unique_images, copy_destination)
-        print(f"Copied unique selected files to: {copy_destination}")
 
     print("\nSelection complete.")
     print(f"  Per-image scores       : {image_scores_path}")
