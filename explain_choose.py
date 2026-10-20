@@ -1149,8 +1149,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=5,
-        help="Number of cases retained per category. Defaults to 5.",
+        default=1,
+        help="Number of cases retained per category. Defaults to 1.",
     )
     parser.add_argument(
         "--target-class",
@@ -1181,11 +1181,6 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default="./model/xai_selection",
         help="Directory receiving score and selection CSV files.",
-    )
-    parser.add_argument(
-        "--copy-selected",
-        action="store_true",
-        help="Also copy unique selected images/masks into the output directory.",
     )
     return parser.parse_args()
 
