@@ -10,7 +10,6 @@ are eligible for any selected-case category, matching ``explain_gradcam.py``.
 
 import argparse
 import math
-import shutil
 from pathlib import Path as FilePath
 from typing import Dict, List, Optional, Sequence, Tuple, cast
 
@@ -1005,69 +1004,6 @@ def build_unique_image_manifest(selections: pd.DataFrame) -> pd.DataFrame:
         models=("model_name", lambda values: ";".join(sorted(set(map(str, values))))),
     )
     return cast(pd.DataFrame, grouped)
-
-
-def copy_selected_files(
-    unique_images: pd.DataFrame,
-    destination: str,
-) -> None:
-    """Copy unique selected images and masks into an optional review directory.
-
-    The CSV paths remain the canonical source of truth. Copies are organised in
-    separate ``images`` and ``masks`` folders only to make manual XAI review more
-    convenient without altering the original dataset.
-
-    Steps
-    -----
-    1. Create destination subdirectories for images and masks.
-    2. Copy every unique selected image and mask while preserving filenames.
-    3. Reject filename collisions originating from different source paths.
-
-    Parameters
-    ----------
-    unique_images : pd.DataFrame
-        Unique-image selection manifest.
-    destination : str
-        Root directory receiving ``images`` and ``masks`` subdirectories.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    FileNotFoundError
-        If a selected source image or mask no longer exists.
-    FileExistsError
-        If two different source files would overwrite the same destination name.
-    """
-    image_dir = FilePath(destination) / "images"
-    mask_dir = FilePath(destination) / "masks"
-    image_dir.mkdir(parents=True, exist_ok=True)
-    mask_dir.mkdir(parents=True, exist_ok=True)
-
-    copied_sources: Dict[str, str] = {}
-    for _, row in unique_images.iterrows():
-        for source_value, target_dir in (
-            (str(row["image_path"]), image_dir),
-            (str(row["mask_path"]), mask_dir),
-        ):
-            source = FilePath(source_value)
-            if not source.is_file():
-                raise FileNotFoundError(f"Selected source file does not exist: {source}")
-
-            target = target_dir / source.name
-            target_key = str(target.resolve())
-            previous_source = copied_sources.get(target_key)
-            if previous_source is not None and previous_source != str(source.resolve()):
-                raise FileExistsError(
-                    f"Destination collision for '{target.name}' from '{previous_source}' "
-                    f"and '{source}'."
-                )
-
-            if previous_source is None:
-                shutil.copy2(source, target)
-                copied_sources[target_key] = str(source.resolve())
 
 
 def evaluate_checkpoint(
