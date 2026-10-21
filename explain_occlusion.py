@@ -50,6 +50,11 @@ NumpyClassMap = Int64[np.ndarray, "height width"]
 NumpyRGB = Float[np.ndarray, "height width 3"]
 NumpyPalette = UInt8[np.ndarray, "classes 3"]
 NumpyBoolMap = Bool[np.ndarray, "height width"]
+# Define one-dimensional shapes outside the TypedDict: Ruff otherwise interprets
+# "batch" in field annotations as an unresolved forward-referenced Python name.
+# These aliases preserve the same jaxtyping dtype and shape constraints.
+NumpyBatchScores = Float[np.ndarray, "batch"]
+NumpyBatchPredictions = Int64[np.ndarray, "batch height width"]
 NumericArray = Num[np.ndarray, "*dimensions"]
 
 
@@ -73,10 +78,10 @@ class InferenceMetrics(TypedDict):
         Dense class predictions, retained for diagnostic figures.
     """
 
-    global_logit: Float[np.ndarray, "batch"]
-    gt_logit: Float[np.ndarray, "batch"]
-    road_iou: Float[np.ndarray, "batch"]
-    prediction: Int64[np.ndarray, "batch height width"]
+    global_logit: NumpyBatchScores
+    gt_logit: NumpyBatchScores
+    road_iou: NumpyBatchScores
+    prediction: NumpyBatchPredictions
 
 
 IGNORE_ID = 19
