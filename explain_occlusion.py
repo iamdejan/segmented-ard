@@ -20,7 +20,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict, Union, cast
 
 import matplotlib
 import numpy as np
@@ -1233,9 +1233,22 @@ def load_cam_index(manifest_path: Path, root: Path) -> Dict[Tuple[str, str, int,
         record = row.to_dict()
         if key in index:
             previous = index[key]
-            if (isinstance(record.get("input_sha256"), str)
-                    and isinstance(previous.get("input_sha256"), str)
-                    and record["input_sha256"] != previous["input_sha256"]):
+            _, mode_hash_field = manifest_input_fields(str(row.input_mode))
+            current_hash = record.get(mode_hash_field)
+            previous_hash = previous.get(mode_hash_field)
+            # Backward compatibility: older manifests stored only one exact-input
+            # hash column, already scoped by the row's concrete input mode.
+            if not isinstance(current_hash, str) or not current_hash.strip():
+                current_hash = record.get("input_sha256")
+            if not isinstance(previous_hash, str) or not previous_hash.strip():
+                previous_hash = previous.get("input_sha256")
+            if (
+                isinstance(current_hash, str)
+                and isinstance(previous_hash, str)
+                and current_hash.strip()
+                and previous_hash.strip()
+                and current_hash != previous_hash
+            ):
                 raise ValueError(f"Inconsistent Grad-CAM input hashes for {key}.")
         else:
             index[key] = record
@@ -1284,60 +1297,143 @@ def load_cam_data(record: Dict[str, Any], root: Path, shape: Tuple[int, int]) ->
     return cam.astype(np.float32, copy=False)
 
 
-@jaxtyped(typechecker=beartype)
-def load_reference_input(
-    record: Optional[Dict[str, Any]], clean: SingleImage, mode: str, root: Path,
-) -> SingleImage:
-    """Recover the exact tensor that Grad-CAM++ originally explained.
+def manifest_input_fields(mode: str) -> Tuple[str, str]:
+    """Return the manifest columns for one concrete saved input variant.
 
     Steps
     -----
-    1. Load the saved clean/PGD tensor when a manifest path exists.
-    2. Check its shape and SHA-256; verify clean tensors match current preprocessing.
-    3. Reject robust evaluations that cannot recover their saved PGD input.
+    1. Validate that the requested mode is either ``clean`` or ``robust``.
+    2. Map that mode to its explicit path and SHA-256 manifest columns.
 
     Parameters
     ----------
-    record : Optional[Dict[str, Any]]
-        One optional or required CAM manifest record with saved paths.
-    clean : SingleImage
-        Preprocessed original image for the same dataset sample.
     mode : str
-        Input variant or replacement mode; see the owning function.
-    root : Path
-        Resolved project root used to interpret relative paths.
+        Concrete input variant to recover.
 
     Returns
     -------
-    SingleImage
-        Reference RGB tensor on the current evaluation device.
+    Tuple[str, str]
+        Path-column name followed by SHA-256-column name.
 
     Raises
     ------
     ValueError
-        If robust inputs are missing or saved inputs fail consistency checks.
-    OSError
-        If a referenced saved input cannot be read.
+        If ``mode`` is not ``clean`` or ``robust``.
     """
+    if mode == "clean":
+        return "clean_input_tensor_path", "clean_input_sha256"
+    if mode == "robust":
+        return "robust_input_tensor_path", "robust_input_sha256"
+    raise ValueError("mode must be either 'clean' or 'robust'.")
+
+
+@jaxtyped(typechecker=beartype)
+def load_reference_input(
+    record: Optional[Dict[str, Any]], clean: SingleImage, mode: str, root: Path,
+) -> SingleImage:
+    """Recover the exact saved tensor that Grad-CAM++ originally explained.
+
+    Robust inputs are never regenerated in this pipeline. The function prefers
+    the explicit mode-specific artifact columns written by the updated
+    ``explain_gradcam.py`` and only falls back to the legacy ``input_tensor_path``
+    when that record itself is for the requested mode.
+
+    Steps
+    -----
+    1. Resolve the explicit clean/robust artifact path for the requested mode.
+    2. Fall back to the legacy exact-input field only for a matching manifest row.
+    3. Validate shape and SHA-256 before moving the tensor to the model device.
+    4. For clean mode, additionally require bitwise equality with current preprocessing.
+    5. Reject robust mode if no persisted PGD artifact is available.
+
+    Parameters
+    ----------
+    record : Optional[Dict[str, Any]]
+        CAM manifest record corresponding to the same model, source image, and mode.
+    clean : SingleImage
+        Preprocessed unperturbed image for the same dataset sample.
+    mode : str
+        Concrete input variant, either ``clean`` or ``robust``.
+    root : Path
+        Resolved project root used to interpret relative manifest paths.
+
+    Returns
+    -------
+    SingleImage
+        Exact clean or PGD-perturbed reference tensor on the current model device.
+
+    Raises
+    ------
+    ValueError
+        If the manifest mode is inconsistent, a robust artifact is unavailable,
+        or saved shape/hash/preprocessing checks fail.
+    OSError
+        If a referenced saved NPY artifact cannot be read.
+    """
+    path_field, hash_field = manifest_input_fields(mode)
+
     if record is None:
         if mode == "robust":
-            raise ValueError("Robust attribution requires exact saved Grad-CAM input; rerun Grad-CAM first.")
+            raise ValueError(
+                "Robust occlusion requires the exact PGD tensor saved by "
+                "Grad-CAM++; rerun explain gradcam with --input-mode robust."
+            )
         return clean
-    filename = record.get("input_tensor_path")
-    if isinstance(filename, str) and filename.strip():
-        array = np.load(resolve_path(filename, root), allow_pickle=False)
-        if tuple(array.shape) != tuple(clean.shape):
-            raise ValueError("Saved CAM input and current dataset sample have different shapes.")
-        result = torch.from_numpy(np.array(array, copy=True)).to(device=clean.device, dtype=clean.dtype)
+
+    record_mode = str(record.get("input_mode", "")).strip()
+    if record_mode and record_mode != mode:
+        raise ValueError(
+            f"Grad-CAM manifest input_mode={record_mode!r} does not match "
+            f"requested occlusion mode={mode!r}."
+        )
+
+    # New manifests record both variant-specific columns. Legacy manifests are
+    # still accepted when their row's concrete input_mode matches this request.
+    filename = record.get(path_field)
+    expected_hash = record.get(hash_field)
+    if not isinstance(filename, str) or not filename.strip():
+        filename = record.get("input_tensor_path")
         expected_hash = record.get("input_sha256")
-        if isinstance(expected_hash, str) and expected_hash.strip() and tensor_hash(result) != expected_hash:
-            raise ValueError("Saved Grad-CAM input SHA256 does not match manifest.")
-        if mode == "clean" and not torch.equal(result, clean):
-            raise ValueError("Saved Grad-CAM clean input differs from current evaluation preprocessing.")
-        return result
-    if mode == "robust":
-        raise ValueError("Robust Grad-CAM manifest has no saved input tensor. Regenerate Grad-CAM++.")
-    return clean
+
+    if not isinstance(filename, str) or not filename.strip():
+        if mode == "robust":
+            raise ValueError(
+                "Robust Grad-CAM manifest has no persisted PGD input tensor. "
+                "Regenerate Grad-CAM++ with the updated explain_gradcam.py."
+            )
+        return clean
+
+    artifact_path = resolve_path(filename, root)
+    array = np.load(artifact_path, allow_pickle=False)
+    if tuple(array.shape) != tuple(clean.shape):
+        raise ValueError(
+            f"Saved {mode} Grad-CAM input shape {array.shape} differs from "
+            f"current sample shape {tuple(clean.shape)}."
+        )
+    if not np.isfinite(array).all():
+        raise ValueError(f"Saved {mode} Grad-CAM input contains nonfinite values: {artifact_path}")
+
+    result = torch.from_numpy(np.array(array, copy=True)).to(
+        device=clean.device,
+        dtype=clean.dtype,
+    )
+    if (
+        isinstance(expected_hash, str)
+        and expected_hash.strip()
+        and tensor_hash(result) != expected_hash
+    ):
+        raise ValueError(
+            f"Saved {mode} Grad-CAM input SHA-256 does not match the manifest."
+        )
+
+    # Clean mode has an independently reconstructible reference, so require exact
+    # equality. Robust mode cannot be reconstructed without rerunning PGD and must
+    # therefore trust only the persisted, hash-verified artifact above.
+    if mode == "clean" and not torch.equal(result, clean):
+        raise ValueError(
+            "Saved Grad-CAM clean input differs from current evaluation preprocessing."
+        )
+    return cast(SingleImage, result)
 
 
 def save_csv_upsert(path: Path, rows: List[Dict[str, Any]], keys: Sequence[str]) -> None:
@@ -1741,8 +1837,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 original = infer_metrics(model, image, gt, target_id)
                 if cam_record is not None and cam_record.get("target_score") is not None:
                     expected = cam_record["target_score"]
-                    if pd.notna(expected) and not np.isclose(float(original["global_logit"][0]), float(expected), atol=1e-4, rtol=1e-4):
-                        raise ValueError(f"Grad-CAM reference score mismatch: expected {expected}, got {original['global_logit'][0]}; input or checkpoint has changed.")
+                    actual = float(original["global_logit"][0])
+                    if pd.notna(expected) and not np.isclose(
+                        actual,
+                        float(expected),
+                        atol=1e-4,
+                        rtol=1e-4,
+                    ):
+                        raise ValueError(
+                            "Grad-CAM reference score mismatch after loading the exact "
+                            f"saved {mode} input: expected {float(expected):.10f}, "
+                            f"got {actual:.10f}. Regenerate Grad-CAM++ with the updated "
+                            "artifact pipeline and verify that the same checkpoint is used."
+                        )
 
                 source_id = hashlib.sha256(f"{image_path}|{mask_path}".encode()).hexdigest()[:12]
                 params = {
