@@ -1,11 +1,12 @@
-"""Generate clean or PGD-robust Grad-CAM++ explanations for selected cases.
+"""Generate global class-logit Grad-CAM++ explanations for selected cases.
 
 The program consumes the ``selected_cases.csv`` manifest written by
-``explain_choose.py`` and generates class/region-targeted Grad-CAM++ heatmaps for
-the corresponding trained segmentation checkpoints. Inputs can remain clean,
-be perturbed with the PGD attack shared by ``evaluate_robustness.py``, or include
-both variants in one run. Grad-CAM is used as a numerical fallback when a
-Grad-CAM++ map is undefined or degenerate.
+``explain_choose.py`` and explains the mean logit of one semantic class over
+*all* output pixels, including pixels not labeled as that class. Inputs may be
+clean, PGD-perturbed using ``evaluate_robustness.py``, or both. The explained
+class defaults to road and can be changed with ``--target-class``. Ground-truth
+masks remain necessary for diagnostic figures and PGD, but never restrict the
+Grad-CAM++ score. Unusable Grad-CAM++ maps raise errors without a fallback.
 """
 
 import argparse
@@ -21,8 +22,8 @@ import torch
 import torch.nn.functional as F
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
-from jaxtyping import Bool, Float, Int64, jaxtyped
-from pytorch_grad_cam import GradCAM, GradCAMPlusPlus
+from jaxtyping import Float, Int64, jaxtyped
+from pytorch_grad_cam import GradCAMPlusPlus
 from torch import Tensor, nn
 
 from evaluate_performance import (
@@ -41,12 +42,10 @@ Logits = Float[Tensor, "1 c h w"]
 SingleLogits = Float[Tensor, "c h w"]
 Scalar = Float[Tensor, ""]
 ClassMap = Int64[Tensor, "h w"]
-BooleanMask = Bool[Tensor, "h w"]
 NumpyImage = Float[np.ndarray, "h w 3"]
 NumpyCamBatch = Float[np.ndarray, "b h w"]
 NumpyHeatmap = Float[np.ndarray, "h w"]
 NumpyClassMap = Int64[np.ndarray, "h w"]
-NumpyBooleanMask = Bool[np.ndarray, "h w"]
 
 
 def parse_checkpoint_spec(specification: str) -> Tuple[str, str]:
@@ -212,7 +211,8 @@ def resolve_module_path(model: nn.Module, module_path: str) -> nn.Module:
         if component.isdigit():
             if not isinstance(current, (nn.Sequential, nn.ModuleList)):
                 raise TypeError(
-                    f"Cannot index component '{component}' inside {type(current).__name__}."
+                    f"Cannot index component '{component}' inside "
+                    f"{type(current).__name__}."
                 )
             current = current[int(component)]
         else:
@@ -354,592 +354,93 @@ def choose_target_layer(
     raise ValueError(f"Unable to find a Grad-CAM feature layer: {joined}")
 
 
-@jaxtyped(typechecker=beartype)
-def semantic_boundary_mask(
-    class_map: ClassMap,
-    ignored_class: int,
-    radius: int,
-) -> BooleanMask:
-    """Build a dilated semantic-boundary mask from a class-index image.
+class MeanClassSegmentationTarget:
+    """Reduce segmentation logits to a global mean for one semantic class.
 
-    This mirrors the case-selection definition so a boundary-failure heatmap is
-    targeted at the same type of spatial region that caused the image to be
-    selected in the first place.
+    ``pytorch-grad-cam`` expects a callable returning a scalar for each image.
+    This target treats every output pixel equally, regardless of ground truth,
+    predictions, or case-selection category.
 
     Steps
     -----
-    1. Mark valid horizontal and vertical class transitions.
-    2. Mark both sides of every transition for a symmetric contour.
-    3. Dilate the contour by ``radius`` pixels with max pooling.
-
-    Parameters
-    ----------
-    class_map : ClassMap
-        Ground-truth class-index map of shape ``(H, W)``.
-    ignored_class : int
-        Semantic class excluded from explanation scoring.
-    radius : int
-        Boundary dilation radius in resized pixels.
-
-    Returns
-    -------
-    BooleanMask
-        Dilated semantic-boundary mask of shape ``(H, W)``.
-
-    Raises
-    ------
-    ValueError
-        If ``radius`` is negative.
-    """
-    if radius < 0:
-        raise ValueError("radius must be greater than or equal to 0.")
-
-    boundary = torch.zeros_like(class_map, dtype=torch.bool)
-    valid = class_map != ignored_class
-
-    horizontal = (
-        (class_map[:, 1:] != class_map[:, :-1])
-        & valid[:, 1:]
-        & valid[:, :-1]
-    )
-    boundary[:, 1:] |= horizontal
-    boundary[:, :-1] |= horizontal
-
-    vertical = (
-        (class_map[1:, :] != class_map[:-1, :])
-        & valid[1:, :]
-        & valid[:-1, :]
-    )
-    boundary[1:, :] |= vertical
-    boundary[:-1, :] |= vertical
-
-    if radius == 0:
-        return cast(BooleanMask, boundary)
-
-    kernel_size = (2 * radius) + 1
-    expanded = F.max_pool2d(
-        boundary.float().unsqueeze(0).unsqueeze(0),
-        kernel_size=kernel_size,
-        stride=1,
-        padding=radius,
-    )
-    return cast(BooleanMask, expanded.squeeze(0).squeeze(0).bool())
-
-
-@jaxtyped(typechecker=beartype)
-def class_pair_boundary_mask(
-    class_map: ClassMap,
-    first_class: int,
-    second_class: int,
-    ignored_class: int,
-    radius: int,
-) -> BooleanMask:
-    """Build a dilated boundary mask for one semantic class pair.
-
-    Road/sidewalk cases are selected using this narrower region so unrelated
-    object boundaries do not determine which class receives the Grad-CAM target.
-
-    Steps
-    -----
-    1. Detect adjacent pixels containing the requested class pair in either order.
-    2. Mark both sides of each pair transition.
-    3. Dilate the contour and retain pixels belonging to either requested class.
-
-    Parameters
-    ----------
-    class_map : ClassMap
-        Ground-truth class-index map of shape ``(H, W)``.
-    first_class : int
-        First semantic class id.
-    second_class : int
-        Second semantic class id.
-    ignored_class : int
-        Semantic class excluded from scoring.
-    radius : int
-        Boundary dilation radius in resized pixels.
-
-    Returns
-    -------
-    BooleanMask
-        Pair-specific boundary mask of shape ``(H, W)``.
-
-    Raises
-    ------
-    ValueError
-        If the requested class ids are equal or ``radius`` is negative.
-    """
-    if first_class == second_class:
-        raise ValueError("first_class and second_class must be different.")
-    if radius < 0:
-        raise ValueError("radius must be greater than or equal to 0.")
-
-    boundary = torch.zeros_like(class_map, dtype=torch.bool)
-    valid = class_map != ignored_class
-
-    left = class_map[:, :-1]
-    right = class_map[:, 1:]
-    horizontal = (
-        (((left == first_class) & (right == second_class))
-         | ((left == second_class) & (right == first_class)))
-        & valid[:, :-1]
-        & valid[:, 1:]
-    )
-    boundary[:, :-1] |= horizontal
-    boundary[:, 1:] |= horizontal
-
-    top = class_map[:-1, :]
-    bottom = class_map[1:, :]
-    vertical = (
-        (((top == first_class) & (bottom == second_class))
-         | ((top == second_class) & (bottom == first_class)))
-        & valid[:-1, :]
-        & valid[1:, :]
-    )
-    boundary[:-1, :] |= vertical
-    boundary[1:, :] |= vertical
-
-    if radius > 0:
-        kernel_size = (2 * radius) + 1
-        boundary = F.max_pool2d(
-            boundary.float().unsqueeze(0).unsqueeze(0),
-            kernel_size=kernel_size,
-            stride=1,
-            padding=radius,
-        ).squeeze(0).squeeze(0).bool()
-
-    pair_pixels = (class_map == first_class) | (class_map == second_class)
-    return cast(BooleanMask, boundary & pair_pixels)
-
-
-@jaxtyped(typechecker=beartype)
-def dominant_class_in_region(
-    class_map: ClassMap,
-    region: BooleanMask,
-    num_output_classes: int,
-    ignored_class: int,
-) -> Optional[int]:
-    """Return the most frequent non-ignored class inside a boolean region.
-
-    Steps
-    -----
-    1. Extract class ids covered by ``region``.
-    2. Remove ignored and out-of-range labels.
-    3. Return the class with the largest pixel count, or ``None`` when empty.
-
-    Parameters
-    ----------
-    class_map : ClassMap
-        Semantic class-index map of shape ``(H, W)``.
-    region : BooleanMask
-        Spatial region from which class frequencies are measured.
-    num_output_classes : int
-        Number of class channels produced by the model.
-    ignored_class : int
-        Class id excluded from automatic target selection when it lies inside the
-        output range; use ``-1`` to exclude no predicted class.
-
-    Returns
-    -------
-    Optional[int]
-        Dominant valid class id, or ``None`` if no eligible pixels exist.
-    """
-    values = class_map[region]
-    if values.numel() == 0:
-        return None
-
-    valid = (values >= 0) & (values < num_output_classes) & (values != ignored_class)
-    values = values[valid]
-    if values.numel() == 0:
-        return None
-
-    counts = torch.bincount(values, minlength=num_output_classes)
-    if 0 <= ignored_class < num_output_classes:
-        counts[ignored_class] = 0
-    if int(counts.sum().item()) == 0:
-        return None
-    return int(counts.argmax().item())
-
-
-@jaxtyped(typechecker=beartype)
-def fallback_class_region(
-    prediction: ClassMap,
-    target: ClassMap,
-    target_class: int,
-    ignored_class: int,
-) -> Tuple[BooleanMask, str]:
-    """Find a non-empty fallback region for a requested target class.
-
-    The chosen category-specific region can occasionally be empty, for example
-    when a nominal false-positive row changes after loading a different model.
-    Falling back to GT, prediction, then all valid pixels keeps the script usable
-    while recording the region actually explained in the output manifest.
-
-    Steps
-    -----
-    1. Prefer ground-truth pixels of ``target_class``.
-    2. Otherwise use predicted pixels of the target class.
-    3. Otherwise use every non-ignored ground-truth pixel.
-
-    Parameters
-    ----------
-    prediction : ClassMap
-        Predicted class-index map of shape ``(H, W)``.
-    target : ClassMap
-        Ground-truth class-index map of shape ``(H, W)``.
-    target_class : int
-        Class whose logit will be explained.
-    ignored_class : int
-        Ground-truth class excluded from explanation regions.
-
-    Returns
-    -------
-    Tuple[BooleanMask, str]
-        Non-empty region and a description of the fallback source.
-
-    Raises
-    ------
-    ValueError
-        If the image contains no valid non-ignored target pixels at all.
-    """
-    gt_region = target == target_class
-    if bool(gt_region.any().item()):
-        return cast(BooleanMask, gt_region), "fallback_ground_truth_class"
-
-    predicted_region = (prediction == target_class) & (target != ignored_class)
-    if bool(predicted_region.any().item()):
-        return cast(BooleanMask, predicted_region), "fallback_predicted_class"
-
-    valid = target != ignored_class
-    if bool(valid.any().item()):
-        return cast(BooleanMask, valid), "fallback_all_valid_pixels"
-    raise ValueError("The selected image contains no valid non-ignored pixels.")
-
-
-@jaxtyped(typechecker=beartype)
-def choose_target_class_and_region(
-    prediction: ClassMap,
-    target: ClassMap,
-    category: str,
-    selected_class: Optional[int],
-    num_output_classes: int,
-    ignored_class: int,
-    boundary_radius: int,
-    region_mode: str,
-) -> Tuple[int, BooleanMask, str]:
-    """Choose the semantic class and pixel region explained by one selected case.
-
-    Automatic targeting makes each selection category answer a concrete question.
-    False positives explain the selected class where it was predicted wrongly;
-    false negatives explain the dominant competing prediction in the missed GT
-    region; small-region cases explain the selected GT class; and classless
-    failure cases explain the dominant wrong prediction inside the relevant error
-    region. Successful classless cases explain the dominant true-positive class.
-
-    Steps
-    -----
-    1. Honour an explicit region mode when the user requests GT/prediction/error.
-    2. Otherwise apply category-specific targeting rules from ``selected_cases``.
-    3. Fall back to a valid GT/prediction region if the preferred region is empty.
-
-    Parameters
-    ----------
-    prediction : ClassMap
-        Predicted class-index map of shape ``(H, W)``.
-    target : ClassMap
-        Ground-truth class-index map of shape ``(H, W)``.
-    category : str
-        Case-selection category from ``selected_cases.csv``.
-    selected_class : Optional[int]
-        Class id attached to the selection row, or ``None`` for image-level cases.
-    num_output_classes : int
-        Number of model output channels.
-    ignored_class : int
-        Ground-truth class excluded from evaluation/explanation targeting.
-    boundary_radius : int
-        Dilation radius for boundary-failure targeting.
-    region_mode : str
-        One of ``auto``, ``ground_truth``, ``prediction``, or ``error``.
-
-    Returns
-    -------
-    Tuple[int, BooleanMask, str]
-        Target class id, non-empty region mask, and region description.
-
-    Raises
-    ------
-    ValueError
-        If ``region_mode`` is invalid, a selected class is outside the model
-        output range, or no valid target class/region can be constructed.
-    """
-    if region_mode not in {"auto", "ground_truth", "prediction", "error"}:
-        raise ValueError(
-            "region_mode must be one of: auto, ground_truth, prediction, error."
-        )
-    if selected_class is not None and not 0 <= selected_class < num_output_classes:
-        raise ValueError(
-            f"Selected class {selected_class} is outside model output range "
-            f"[0, {num_output_classes - 1}]."
-        )
-
-    valid = target != ignored_class
-    errors = (prediction != target) & valid
-
-    # Explicit modes are useful for controlled experiments where all selected
-    # cases should use the same semantic definition instead of category logic.
-    if region_mode == "ground_truth":
-        target_class = selected_class
-        if target_class is None:
-            target_class = dominant_class_in_region(
-                target, valid, num_output_classes, ignored_class
-            )
-        if target_class is None:
-            raise ValueError("Unable to choose a ground-truth target class.")
-        region = target == target_class
-        if bool(region.any().item()):
-            return target_class, cast(BooleanMask, region), "ground_truth_class"
-        fallback, fallback_name = fallback_class_region(
-            prediction, target, target_class, ignored_class
-        )
-        return target_class, fallback, fallback_name
-
-    if region_mode == "prediction":
-        target_class = selected_class
-        if target_class is None:
-            target_class = dominant_class_in_region(
-                prediction, valid, num_output_classes, -1
-            )
-        if target_class is None:
-            raise ValueError("Unable to choose a predicted target class.")
-        region = (prediction == target_class) & valid
-        if bool(region.any().item()):
-            return target_class, cast(BooleanMask, region), "predicted_class"
-        fallback, fallback_name = fallback_class_region(
-            prediction, target, target_class, ignored_class
-        )
-        return target_class, fallback, fallback_name
-
-    if region_mode == "error":
-        error_region = errors
-        if selected_class is not None:
-            selected_fp = errors & (prediction == selected_class)
-            selected_fn = errors & (target == selected_class)
-            if bool(selected_fp.any().item()):
-                return selected_class, cast(BooleanMask, selected_fp), "selected_class_error"
-            competitor = dominant_class_in_region(
-                prediction, selected_fn, num_output_classes, -1
-            )
-            if competitor is not None:
-                competitor_region = selected_fn & (prediction == competitor)
-                return competitor, cast(BooleanMask, competitor_region), "selected_class_competitor"
-
-        target_class = dominant_class_in_region(
-            prediction, error_region, num_output_classes, -1
-        )
-        if target_class is not None:
-            region = error_region & (prediction == target_class)
-            return target_class, cast(BooleanMask, region), "dominant_prediction_error"
-
-        # Perfect predictions have no error pixels, so use a true-positive class
-        # rather than failing an otherwise valid explanation request.
-        true_positive = prediction == target
-        target_class = dominant_class_in_region(
-            target, true_positive & valid, num_output_classes, ignored_class
-        )
-        if target_class is None:
-            raise ValueError("Unable to choose an error-region fallback target.")
-        region = true_positive & (target == target_class)
-        return target_class, cast(BooleanMask, region), "error_mode_true_positive_fallback"
-
-    # Class-specific categories keep the selected class where that class itself
-    # is the phenomenon of interest, except FN cases where the competing class
-    # answers why the requested semantic region was missed.
-    if selected_class is not None:
-        if category == "highest_fp_rate":
-            fp_region = (prediction == selected_class) & (target != selected_class) & valid
-            if bool(fp_region.any().item()):
-                return selected_class, cast(BooleanMask, fp_region), "false_positive_region"
-
-        if category == "highest_fn_rate":
-            fn_region = (target == selected_class) & (prediction != selected_class) & valid
-            competitor = dominant_class_in_region(
-                prediction, fn_region, num_output_classes, -1
-            )
-            if competitor is not None:
-                region = fn_region & (prediction == competitor)
-                return competitor, cast(BooleanMask, region), "false_negative_competitor_region"
-            if bool(fn_region.any().item()):
-                return selected_class, cast(BooleanMask, fn_region), "false_negative_region"
-
-        gt_region = target == selected_class
-        if bool(gt_region.any().item()):
-            return selected_class, cast(BooleanMask, gt_region), "ground_truth_selected_class"
-
-        predicted_region = (prediction == selected_class) & valid
-        if bool(predicted_region.any().item()):
-            return selected_class, cast(BooleanMask, predicted_region), "predicted_selected_class"
-
-        fallback, fallback_name = fallback_class_region(
-            prediction, target, selected_class, ignored_class
-        )
-        return selected_class, fallback, fallback_name
-
-    # Boundary categories explain the dominant wrong prediction inside the exact
-    # boundary band responsible for selection rather than unrelated image errors.
-    if category == "road_sidewalk_boundary_failure":
-        boundary = class_pair_boundary_mask(
-            target,
-            first_class=0,
-            second_class=1,
-            ignored_class=ignored_class,
-            radius=boundary_radius,
-        )
-        boundary_errors = boundary & errors
-        target_class = dominant_class_in_region(
-            prediction, boundary_errors, num_output_classes, -1
-        )
-        if target_class is not None:
-            region = boundary_errors & (prediction == target_class)
-            return target_class, cast(BooleanMask, region), "road_sidewalk_boundary_error"
-
-    if category == "boundary_failure":
-        boundary = semantic_boundary_mask(target, ignored_class, boundary_radius)
-        boundary_errors = boundary & errors
-        target_class = dominant_class_in_region(
-            prediction, boundary_errors, num_output_classes, -1
-        )
-        if target_class is not None:
-            region = boundary_errors & (prediction == target_class)
-            return target_class, cast(BooleanMask, region), "semantic_boundary_error"
-
-    failure_categories = {"low_iou", "shared_low_iou", "model_disagreement"}
-    if category in failure_categories:
-        target_class = dominant_class_in_region(
-            prediction, errors, num_output_classes, -1
-        )
-        if target_class is not None:
-            region = errors & (prediction == target_class)
-            return target_class, cast(BooleanMask, region), "dominant_error_prediction"
-
-    # Successful/typical image-level cases are best represented by the class with
-    # the largest correctly segmented region, which yields a stable scalar target.
-    true_positive = (prediction == target) & valid
-    target_class = dominant_class_in_region(
-        target, true_positive, num_output_classes, ignored_class
-    )
-    if target_class is not None:
-        region = true_positive & (target == target_class)
-        return target_class, cast(BooleanMask, region), "dominant_true_positive"
-
-    # If no true positives exist, explain the most common non-ignored prediction
-    # so even a catastrophic segmentation failure can still produce a heatmap.
-    target_class = dominant_class_in_region(
-        prediction, valid, num_output_classes, -1
-    )
-    if target_class is None:
-        raise ValueError("Unable to choose any valid automatic Grad-CAM target class.")
-    region = (prediction == target_class) & valid
-    return target_class, cast(BooleanMask, region), "dominant_prediction_fallback"
-
-
-class MeanRegionSegmentationTarget:
-    """Select the mean logit of one semantic class inside a spatial region.
-
-    ``pytorch-grad-cam`` accepts callable model targets for non-classification
-    tasks. This target preserves the repository's previous scoring semantics:
-    explain the mean target-class logit over the category-specific region rather
-    than changing the score definition to the library's built-in summed mask.
-
-    Steps
-    -----
-    1. Validate and store the target class and non-empty boolean region.
-    2. Move the stored region to the model-output device when called.
-    3. Return the mean target-class logit covered by the region.
+    1. Validate and store the requested semantic class id.
+    2. Select that class channel from the model's per-image logits.
+    3. Average the channel across its entire spatial extent for Grad-CAM++.
 
     Parameters
     ----------
     target_class : int
-        Semantic class channel to explain.
-    region : BooleanMask
-        Boolean mask of shape ``(H, W)`` defining the explained output region.
+        Zero-based model output channel to explain, typically road (0).
 
     Raises
     ------
     ValueError
-        If ``target_class`` is negative or ``region`` is empty.
+        If ``target_class`` is negative.
     """
 
-    @jaxtyped(typechecker=beartype)
-    def __init__(self, target_class: int, region: BooleanMask) -> None:
-        """Store one validated semantic-segmentation CAM target.
+    def __init__(self, target_class: int) -> None:
+        """Store the requested global segmentation class target.
 
         Steps
         -----
-        1. Reject negative class ids and empty target regions early.
-        2. Detach and clone the region so later tensor reuse cannot mutate it.
+        1. Reject negative class ids before model inference begins.
+        2. Retain the class id for evaluation of every input variant.
 
         Parameters
         ----------
         target_class : int
-            Semantic class channel to explain.
-        region : BooleanMask
-            Boolean target region of shape ``(H, W)``.
+            Zero-based semantic class channel whose spatial logits are averaged.
+
+        Returns
+        -------
+        None
+            Initialises the callable target for Grad-CAM++.
 
         Raises
         ------
         ValueError
-            If ``target_class`` is negative or ``region`` is empty.
+            If ``target_class`` is negative.
         """
         if target_class < 0:
-            raise ValueError("Grad-CAM target class must be non-negative.")
-        if not bool(region.any().item()):
-            raise ValueError("Grad-CAM target region must contain at least one pixel.")
+            raise ValueError("Grad-CAM++ target class must be non-negative.")
 
-        # Keep the target independent from the image-selection tensors because the
-        # CAM library performs a separate differentiable model forward pass.
+        # The target is independent of the ground-truth map, allowing the same
+        # score definition for clean and PGD-robust variants of an image.
         self.target_class = target_class
-        self.region = cast(BooleanMask, region.detach().clone())
 
     @jaxtyped(typechecker=beartype)
     def __call__(self, model_output: SingleLogits) -> Scalar:
-        """Reduce one segmentation output to the scalar score explained by CAM.
+        """Calculate the mean target-class logit over all output pixels.
 
         Steps
         -----
-        1. Validate the target channel and spatial size against model output.
-        2. Move the boolean region to the model output device.
-        3. Return the mean target-class logit inside that region.
+        1. Check that the selected class channel exists in the model output.
+        2. Average its raw logits across height and width without masking.
 
         Parameters
         ----------
         model_output : SingleLogits
-            Per-image segmentation logits with shape ``(C, H, W)``.
+            One image's unnormalised segmentation logits, shaped ``(C, H, W)``.
 
         Returns
         -------
         Scalar
-            Mean target-class logit over the stored region.
+            Differentiable scalar mean of the selected class's ``H * W`` logits.
 
         Raises
         ------
         ValueError
-            If the class id is outside the model output range or the region shape
-            differs from the output spatial dimensions.
+            If the requested class id is outside the model's output channels.
         """
         if self.target_class >= model_output.shape[0]:
             raise ValueError(
                 f"Target class {self.target_class} is outside logits range "
                 f"[0, {model_output.shape[0] - 1}]."
             )
-        if tuple(self.region.shape) != tuple(model_output.shape[1:]):
-            raise ValueError(
-                "Grad-CAM target region shape does not match model output: "
-                f"{tuple(self.region.shape)} vs {tuple(model_output.shape[1:])}."
-            )
 
-        # Moving only the mask keeps the target compatible with whichever device
-        # pytorch-grad-cam derives from the checkpoint parameters.
-        region = self.region.to(device=model_output.device)
-        score = model_output[self.target_class][region].mean()
+        # An unmasked spatial mean explains the class response everywhere in
+        # the image, including locations the model assigns to other classes.
+        score = model_output[self.target_class].mean()
         return cast(Scalar, score)
 
 
@@ -947,7 +448,7 @@ class MeanRegionSegmentationTarget:
 def run_cam_algorithm(
     cam: Callable[..., NumpyCamBatch],
     image: BatchImage,
-    target: MeanRegionSegmentationTarget,
+    target: MeanClassSegmentationTarget,
 ) -> NumpyHeatmap:
     """Run one ``pytorch-grad-cam`` algorithm and validate its output shape.
 
@@ -967,8 +468,8 @@ def run_cam_algorithm(
         Configured ``pytorch-grad-cam`` algorithm bound to the model/layer.
     image : BatchImage
         Input image tensor with shape ``(1, 3, H, W)``.
-    target : MeanRegionSegmentationTarget
-        Scalar semantic-segmentation target used by the CAM library.
+    target : MeanClassSegmentationTarget
+        Callable whose scalar score is the mean class logit over all spatial pixels.
 
     Returns
     -------
@@ -1002,9 +503,8 @@ def run_cam_algorithm(
 def cam_is_usable(heatmap: NumpyHeatmap, epsilon: float) -> bool:
     """Return whether a normalised library CAM is finite and non-degenerate.
 
-    This check retains the script's previous Grad-CAM fallback policy without
-    reimplementing either CAM algorithm. A Grad-CAM++ map that is entirely zero,
-    non-finite, or below the configured threshold is retried with Grad-CAM.
+    This check prevents invalid or effectively empty Grad-CAM++ maps from being
+    saved as successful explanations; the caller raises if it fails.
 
     Steps
     -----
@@ -1038,97 +538,62 @@ def generate_cam(
     model: nn.Module,
     target_layer: nn.Module,
     image: BatchImage,
-    target: MeanRegionSegmentationTarget,
-    method: str,
+    target: MeanClassSegmentationTarget,
     epsilon: float,
-) -> Tuple[NumpyHeatmap, str]:
-    """Generate a Grad-CAM/Grad-CAM++ map with ``pytorch-grad-cam``.
+) -> NumpyHeatmap:
+    """Generate a valid Grad-CAM++ heatmap using ``pytorch-grad-cam``.
 
-    The established library now owns the algorithm implementation, including
-    activation/gradient hooks, channel weighting, image-space resizing, and
-    normalisation. The repository keeps only its existing policy of falling back
-    from a degenerate Grad-CAM++ result to standard Grad-CAM.
+    The external library computes all activation and gradient weights. A failed
+    computation or unusable normalised CAM is an error; no other method is run.
 
     Steps
     -----
-    1. Validate the requested method.
-    2. Run the matching ``pytorch-grad-cam`` implementation on the target layer.
-    3. When Grad-CAM++ is degenerate, retry the same target with Grad-CAM.
-    4. Return standard Grad-CAM even when it is degenerate so one difficult case
-       cannot abort the remaining explanation pipeline.
+    1. Validate the degeneracy threshold.
+    2. Run Grad-CAM++ on the selected layer and global mean class-logit target.
+    3. Reject non-finite, zero, or effectively empty CAMs instead of falling back.
 
     Parameters
     ----------
     model : nn.Module
-        Loaded semantic-segmentation model.
+        Loaded semantic-segmentation network to explain.
     target_layer : nn.Module
-        Model layer whose activations are used by the CAM library.
+        Feature-producing module observed by the Grad-CAM++ hooks.
     image : BatchImage
-        Input image tensor with shape ``(1, 3, H, W)``.
-    target : MeanRegionSegmentationTarget
-        Class/region scalar target supplied to the CAM implementation.
-    method : str
-        Requested method: ``gradcam++`` or ``gradcam``.
+        Model input with shape ``(1, 3, H, W)``.
+    target : MeanClassSegmentationTarget
+        Callable averaging the selected class logits over every output pixel.
     epsilon : float
-        Threshold used only to detect degenerate library-normalised CAMs.
+        Positive threshold below which the normalised CAM is degenerate.
 
     Returns
     -------
-    Tuple[NumpyHeatmap, str]
-        Normalised image-resolution heatmap and actual method used.
+    NumpyHeatmap
+        Finite, non-degenerate Grad-CAM++ heatmap of shape ``(H, W)``.
 
     Raises
     ------
     ValueError
-        If ``method`` is unsupported or ``epsilon`` is not positive.
+        If ``epsilon`` is not positive.
+    RuntimeError
+        If Grad-CAM++ returns an unusable heatmap or an invalid CAM shape.
+
     Notes
     -----
-    A standard Grad-CAM map can legitimately become all-zero after the method's
-    final ReLU when the selected layer contains no positive evidence for the
-    requested class/region target. This is recorded in ``method_used`` instead of
-    being treated as a fatal error, matching the resilience of the previous local
-    implementation and allowing later cases/checkpoints to continue.
+    Other library errors propagate; no Grad-CAM fallback is attempted.
     """
-    if method not in {"gradcam++", "gradcam"}:
-        raise ValueError("method must be either 'gradcam++' or 'gradcam'.")
     if epsilon <= 0.0:
         raise ValueError("epsilon must be greater than 0.")
 
-    if method == "gradcam++":
-        # Use the maintained library implementation instead of reproducing the
-        # Grad-CAM++ alpha/gradient weighting equations in this repository.
-        with GradCAMPlusPlus(model=model, target_layers=[target_layer]) as cam:
-            heatmap = run_cam_algorithm(cam=cam, image=image, target=target)
-        if cam_is_usable(heatmap, epsilon):
-            return heatmap, "gradcam++"
-
-        # Preserve the previous numerical fallback behavior, but delegate the
-        # fallback algorithm itself to the same well-established library.
-        with GradCAM(model=model, target_layers=[target_layer]) as fallback_cam:
-            fallback_heatmap = run_cam_algorithm(
-                cam=fallback_cam,
-                image=image,
-                target=target,
-            )
-        if cam_is_usable(fallback_heatmap, epsilon):
-            return fallback_heatmap, "gradcam_fallback"
-
-        # A zero Grad-CAM is still a valid algorithm result: the final ReLU can
-        # remove all evidence when every weighted activation is non-positive.
-        # Do not let that numerical/semantic edge case terminate the checkpoint;
-        # preserve the zero heatmap and make its status explicit in the manifest.
-        return fallback_heatmap, "gradcam_fallback_degenerate"
-
-    # Standard Grad-CAM is delegated directly to pytorch-grad-cam as well, so no
-    # local gradient pooling or activation weighting remains in this script.
-    with GradCAM(model=model, target_layers=[target_layer]) as cam:
+    # Restrict generation to Grad-CAM++ so invalid maps are surfaced, not
+    # quietly replaced by another explanation algorithm.
+    with GradCAMPlusPlus(model=model, target_layers=[target_layer]) as cam:
         heatmap = run_cam_algorithm(cam=cam, image=image, target=target)
-    if cam_is_usable(heatmap, epsilon):
-        return heatmap, "gradcam"
-
-    # Keep processing later cases rather than raising for an all-zero standard
-    # Grad-CAM. The explicit method label keeps the condition auditable in CSV.
-    return heatmap, "gradcam_degenerate"
+    if not cam_is_usable(heatmap, epsilon):
+        raise RuntimeError(
+            "Grad-CAM++ produced a non-finite or degenerate heatmap "
+            f"(no finite value greater than {epsilon})."
+        )
+    return heatmap
 
 
 @jaxtyped(typechecker=beartype)
@@ -1178,28 +643,6 @@ def tensor_class_map_to_numpy(class_map: ClassMap) -> NumpyClassMap:
 
 
 @jaxtyped(typechecker=beartype)
-def tensor_boolean_mask_to_numpy(mask: BooleanMask) -> NumpyBooleanMask:
-    """Convert a torch boolean region mask to a NumPy boolean array.
-
-    Steps
-    -----
-    1. Detach the mask, move it to CPU, and preserve boolean semantics.
-
-    Parameters
-    ----------
-    mask : BooleanMask
-        Boolean tensor of shape ``(H, W)``.
-
-    Returns
-    -------
-    NumpyBooleanMask
-        CPU boolean array with shape ``(H, W)``.
-    """
-    array = mask.detach().cpu().numpy().astype(bool, copy=False)
-    return cast(NumpyBooleanMask, array)
-
-
-@jaxtyped(typechecker=beartype)
 def colourise_class_map(class_map: NumpyClassMap) -> NumpyImage:
     """Convert class ids to the repository's BDD100k RGB palette.
 
@@ -1234,7 +677,6 @@ def save_case_visualisations(
     image: NumpyImage,
     target_map: NumpyClassMap,
     prediction_map: NumpyClassMap,
-    target_region: NumpyBooleanMask,
     heatmap: NumpyHeatmap,
     heatmap_path: FilePath,
     overlay_path: FilePath,
@@ -1246,9 +688,9 @@ def save_case_visualisations(
     """Save raw heatmap, image overlay, and diagnostic four-panel figure.
 
     The panel keeps the input, GT, prediction, and Grad-CAM evidence together so
-    a heatmap cannot be interpreted without seeing whether the segmentation was
-    actually correct. The target-region contour additionally documents exactly
-    which output pixels were reduced into the scalar Grad-CAM score.
+    a heatmap can be interpreted alongside the predicted segmentation. No
+    spatial target contour is needed because the score averages the selected
+    class's logits across every pixel of the model output.
 
     Steps
     -----
@@ -1264,10 +706,8 @@ def save_case_visualisations(
         Ground-truth semantic class map of shape ``(H, W)``.
     prediction_map : NumpyClassMap
         Predicted semantic class map of shape ``(H, W)``.
-    target_region : NumpyBooleanMask
-        Region used to construct the scalar explanation target.
     heatmap : NumpyHeatmap
-        Normalised Grad-CAM heatmap of shape ``(H, W)``.
+        Normalised Grad-CAM++ heatmap of shape ``(H, W)``.
     heatmap_path : FilePath
         Destination for the standalone heatmap PNG.
     overlay_path : FilePath
@@ -1275,7 +715,7 @@ def save_case_visualisations(
     panel_path : FilePath
         Destination for the diagnostic panel PNG.
     title : str
-        Explanation title written on the panel.
+        Case and target description written on the panel.
     colormap : str
         Matplotlib colormap for heatmap rendering.
     overlay_alpha : float
@@ -1308,8 +748,6 @@ def save_case_visualisations(
         vmin=0.0,
         vmax=1.0,
     )
-    if bool(target_region.any()):
-        overlay_axis.contour(target_region.astype(np.uint8), levels=[0.5], linewidths=1.0)
     overlay_axis.set_title(title)
     overlay_axis.set_axis_off()
     overlay_figure.tight_layout()
@@ -1339,9 +777,7 @@ def save_case_visualisations(
         vmin=0.0,
         vmax=1.0,
     )
-    if bool(target_region.any()):
-        axes[3].contour(target_region.astype(np.uint8), levels=[0.5], linewidths=1.0)
-    axes[3].set_title("Grad-CAM explanation")
+    axes[3].set_title("Grad-CAM++ explanation")
 
     for axis in axes:
         axis.set_axis_off()
@@ -1375,133 +811,112 @@ def optional_class_id(value: object) -> Optional[int]:
     return int(float(str(value)))
 
 
-def resolve_class_filters(class_specs: Sequence[str]) -> List[int]:
-    """Resolve optional class-name/id CLI filters against ``CLASS_NAMES``.
+def resolve_target_class(specification: str) -> int:
+    """Resolve the CLI target class name or numeric id to one model channel.
 
     Steps
     -----
-    1. Interpret numeric values directly as class ids.
-    2. Resolve text values case-insensitively through ``CLASS_NAMES``.
-    3. Deduplicate ids while preserving user order.
+    1. Interpret numeric values directly as semantic class ids.
+    2. Resolve class names case-insensitively against ``CLASS_NAMES``.
+    3. Validate the id against the configured class-name list.
 
     Parameters
     ----------
-    class_specs : Sequence[str]
-        Requested class ids or names.
+    specification : str
+        Requested target class name (e.g. ``road``) or decimal class id.
 
     Returns
     -------
-    List[int]
-        Unique class ids to retain.
+    int
+        Valid semantic class id to explain in every selected case.
 
     Raises
     ------
     ValueError
-        If a class id/name is not valid for the configured segmentation labels.
+        If the name is unknown or the id is outside the configured classes.
     """
-    name_to_id = {name.lower(): index for index, name in enumerate(CLASS_NAMES)}
-    resolved: List[int] = []
-    for specification in class_specs:
-        stripped = specification.strip()
-        try:
-            class_id = int(stripped)
-        except ValueError:
-            lookup = stripped.lower()
-            if lookup not in name_to_id:
-                raise ValueError(
-                    f"Unknown class '{specification}'. Valid names: {', '.join(CLASS_NAMES)}."
-                ) from None
-            class_id = name_to_id[lookup]
-
-        if class_id < 0 or class_id >= len(CLASS_NAMES):
+    stripped = specification.strip()
+    try:
+        class_id = int(stripped)
+    except ValueError:
+        class_lookup = {str(name).casefold(): i for i, name in enumerate(CLASS_NAMES)}
+        if stripped.casefold() not in class_lookup:
             raise ValueError(
-                f"Class id {class_id} is outside [0, {len(CLASS_NAMES) - 1}]."
-            )
-        if class_id not in resolved:
-            resolved.append(class_id)
-    return resolved
+                f"Unknown target class '{specification}'. "
+                f"Valid names: {', '.join(CLASS_NAMES)}."
+            ) from None
+        class_id = class_lookup[stripped.casefold()]
+
+    if not 0 <= class_id < len(CLASS_NAMES):
+        raise ValueError(
+            f"Target class id {class_id} is outside [0, {len(CLASS_NAMES) - 1}]."
+        )
+    return class_id
 
 
 def expand_and_filter_cases(
     selected_cases: pd.DataFrame,
     checkpoint_names: Sequence[str],
-    category_filters: Sequence[str],
-    class_filters: Sequence[int],
-    rank_max: Optional[int],
-    max_cases: Optional[int],
+    max_cases: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Expand cross-model rows and apply optional explanation filters.
+    """Expand cross-model selected cases and cap the number to explain.
 
-    ``all_models`` rows from ``explain_choose.py`` describe cross-model cases.
-    They are expanded once per supplied checkpoint so the same image can receive
-    comparable explanations from every model actually provided to this script.
+    ``all_models`` rows from ``explain_choose.py`` are duplicated for each
+    supplied checkpoint. Per-model rows are retained only if that checkpoint
+    was supplied, while the original selection category and rank are preserved.
 
     Steps
     -----
-    1. Keep model-specific rows only for supplied checkpoints.
-    2. Expand ``all_models`` rows across every supplied checkpoint.
-    3. Apply optional model/category/class/rank filters.
-    4. Preserve stable CSV order and optionally cap total work with ``max_cases``.
+    1. Require columns needed to identify, name, and load selected cases.
+    2. Keep model-specific rows for the supplied checkpoints only.
+    3. Expand ``all_models`` rows once for every supplied checkpoint.
+    4. Preserve input ordering and optionally cap the rows with ``max_cases``.
 
     Parameters
     ----------
     selected_cases : pd.DataFrame
-        Raw ``selected_cases.csv`` contents.
+        Source ``selected_cases.csv`` rows, including model, class, and image paths.
     checkpoint_names : Sequence[str]
-        Model labels available through ``--checkpoint``.
-    category_filters : Sequence[str]
-        Optional selection categories requested by the user.
-    class_filters : Sequence[int]
-        Optional class ids. Classless image-level rows are omitted when supplied.
-    rank_max : Optional[int]
-        Optional maximum category rank to retain.
+        Names from ``--checkpoint`` that determine which models receive cases.
     max_cases : Optional[int]
-        Optional cap on total case rows after filtering.
+        Maximum number of expanded cases, or ``None`` to keep all cases.
 
     Returns
     -------
     pd.DataFrame
-        Expanded and filtered case table with ``source_model_name`` retained.
+        Expanded case table, preserving source columns and adding
+        ``source_row_index`` and ``source_model_name`` provenance columns.
 
     Raises
     ------
     ValueError
-        If required manifest columns are missing, filters reference unavailable
-        models/categories, or numeric limits are invalid.
+        If required columns are missing or ``max_cases`` is less than one.
     """
     required_columns = {
-        "category",
-        "model_name",
-        "class_id",
-        "image_index",
-        "image_path",
-        "mask_path",
-        "rank",
+        "category", "model_name", "class_id", "image_index",
+        "image_path", "mask_path", "rank",
     }
     missing = sorted(required_columns - set(selected_cases.columns))
     if missing:
         raise ValueError(
             "selected_cases.csv is missing required columns: " + ", ".join(missing)
         )
-    if rank_max is not None and rank_max < 1:
-        raise ValueError("rank_max must be at least 1 when provided.")
     if max_cases is not None and max_cases < 1:
         raise ValueError("max_cases must be at least 1 when provided.")
 
+    # Preserve column headers even when no rows match, so the exported CSV
+    # still shows which case fields the selection stage produced.
+    expanded_columns = list(selected_cases.columns)
+    for column in ("source_row_index", "source_model_name"):
+        if column not in expanded_columns:
+            expanded_columns.append(column)
+
     checkpoint_set = set(checkpoint_names)
-
-    available_categories = set(map(str, selected_cases["category"].dropna().unique()))
-    missing_categories = set(category_filters) - available_categories
-    if missing_categories:
-        raise ValueError(
-            "Unknown --category values: " + ", ".join(sorted(missing_categories))
-        )
-
     expanded_rows: List[Dict[str, object]] = []
     for source_row_number, (_, row) in enumerate(selected_cases.iterrows()):
         source_model_name = str(row["model_name"])
         if source_model_name == "all_models":
-            targets = [name for name in checkpoint_names if name in checkpoint_set]
+            targets = checkpoint_names
         elif source_model_name in checkpoint_set:
             targets = [source_model_name]
         else:
@@ -1514,20 +929,7 @@ def expand_and_filter_cases(
             record["model_name"] = target_model_name
             expanded_rows.append(record)
 
-    frame = pd.DataFrame(expanded_rows)
-    if frame.empty:
-        return frame
-
-    if category_filters:
-        frame = frame[frame["category"].isin(category_filters)].copy()
-    if class_filters:
-        class_numeric = pd.to_numeric(frame["class_id"], errors="coerce")
-        frame = frame[class_numeric.isin(class_filters)].copy()
-    if rank_max is not None:
-        rank_numeric = pd.to_numeric(frame["rank"], errors="coerce")
-        frame = frame[rank_numeric <= rank_max].copy()
-
-    frame = frame.reset_index(drop=True)
+    frame = pd.DataFrame(expanded_rows, columns=expanded_columns).reset_index(drop=True)
     if max_cases is not None:
         frame = frame.head(max_cases).copy()
     return frame
@@ -1740,8 +1142,6 @@ def build_case_title(
     row: pd.Series,
     selected_class: Optional[int],
     target_class: int,
-    target_region_name: str,
-    method_used: str,
     input_mode: str,
 ) -> str:
     """Build a compact, self-describing title for one explanation figure.
@@ -1749,7 +1149,8 @@ def build_case_title(
     Steps
     -----
     1. Resolve selected and actual target class ids into readable names.
-    2. Combine model, input mode, category, region, and method metadata into one title.
+    2. Combine the model, input variant, selection metadata, globally averaged
+       class-logit target, and fixed Grad-CAM++ method into a title.
 
     Parameters
     ----------
@@ -1759,10 +1160,6 @@ def build_case_title(
         Class associated with the original selection row.
     target_class : int
         Actual class whose logit was differentiated.
-    target_region_name : str
-        Description of the pixel region used for the scalar target.
-    method_used : str
-        Grad-CAM method actually used after any fallback.
     input_mode : str
         Concrete input variant being explained: ``clean`` or ``robust``.
 
@@ -1782,7 +1179,7 @@ def build_case_title(
     return (
         f"{row['model_name']} | input={input_mode} | {row['category']} | "
         f"selected={selected_name} | "
-        f"target={target_name} | region={target_region_name} | {method_used}"
+        f"target={target_name} | score=global_mean_logit | Grad-CAM++"
     )
 
 
@@ -1794,31 +1191,29 @@ def explain_cases_for_model(
     output_dir: FilePath,
     device: torch.device,
     layer_scope: str,
-    target_layer_path: Optional[str],
-    method: str,
-    region_mode: str,
-    boundary_radius: int,
+    target_class: int,
     colormap: str,
     overlay_alpha: float,
     epsilon: float,
     input_mode: str,
+    target_layer_path: Optional[str] = None,
 ) -> List[Dict[str, object]]:
-    """Generate Grad-CAM explanations for every selected case of one model.
+    """Generate Grad-CAM++ explanations for every selected case of one model.
 
-    A cheap inference pass is reused per image and input variant to select the
-    prediction-dependent class/region target. Robust inputs are generated with
-    the shared PGD attack from ``evaluate_robustness.py`` while retaining the
-    original dataset mask. Each selected case is then passed to ``pytorch-grad-cam``,
-    which performs the differentiable forward/backward pass needed by its own CAM
-    hooks and algorithm implementation.
+    Every output pixel contributes to the mean target-class logit, regardless
+    of its ground-truth or predicted label. Ground-truth masks are retained for
+    visual diagnostics and the shared PGD attack in ``evaluate_robustness.py``.
+    Grad-CAM++ runs once per image and input variant; individual selection rows
+    retain their source metadata and separate figure paths.
 
     Steps
     -----
     1. Discover the model target layer used by the CAM library.
     2. Group selected rows by image/mask pair and load the clean dataset sample once.
     3. Build the requested clean/robust input variants, using shared PGD for robust.
-    4. Run inference for each variant and choose each case's class/region target.
-    5. Generate the requested library CAM, save figures, and return manifest rows.
+    4. Obtain each variant's diagnostic prediction and global class-logit score.
+    5. Generate each variant's Grad-CAM++ map once, save case-specific figures,
+       and return the manifest rows.
 
     Parameters
     ----------
@@ -1836,15 +1231,9 @@ def explain_cases_for_model(
         Device used for model inference and CAM computation.
     layer_scope : str
         Automatic layer scope: ``decoder``, ``encoder``, or ``auto``.
-    target_layer_path : Optional[str]
-        Optional explicit dotted target-layer path.
-    method : str
-        Requested method: ``gradcam++`` or ``gradcam``.
-    region_mode : str
-        Target-region strategy: ``auto``, ``ground_truth``, ``prediction``, or
-        ``error``.
-    boundary_radius : int
-        Boundary dilation radius used by boundary cases.
+    target_class : int
+        Fixed semantic class channel whose logit is averaged across the entire
+        model output map, including pixels of other classes.
     colormap : str
         Matplotlib heatmap colormap.
     overlay_alpha : float
@@ -1853,6 +1242,9 @@ def explain_cases_for_model(
         Threshold used to detect degenerate library CAM outputs.
     input_mode : str
         Requested inputs: ``clean``, ``robust``, or ``all``.
+    target_layer_path : Optional[str], optional
+        Explicit dotted target-layer path, or ``None`` to resolve the layer
+        according to ``layer_scope``.
 
     Returns
     -------
@@ -1862,12 +1254,12 @@ def explain_cases_for_model(
     Raises
     ------
     RuntimeError
-        If ``pytorch-grad-cam`` returns an unusable heatmap.
+        If Grad-CAM++ fails or returns an unusable heatmap.
     TypeError
         If the segmentation model does not return a tensor.
     ValueError
-        If ``input_mode`` is invalid or a model output/target region is incompatible
-        with explanation.
+        If ``input_mode`` is invalid or the requested target class is outside
+        the model's output-channel range.
     FileNotFoundError
         If selected source files are missing.
     """
@@ -1882,6 +1274,9 @@ def explain_cases_for_model(
     )
     print(f"  Target layer: {layer_name}")
 
+    # The global target depends only on the requested class, so create it once
+    # and reuse its identical score definition for every image and input mode.
+    cam_target = MeanClassSegmentationTarget(target_class=target_class)
     manifest_rows: List[Dict[str, object]] = []
     grouping_columns = ["image_index", "image_path", "mask_path"]
     grouped = model_cases.groupby(grouping_columns, sort=False, dropna=False)
@@ -1892,6 +1287,10 @@ def explain_cases_for_model(
         mask_path = resolve_project_path(str(mask_path_value), project_root)
 
         clean_image, target = load_single_sample(image_path, mask_path, device)
+
+        # Ground truth is still needed for the diagnostic panel and PGD attack,
+        # but does not define or restrict the global Grad-CAM++ target score.
+        target_numpy = tensor_class_map_to_numpy(target)
 
         # Build robust input only when requested because PGD requires ten backward
         # passes and would otherwise add substantial cost to clean-only explanations.
@@ -1911,8 +1310,8 @@ def explain_cases_for_model(
             )
 
         for concrete_input_mode, image in input_variants:
-            # Target selection depends on the prediction for the concrete input.
-            # No graph is needed here because pytorch-grad-cam runs its own forward.
+            # Inference supplies the diagnostic prediction and full-image mean
+            # class logit; CAM performs its own gradient-enabled forward pass.
             with torch.no_grad():
                 logits_raw = model(image)
             if not isinstance(logits_raw, Tensor):
@@ -1920,36 +1319,31 @@ def explain_cases_for_model(
             logits = cast(Logits, logits_raw)
             prediction = cast(ClassMap, logits.argmax(dim=1)[0])
 
-            for _, row in case_group.iterrows():
-                selected_class = optional_class_id(row["class_id"])
-                target_class, target_region, target_region_name = (
-                    choose_target_class_and_region(
-                        prediction=prediction,
-                        target=target,
-                        category=str(row["category"]),
-                        selected_class=selected_class,
-                        num_output_classes=int(logits.shape[1]),
-                        ignored_class=19,
-                        boundary_radius=boundary_radius,
-                        region_mode=region_mode,
-                    )
+            # The requested semantic class must exist in this checkpoint's
+            # output channels; never silently explain another class instead.
+            if not 0 <= target_class < int(logits.shape[1]):
+                raise ValueError(
+                    f"Target class {target_class} is outside model '{model_name}' "
+                    f"output range [0, {int(logits.shape[1]) - 1}]."
                 )
 
-                # The custom target keeps the old mean-over-region semantics while
-                # allowing the external library to own all CAM-specific computation.
-                cam_target = MeanRegionSegmentationTarget(
-                    target_class=target_class,
-                    region=target_region,
-                )
-                target_score = cam_target(cast(SingleLogits, logits[0]))
-                heatmap, method_used = generate_cam(
-                    model=model,
-                    target_layer=target_layer,
-                    image=image,
-                    target=cam_target,
-                    method=method,
-                    epsilon=epsilon,
-                )
+            # All selected rows for this image share the same target and input.
+            # Generate the expensive map only once and reuse it for their panels.
+            target_score = cam_target(cast(SingleLogits, logits[0]))
+            heatmap = generate_cam(
+                model=model,
+                target_layer=target_layer,
+                image=image,
+                target=cam_target,
+                epsilon=epsilon,
+            )
+            input_numpy = tensor_image_to_numpy(image)
+            prediction_numpy = tensor_class_map_to_numpy(prediction)
+
+            for _, row in case_group.iterrows():
+                # Selection class/category are provenance only and do not
+                # influence the spatially global Grad-CAM++ target score.
+                selected_class = optional_class_id(row["class_id"])
 
                 heatmap_path, overlay_path, panel_path = case_output_paths(
                     output_dir=output_dir,
@@ -1961,20 +1355,13 @@ def explain_cases_for_model(
                     row=row,
                     selected_class=selected_class,
                     target_class=target_class,
-                    target_region_name=target_region_name,
-                    method_used=method_used,
                     input_mode=concrete_input_mode,
                 )
 
-                input_numpy = tensor_image_to_numpy(image)
-                target_numpy = tensor_class_map_to_numpy(target)
-                prediction_numpy = tensor_class_map_to_numpy(prediction)
-                region_numpy = tensor_boolean_mask_to_numpy(target_region)
                 save_case_visualisations(
                     image=input_numpy,
                     target_map=target_numpy,
                     prediction_map=prediction_numpy,
-                    target_region=region_numpy,
                     heatmap=heatmap,
                     heatmap_path=heatmap_path,
                     overlay_path=overlay_path,
@@ -2012,12 +1399,9 @@ def explain_cases_for_model(
                         "selected_class_name": selected_class_name,
                         "target_class_id": target_class,
                         "target_class_name": target_class_name,
-                        "target_region": target_region_name,
-                        "target_region_pixels": int(target_region.sum().item()),
                         "target_score": float(target_score.detach().item()),
                         "target_layer": layer_name,
-                        "requested_method": method,
-                        "method_used": method_used,
+                        "method_used": "gradcam++",
                         "heatmap_path": str(heatmap_path),
                         "overlay_path": str(overlay_path),
                         "panel_path": str(panel_path),
@@ -2041,9 +1425,10 @@ def parse_arguments() -> argparse.Namespace:
     Steps
     -----
     1. Accept the selected-case manifest and one or more named checkpoints.
-    2. Configure optional model/category/class/rank filters to control workload.
+    2. Choose a fixed target class (road by default) and optional case limit.
     3. Choose clean, PGD-robust, or combined input processing.
-    4. Configure target-layer, Grad-CAM method, target-region, and rendering options.
+    4. Configure the feature layer and rendering options. The target class's
+       logits are averaged over the entire spatial output, without a mask.
 
     Returns
     -------
@@ -2053,7 +1438,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate Grad-CAM++ heatmaps for semantic-segmentation cases selected "
-            "by explain_choose.py, with automatic Grad-CAM fallback."
+            "by explain_choose.py. Invalid Grad-CAM++ maps raise errors."
         )
     )
     parser.add_argument(
@@ -2084,31 +1469,22 @@ def parse_arguments() -> argparse.Namespace:
         help="Directory receiving heatmaps, overlays, panels, and output manifest.",
     )
     parser.add_argument(
-        "--category",
-        action="append",
-        default=[],
-        help="Optional selected-case category filter. Repeat to keep multiple categories.",
-    )
-    parser.add_argument(
         "--target-class",
-        action="append",
-        default=[],
+        type=str,
+        default="road",
         help=(
-            "Optional selected-class id/name filter. When supplied, classless image-level "
-            "rows are omitted. Repeat to keep multiple classes."
+            "Semantic class name or numeric id whose logits are averaged across "
+            "the entire output image for every case (default: road)."
         ),
-    )
-    parser.add_argument(
-        "--rank-max",
-        type=int,
-        default=None,
-        help="Optional maximum selection rank retained within each category.",
     )
     parser.add_argument(
         "--max-cases",
         type=int,
         default=None,
-        help="Optional global cap after all filters, useful for a quick smoke test.",
+        help=(
+            "Optional cap after expanding cases across checkpoints, "
+            "useful for a smoke test."
+        ),
     )
     parser.add_argument(
         "--input-mode",
@@ -2118,12 +1494,6 @@ def parse_arguments() -> argparse.Namespace:
             "Input variant to explain: clean dataset images, robust images perturbed "
             "with evaluate_robustness.py PGD defaults, or both. Defaults to clean."
         ),
-    )
-    parser.add_argument(
-        "--method",
-        choices=["gradcam++", "gradcam"],
-        default="gradcam++",
-        help="Requested explanation method. Grad-CAM++ falls back to Grad-CAM if degenerate.",
     )
     parser.add_argument(
         "--layer-scope",
@@ -2136,21 +1506,10 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Optional explicit dotted module path, e.g. decoder.blocks.4.conv2.0. "
-            "When omitted, the final convolution in --layer-scope is used."
+            "Optional dotted module path, e.g. decoder.blocks.4.conv2.0. "
+            "By default the decoder module is used for decoder scope; "
+            "encoder scope uses its last convolution."
         ),
-    )
-    parser.add_argument(
-        "--region-mode",
-        choices=["auto", "ground_truth", "prediction", "error"],
-        default="auto",
-        help="How output pixels are reduced into the scalar Grad-CAM target.",
-    )
-    parser.add_argument(
-        "--boundary-radius",
-        type=int,
-        default=3,
-        help="Boundary dilation radius for boundary-failure target regions. Defaults to 3.",
     )
     parser.add_argument(
         "--colormap",
@@ -2178,10 +1537,11 @@ def main() -> None:
 
     Steps
     -----
-    1. Load and filter ``selected_cases.csv`` against supplied checkpoint names.
-    2. Expand cross-model cases so each supplied model explains the same image.
-    3. Load one checkpoint at a time and generate the requested clean/robust inputs.
-    4. Generate category-aware Grad-CAM++ maps for each concrete input variant.
+    1. Read selected cases, expand cross-model rows, and apply the case limit.
+    2. Save the resulting rows to ``expanded_cases.csv`` before any XAI work.
+    3. Load checkpoints and generate clean/robust inputs for the chosen class.
+    4. Explain the mean selected-class logit across all model output pixels,
+       requiring a usable Grad-CAM++ map without any method fallback.
     5. Append each completed checkpoint's metadata to ``gradcam_manifest.csv``.
 
     Returns
@@ -2193,12 +1553,12 @@ def main() -> None:
     FileNotFoundError
         If the selected-case CSV, checkpoint, image, or mask cannot be found.
     ValueError
-        If filters/options are invalid or no selected cases remain.
+        If options are invalid or no selected cases match the checkpoints.
+    RuntimeError
+        If Grad-CAM++ fails to generate a usable explanation.
     """
     args = parse_arguments()
 
-    if args.boundary_radius < 0:
-        raise ValueError("--boundary-radius must be greater than or equal to 0.")
     if args.overlay_alpha < 0.0 or args.overlay_alpha > 1.0:
         raise ValueError("--overlay-alpha must be inside [0, 1].")
     if args.epsilon <= 0.0:
@@ -2227,21 +1587,26 @@ def main() -> None:
             )
         checkpoint_map[model_name] = resolved_checkpoint
 
-    class_filters = resolve_class_filters(args.target_class)
+    target_class = resolve_target_class(args.target_class)
+    # The dataset's ignored label is not a scored semantic category, so do not
+    # use its output channel as the global class-logit explanation target.
+    if target_class == 19:
+        raise ValueError("The ignored ground-truth class cannot be the CAM target.")
     selected_cases = pd.read_csv(selected_cases_path)
     cases = expand_and_filter_cases(
         selected_cases=selected_cases,
         checkpoint_names=checkpoint_names,
-        category_filters=args.category,
-        class_filters=class_filters,
-        rank_max=args.rank_max,
         max_cases=args.max_cases,
     )
-    if cases.empty:
-        raise ValueError("No selected cases remain after applying the requested filters.")
 
+    # Write the exact expanded, capped case table before loading any checkpoints
+    # or generating explanations so the inputs can be audited after a failure.
     output_dir = resolve_project_path(args.output_dir, project_root)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cases_path = output_dir / "expanded_cases.csv"
+    cases.to_csv(cases_path, index=False)
+    if cases.empty:
+        raise ValueError("No selected cases match the supplied checkpoints.")
 
     print("\n" + "=" * 72)
     print("GRAD-CAM++ SEMANTIC-SEGMENTATION EXPLANATION PIPELINE")
@@ -2249,9 +1614,11 @@ def main() -> None:
     print(f"Execution device : {Configuration.DEVICE}")
     print(f"Selected cases   : {selected_cases_path}")
     print(f"Cases to explain : {len(cases)}")
+    print(f"Expanded cases   : {cases_path}")
+    print(f"Target class     : {CLASS_NAMES[target_class]} ({target_class})")
     print(f"Input mode       : {args.input_mode}")
-    print(f"Requested method : {args.method}")
-    print(f"Region mode      : {args.region_mode}")
+    print("Method           : Grad-CAM++")
+    print("Target score     : mean class logit across all output pixels")
     print(f"Output directory : {output_dir}")
 
     manifest_path = output_dir / "gradcam_manifest.csv"
@@ -2276,9 +1643,7 @@ def main() -> None:
             device=Configuration.DEVICE,
             layer_scope=args.layer_scope,
             target_layer_path=args.target_layer,
-            method=args.method,
-            region_mode=args.region_mode,
-            boundary_radius=args.boundary_radius,
+            target_class=target_class,
             colormap=args.colormap,
             overlay_alpha=args.overlay_alpha,
             epsilon=args.epsilon,
@@ -2312,9 +1677,6 @@ def main() -> None:
     print("\nGrad-CAM generation complete.")
     print(f"  Explanations generated : {len(manifest)}")
     print(f"  Manifest               : {manifest_path}")
-    if not manifest.empty:
-        method_counts = manifest["method_used"].value_counts().to_dict()
-        print(f"  Methods used           : {method_counts}")
 
 
 if __name__ == "__main__":
