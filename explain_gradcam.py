@@ -10,6 +10,7 @@ Grad-CAM++ score. Unusable Grad-CAM++ maps raise errors without a fallback.
 """
 
 import argparse
+import hashlib
 import re
 from pathlib import Path as FilePath
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, cast
@@ -1340,6 +1341,25 @@ def explain_cases_for_model(
             input_numpy = tensor_image_to_numpy(image)
             prediction_numpy = tensor_class_map_to_numpy(prediction)
 
+            # Persist the EXACT input used for the CAM, especially model-specific
+            # PGD inputs. A later faithfulness run must not regenerate a random
+            # attack and accidentally evaluate a different reference example.
+            cpu_input = image.detach().to(dtype=torch.float32, device="cpu").contiguous().numpy()
+            input_digest = hashlib.sha256(cpu_input.tobytes()).hexdigest()
+            source_digest = hashlib.sha256(
+                f"{image_path.resolve()}|{mask_path.resolve()}".encode()
+            ).hexdigest()[:12]
+            shared_input_path = (
+                output_dir / sanitise_filename(model_name) / concrete_input_mode /
+                "_inputs" / f"img{image_index:05d}_{source_digest}.npy"
+            )
+            shared_input_path.parent.mkdir(parents=True, exist_ok=True)
+            # Store once for the image/mode, even if selected under several
+            # categories. Atomic replacement avoids corrupting a previous file.
+            shared_input_temp = shared_input_path.with_suffix(".tmp.npy")
+            np.save(shared_input_temp, cpu_input, allow_pickle=False)
+            shared_input_temp.replace(shared_input_path)
+
             for _, row in case_group.iterrows():
                 # Selection class/category are provenance only and do not
                 # influence the spatially global Grad-CAM++ target score.
@@ -1357,6 +1377,12 @@ def explain_cases_for_model(
                     target_class=target_class,
                     input_mode=concrete_input_mode,
                 )
+
+                # PNG heatmaps are color-rendered and lose numerical fidelity;
+                # save the actual library-normalized spatial CAM for occlusion.
+                heatmap_npy_path = heatmap_path.with_suffix(".npy")
+                heatmap_npy_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(heatmap_npy_path, heatmap.astype(np.float32), allow_pickle=False)
 
                 save_case_visualisations(
                     image=input_numpy,
@@ -1403,6 +1429,14 @@ def explain_cases_for_model(
                         "target_layer": layer_name,
                         "method_used": "gradcam++",
                         "heatmap_path": str(heatmap_path),
+                        "heatmap_npy_path": str(heatmap_npy_path),
+                        "input_tensor_path": str(shared_input_path),
+                        "input_sha256": input_digest,
+                        "attack_provenance": (
+                            "evaluate_robustness.pgd_attack defaults"
+                            if concrete_input_mode == "robust"
+                            else "none"
+                        ),
                         "overlay_path": str(overlay_path),
                         "panel_path": str(panel_path),
                     }
@@ -1651,20 +1685,20 @@ def main() -> None:
         )
         all_manifest_rows.extend(model_rows)
 
-        # Persist each completed checkpoint immediately. If a later checkpoint
-        # runs out of memory, the work that already finished remains recorded and
-        # a subsequent invocation can safely append the remaining checkpoints.
+        # Upsert manifest rows for reproducible reruns. The old append behavior
+        # could write mismatched columns after new artifact fields were added and
+        # produced duplicates when a checkpoint was processed twice.
         model_manifest = pd.DataFrame(model_rows)
         if not model_manifest.empty:
-            manifest_exists = (
-                manifest_path.is_file() and manifest_path.stat().st_size > 0
-            )
-            model_manifest.to_csv(
-                manifest_path,
-                mode="a",
-                header=not manifest_exists,
-                index=False,
-            )
+            if manifest_path.is_file() and manifest_path.stat().st_size > 0:
+                previous = pd.read_csv(manifest_path)
+                model_manifest = pd.concat(
+                    [previous, model_manifest], ignore_index=True
+                )
+            model_manifest.drop_duplicates(
+                subset=["source_row_index", "model_name", "input_mode", "target_class_id"],
+                keep="last",
+            ).to_csv(manifest_path, index=False)
 
         # Release the checkpoint before loading the next one. The explanation
         # workload uses backward graphs, so explicit cleanup avoids cumulative VRAM.
