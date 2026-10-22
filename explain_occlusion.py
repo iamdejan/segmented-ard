@@ -499,9 +499,9 @@ def sliding_occlusion(
         from captum.attr import Occlusion
     except ImportError as exc:
         raise ImportError("Install Captum (pixi install) to use sliding occlusion.") from exc
-    if any(s > p for s, p in zip(stride, patch)):
+    if any(s > p for s, p in zip(stride, patch, strict=True)):
         raise ValueError("Sliding stride cannot exceed patch size (would leave uncovered gaps).")
-    if any(p > dimension for p, dimension in zip(patch, image.shape[-2:])):
+    if any(p > dimension for p, dimension in zip(patch, image.shape[-2:], strict=True)):
         raise ValueError("Sliding patch dimensions cannot exceed input height/width.")
     forward = make_score_forward(model, class_id, class_map if gt_target else None)
     attribution = Occlusion(forward).attribute(
@@ -812,7 +812,7 @@ def deletion_order(tiles: Sequence[Tile], policy: str, seed: int = 0) -> List[in
         chosen: List[int] = []
         # Greedy matching by road fraction and vertical position; random selection
         # among the closest available matches. Never use the measured tile effects.
-        for pos, reference_idx in enumerate(top):
+        for _pos, reference_idx in enumerate(top):
             reference = tiles[reference_idx]
             scores = []
             for candidate_idx in sorted(available):
@@ -1182,7 +1182,7 @@ def save_diagnostic(
     else:
         panels.extend([(label, np.zeros_like(rgb)) for label in ("Selected tiles", "Occluded input", "Occluded prediction")])
     fig, axs = plt.subplots(2, 4, figsize=(20, 8))
-    for axis, (title, array) in zip(axs.flat, panels):
+    for axis, (title, array) in zip(axs.flat, panels, strict=True):
         axis.imshow(np.clip(array, 0, 1))
         axis.set_title(title)
         axis.axis("off")
@@ -1736,7 +1736,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Batch size and random repeats must be positive.")
     if not 0 < args.interior_threshold <= 1:
         raise ValueError("--interior-threshold must lie in (0,1].")
-    if any(x > y for x, y in zip(args.stride, args.patch_size)):
+    if any(x > y for x, y in zip(args.stride, args.patch_size, strict=True)):
         raise ValueError("Sliding stride cannot exceed patch size.")
     if args.blur_kernel < 3 or args.blur_kernel % 2 == 0 or args.blur_sigma <= 0:
         raise ValueError("Gaussian blur requires an odd kernel >= 3 and sigma > 0.")
