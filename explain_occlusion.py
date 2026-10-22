@@ -93,6 +93,53 @@ METRIC_NAMES: Tuple[MetricName, ...] = ("global_logit", "gt_logit", "road_iou")
 # Blurred replacement is the recommended primary perturbation because it removes
 # local high-frequency evidence without introducing an arbitrary solid color.
 BaselineMode = Literal["blur", "gray", "image_mean", "white", "bright"]
+ConcreteInputMode = Literal["clean", "robust"]
+ModelSpec = Tuple[str, str]
+CamKey = Tuple[str, str, int, str, str]
+CamIndex = Dict[CamKey, Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class PipelineContext:
+    """Store immutable paths and selections shared by the whole pipeline.
+
+    The context separates one-time setup from per-model and per-image processing.
+    Keeping these values together makes the orchestration helpers explicit about
+    which state is global to the run and avoids repeatedly resolving manifests.
+
+    Steps
+    -----
+    1. Retain resolved repository/output paths and validated checkpoint specs.
+    2. Keep expanded selected cases, input modes, target class, CAM index, and palette.
+
+    Attributes
+    ----------
+    root : Path
+        Resolved repository root used for project-relative input paths.
+    output : Path
+        Root directory receiving occlusion artifacts and aggregate manifests.
+    model_specs : Tuple[ModelSpec, ...]
+        Validated ``(model_name, checkpoint_path)`` pairs from the CLI.
+    target_id : int
+        Semantic class ID whose Grad-CAM++ faithfulness is evaluated.
+    input_modes : Tuple[ConcreteInputMode, ...]
+        Concrete input variants to process: clean, robust, or both.
+    cases : pd.DataFrame
+        Expanded selected-case rows after checkpoint filtering and optional limiting.
+    cam_index : CamIndex
+        Lookup of Grad-CAM++ manifest records keyed by model, mode, class, and paths.
+    palette : NumpyPalette
+        Dataset RGB class palette used only for diagnostic visualisation.
+    """
+
+    root: Path
+    output: Path
+    model_specs: Tuple[ModelSpec, ...]
+    target_id: int
+    input_modes: Tuple[ConcreteInputMode, ...]
+    cases: pd.DataFrame
+    cam_index: CamIndex
+    palette: NumpyPalette
 
 
 def resolve_path(path: Union[str, Path], root: Path) -> Path:
@@ -1821,17 +1868,1096 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Gaussian blur requires an odd kernel >= 3 and sigma > 0.")
 
 
-def run_pipeline(args: argparse.Namespace) -> None:
-    # Import project utilities only at the runtime integration boundary, leaving
-    # the numerical methods independently importable/testable with synthetic data.
-    """Execute faithfulness experiments for every unique selected image and input variant.
+@dataclass
+class CaseExperimentArtifacts:
+    """Collect optional outputs produced for one model/input/image experiment.
+
+    The pipeline can run sliding attribution, deletion, or both. A dedicated
+    container keeps those conditional outputs together so orchestration code does
+    not need several loosely related local variables.
 
     Steps
     -----
-    1. Expand model-specific and all-model selections and load checkpoints once each.
-    2. Align clean/PGD reference tensors with CAM records and validate original scores.
-    3. Run requested Captum sliding attribution and/or ranked tile deletion.
-    4. Persist attribution arrays, figures, manifests, and paired model comparisons.
+    1. Store the optional sliding sensitivity map.
+    2. Store deletion tables, preview tensors, and tile metadata when CAM deletion runs.
+
+    Attributes
+    ----------
+    sensitivity : Optional[NumpyHeatmap]
+        Signed Captum occlusion map for the global target logit, when requested.
+    patch_frame : Optional[pd.DataFrame]
+        Independent one-tile ablation effects, when a numerical CAM is available.
+    deletion_frame : Optional[pd.DataFrame]
+        Progressive deletion measurements for all requested ranking policies.
+    previews : Dict[str, Tensor]
+        Top-first deleted images, predictions, and tile indices used in diagnostics.
+    tiles : List[Tile]
+        Deterministic nonoverlapping tile grid used for CAM ranking and deletion.
+    """
+
+    sensitivity: Optional[NumpyHeatmap]
+    patch_frame: Optional[pd.DataFrame]
+    deletion_frame: Optional[pd.DataFrame]
+    previews: Dict[str, Tensor]
+    tiles: List[Tile]
+
+
+def prepare_pipeline_context(args: argparse.Namespace) -> PipelineContext:
+    """Resolve one-time pipeline configuration and load selection metadata.
+
+    This helper performs all inexpensive setup before any checkpoint is loaded.
+    Centralising setup keeps :func:`run_pipeline` focused on orchestration and
+    ensures every downstream helper receives resolved, validated paths.
+
+    Steps
+    -----
+    1. Resolve project/output paths, checkpoint specifications, and target class.
+    2. Expand selected cases for the requested checkpoints and concrete input modes.
+    3. Load the Grad-CAM++ manifest only when the requested experiment requires it.
+    4. Package shared immutable state into :class:`PipelineContext`.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+
+    Returns
+    -------
+    PipelineContext
+        Shared resolved state used by per-model and per-case processing helpers.
+
+    Raises
+    ------
+    ValueError
+        If checkpoint names are duplicated, the ignored class is targeted, or no
+        selected cases match the supplied checkpoints.
+    FileNotFoundError
+        If a required Grad-CAM++ manifest is missing.
+    """
+    # Delay project-specific imports until execution so numerical helpers remain
+    # independently importable in synthetic tests that do not have the dataset.
+    from explain_gradcam import (
+        expand_and_filter_cases,
+        parse_checkpoint_spec,
+        resolve_target_class,
+    )
+    from evaluate_performance import CLASS_COLORS
+
+    root = Path(args.project_root).expanduser().resolve()
+    output = resolve_path(args.output_dir, root)
+    output.mkdir(parents=True, exist_ok=True)
+
+    # A model name is part of the CAM lookup key and output path. Duplicate names
+    # would therefore make provenance ambiguous even if checkpoint paths differ.
+    model_specs = tuple(parse_checkpoint_spec(value) for value in args.checkpoint)
+    model_names = [name for name, _ in model_specs]
+    if len(set(model_names)) != len(model_names):
+        raise ValueError("Duplicate model names in --checkpoint.")
+
+    target_id = resolve_target_class(args.target_class)
+    if target_id == IGNORE_ID:
+        raise ValueError("The ignored class cannot be the explanation target.")
+
+    if args.input_mode == "all":
+        input_modes: Tuple[ConcreteInputMode, ...] = ("clean", "robust")
+    else:
+        input_modes = (cast(ConcreteInputMode, args.input_mode),)
+
+    selected_path = resolve_path(args.selected_cases, root)
+    selected = pd.read_csv(selected_path)
+    cases = expand_and_filter_cases(selected, model_names, max_cases=args.max_cases)
+    if cases.empty:
+        raise ValueError("No selected cases match the supplied checkpoints.")
+    cases.to_csv(output / "expanded_cases.csv", index=False)
+
+    # Robust attribution must reuse the exact PGD tensor saved by Grad-CAM++, and
+    # deletion always needs a numerical CAM. Clean sliding-only runs can proceed
+    # without the manifest, which keeps that mode independently usable.
+    cam_path = resolve_path(args.gradcam_manifest, root)
+    manifest_required = args.experiment != "sliding" or "robust" in input_modes
+    cam_index = load_cam_index(cam_path, root) if manifest_required or cam_path.exists() else {}
+    palette = cast(NumpyPalette, np.asarray(CLASS_COLORS, dtype=np.uint8))
+
+    return PipelineContext(
+        root=root,
+        output=output,
+        model_specs=model_specs,
+        target_id=target_id,
+        input_modes=input_modes,
+        cases=cases,
+        cam_index=cam_index,
+        palette=palette,
+    )
+
+
+def validate_cam_reference_score(
+    cam_record: Optional[Dict[str, Any]],
+    original: InferenceMetrics,
+    mode: ConcreteInputMode,
+) -> None:
+    """Verify that occlusion starts from the same scalar response as Grad-CAM++.
+
+    The saved input tensor hash proves input identity, while this score check also
+    catches changed checkpoint weights or materially different inference settings.
+    Records without a reference score are accepted for backward compatibility.
+
+    Steps
+    -----
+    1. Read the optional Grad-CAM++ target score from the manifest record.
+    2. Compare it with the freshly evaluated global target logit.
+    3. Raise with a provenance-focused message when the values disagree.
+
+    Parameters
+    ----------
+    cam_record : Optional[Dict[str, Any]]
+        Matching Grad-CAM++ manifest record, or ``None`` for clean sliding-only runs.
+    original : InferenceMetrics
+        Metrics computed on the unmodified reference tensor.
+    mode : ConcreteInputMode
+        Concrete input variant being evaluated: ``clean`` or ``robust``.
+
+    Returns
+    -------
+    None
+        Nothing; validation succeeds silently.
+
+    Raises
+    ------
+    ValueError
+        If a finite saved Grad-CAM++ score differs from the freshly evaluated score
+        beyond the configured numerical tolerance.
+    """
+    if cam_record is None:
+        return
+
+    expected = cam_record.get("target_score")
+    if expected is None or pd.isna(expected):
+        return
+
+    actual = float(original["global_logit"][0])
+    expected_float = float(expected)
+    if not np.isclose(actual, expected_float, atol=1e-4, rtol=1e-4):
+        raise ValueError(
+            "Grad-CAM reference score mismatch after loading the exact "
+            f"saved {mode} input: expected {expected_float:.10f}, got {actual:.10f}. "
+            "Regenerate Grad-CAM++ with the updated artifact pipeline and verify "
+            "that the same checkpoint is used."
+        )
+
+
+@jaxtyped(typechecker=beartype)
+def prepare_case_directory(
+    args: argparse.Namespace,
+    context: PipelineContext,
+    model_name: str,
+    mode: ConcreteInputMode,
+    image_index: int,
+    image_path: Path,
+    mask_path: Path,
+    image: SingleImage,
+    cam: Optional[NumpyHeatmap],
+) -> Tuple[Path, str, str]:
+    """Create a deterministic output directory for one experiment configuration.
+
+    The experiment identifier hashes all settings that change the perturbation or
+    reference tensors. This prevents reruns with different baselines, budgets, or
+    CAM/input artifacts from silently overwriting one another.
+
+    Steps
+    -----
+    1. Hash the source image/mask identity and all experiment-defining parameters.
+    2. Build the model/mode/image/config directory hierarchy.
+    3. Persist the exact configuration JSON used by the experiment.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    context : PipelineContext
+        Shared resolved pipeline state.
+    model_name : str
+        Human-readable checkpoint identifier.
+    mode : ConcreteInputMode
+        Concrete input variant being evaluated.
+    image_index : int
+        Stable dataset/test-split image index.
+    image_path : Path
+        Resolved source RGB image path.
+    mask_path : Path
+        Resolved source segmentation-mask path.
+    image : SingleImage
+        Exact clean or saved PGD tensor used as the occlusion reference.
+    cam : Optional[NumpyHeatmap]
+        Numerical Grad-CAM++ map used for deletion, if requested.
+
+    Returns
+    -------
+    Tuple[Path, str, str]
+        Case output directory, source identity digest, and experiment-config digest.
+    """
+    from explain_gradcam import sanitise_filename
+
+    source_id = hashlib.sha256(f"{image_path}|{mask_path}".encode()).hexdigest()[:12]
+    parameters: Dict[str, Any] = {
+        "experiment": args.experiment,
+        "patch_size": args.patch_size,
+        "stride": args.stride,
+        "tile_size": args.tile_size,
+        "baseline": args.baseline,
+        "blur_kernel": args.blur_kernel,
+        "blur_sigma": args.blur_sigma,
+        "budgets": args.budgets,
+        "random_repeats": args.random_repeats,
+        "seed": args.seed,
+        "interior_threshold": args.interior_threshold,
+        "sliding_gt_target": args.sliding_gt_target,
+        "input_hash": tensor_hash(image),
+    }
+    if cam is not None:
+        parameters["cam_hash"] = sha256_array(cam)
+
+    config_id = hashlib.sha256(
+        json.dumps(parameters, sort_keys=True).encode()
+    ).hexdigest()[:12]
+    directory = (
+        context.output
+        / sanitise_filename(model_name)
+        / mode
+        / f"img{image_index:05d}_{source_id}"
+        / config_id
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+
+    # Persisting the configuration beside the outputs makes every figure and CSV
+    # auditable without needing to reconstruct CLI arguments from shell history.
+    with open(directory / "configuration.json", "w", encoding="utf-8") as file:
+        json.dump(parameters, file, indent=2)
+
+    return directory, source_id, config_id
+
+
+@jaxtyped(typechecker=beartype)
+def save_reference_artifacts(
+    directory: Path,
+    image: SingleImage,
+    original: InferenceMetrics,
+) -> None:
+    """Persist the unmodified reference tensor and prediction for one case.
+
+    These artifacts establish the baseline from which all perturbation deltas are
+    measured and make later debugging possible without rerunning model inference.
+
+    Steps
+    -----
+    1. Save the exact NCHW float32 input and dense original prediction as NumPy arrays.
+    2. Save a human-readable RGB PNG of the same reference input.
+
+    Parameters
+    ----------
+    directory : Path
+        Output directory for the current model/input/image/configuration case.
+    image : SingleImage
+        Exact reference tensor used for all perturbation experiments.
+    original : InferenceMetrics
+        Metrics and prediction evaluated on the unmodified reference tensor.
+
+    Returns
+    -------
+    None
+        Nothing; writes NumPy and PNG artifacts to ``directory``.
+    """
+    input_rgb = image.detach().cpu().numpy().astype(np.float32)
+    np.save(directory / "reference_input.npy", input_rgb)
+    np.save(directory / "original_prediction.npy", original["prediction"][0])
+    plt.imsave(directory / "original_input.png", input_rgb[0].transpose(1, 2, 0))
+
+
+@jaxtyped(typechecker=beartype)
+def run_sliding_artifacts(
+    args: argparse.Namespace,
+    model: nn.Module,
+    image: SingleImage,
+    baseline: SingleImage,
+    gt: ClassMap,
+    target_id: int,
+    directory: Path,
+) -> Optional[NumpyHeatmap]:
+    """Run and persist requested Captum sliding-window attribution maps.
+
+    Sliding attribution is independent from CAM-ranked deletion. It measures the
+    signed change in the same scalar target when windows are replaced throughout
+    the full image, providing an additional perturbation-based explanation.
+
+    Steps
+    -----
+    1. Skip the computation when the CLI requests deletion only.
+    2. Compute and save the global-logit signed occlusion map.
+    3. Optionally compute the secondary fixed-GT-road-logit map.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    model : nn.Module
+        Loaded evaluation-mode segmentation checkpoint.
+    image : SingleImage
+        Exact reference input tensor.
+    baseline : SingleImage
+        Replacement tensor used inside each occlusion window.
+    gt : ClassMap
+        Fixed ground-truth semantic class map.
+    target_id : int
+        Semantic class ID whose evidence is evaluated.
+    directory : Path
+        Case output directory receiving arrays and figures.
+
+    Returns
+    -------
+    Optional[NumpyHeatmap]
+        Global signed sensitivity map, or ``None`` when sliding attribution is disabled.
+
+    Raises
+    ------
+    ImportError
+        If Captum is unavailable while sliding attribution is requested.
+    ValueError
+        If patch/stride geometry is invalid for the current image.
+    RuntimeError
+        If Captum returns malformed or nonfinite attribution values.
+    """
+    if args.experiment not in ("all", "sliding"):
+        return None
+
+    sensitivity = sliding_occlusion(
+        model,
+        image,
+        target_id,
+        gt,
+        args.patch_size,
+        args.stride,
+        baseline,
+        args.perturbations_per_eval,
+    )
+    np.save(directory / "occlusion_global_signed.npy", sensitivity)
+    save_heatmap(
+        image,
+        sensitivity,
+        directory / "occlusion_global.png",
+        "Full-image road-logit sensitivity",
+    )
+
+    if args.sliding_gt_target:
+        secondary = sliding_occlusion(
+            model,
+            image,
+            target_id,
+            gt,
+            args.patch_size,
+            args.stride,
+            baseline,
+            args.perturbations_per_eval,
+            gt_target=True,
+        )
+        np.save(directory / "occlusion_gt_signed.npy", secondary)
+        save_heatmap(
+            image,
+            secondary,
+            directory / "occlusion_gt.png",
+            "GT-road-logit sensitivity",
+        )
+
+    return sensitivity
+
+
+@jaxtyped(typechecker=beartype)
+def run_deletion_artifacts(
+    args: argparse.Namespace,
+    model: nn.Module,
+    image: SingleImage,
+    baseline: SingleImage,
+    gt: ClassMap,
+    target_id: int,
+    cam: Optional[NumpyHeatmap],
+    original: InferenceMetrics,
+    directory: Path,
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Dict[str, Tensor], List[Tile]]:
+    """Run CAM-ranked tile ablation and progressive deletion experiments.
+
+    Deletion is the direct Grad-CAM++ faithfulness test: top-ranked regions are
+    destructively replaced and compared with low-ranked and random controls under
+    the same area budgets. A missing CAM means the caller requested sliding only.
+
+    Steps
+    -----
+    1. Build the deterministic tile grid and measure each tile independently.
+    2. Evaluate top, bottom, random, and road/location-matched deletion orders.
+    3. Save raw tables, deletion curves, and the strongest top-first preview artifacts.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    model : nn.Module
+        Loaded evaluation-mode segmentation checkpoint.
+    image : SingleImage
+        Exact clean or robust reference tensor.
+    baseline : SingleImage
+        Replacement tensor used for destructive interventions.
+    gt : ClassMap
+        Fixed ground-truth semantic class map.
+    target_id : int
+        Semantic target class ID, normally road.
+    cam : Optional[NumpyHeatmap]
+        Numerical Grad-CAM++ attribution map; ``None`` disables deletion.
+    original : InferenceMetrics
+        Baseline metrics evaluated before any tile replacement.
+    directory : Path
+        Case output directory receiving deletion artifacts.
+
+    Returns
+    -------
+    Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Dict[str, Tensor], List[Tile]]
+        Independent tile-effect table, progressive deletion table, diagnostic preview
+        tensors, and the tile grid. Empty/``None`` outputs are returned when no CAM exists.
+    """
+    if cam is None:
+        return None, None, {}, []
+
+    # The same tile geometry is used for all policies so only ranking—not deleted
+    # area or patch shape—changes between Grad-CAM++ and control interventions.
+    tiles = build_tiles(cam, gt, target_id, args.tile_size, args.interior_threshold)
+    patch_frame = tile_effects(
+        model,
+        image,
+        baseline,
+        gt,
+        target_id,
+        tiles,
+        args.perturbations_per_eval,
+        original,
+    )
+    patch_frame.to_csv(directory / "tile_effects.csv", index=False)
+
+    deletion_rows: List[Dict[str, Any]] = []
+    previews: Dict[str, Tensor] = {}
+    for policy in ("top", "bottom", "random", "matched_random"):
+        repeats = args.random_repeats if policy in ("random", "matched_random") else 1
+        for repeat in range(repeats):
+            # Use separated deterministic seeds so random controls are reproducible
+            # without accidentally sharing the same permutation across repetitions.
+            order = deletion_order(tiles, policy, seed=args.seed + repeat * 7919)
+            rows, preview = ordered_deletion(
+                model,
+                image,
+                baseline,
+                gt,
+                target_id,
+                tiles,
+                order,
+                policy,
+                repeat,
+                args.budgets,
+                original,
+                args.perturbations_per_eval,
+            )
+            deletion_rows.extend(rows)
+            if policy == "top":
+                previews = preview
+
+    deletion_frame = pd.DataFrame(deletion_rows)
+    deletion_frame.to_csv(directory / "deletion.csv", index=False)
+    save_curves(deletion_frame, directory)
+
+    if previews:
+        preview_indices = [
+            int(key.split("_")[1]) for key in previews if key.startswith("image_")
+        ]
+        preview_index = max(preview_indices)
+        preview_image = previews[f"image_{preview_index}"][0].cpu().permute(1, 2, 0).numpy()
+        plt.imsave(directory / "occluded_top.png", preview_image)
+        np.save(
+            directory / "occluded_top_prediction.npy",
+            previews[f"prediction_{preview_index}"].numpy(),
+        )
+
+    return patch_frame, deletion_frame, previews, tiles
+
+
+@jaxtyped(typechecker=beartype)
+def execute_case_experiments(
+    args: argparse.Namespace,
+    model: nn.Module,
+    image: SingleImage,
+    baseline: SingleImage,
+    gt: ClassMap,
+    target_id: int,
+    cam: Optional[NumpyHeatmap],
+    original: InferenceMetrics,
+    directory: Path,
+) -> CaseExperimentArtifacts:
+    """Execute all attribution/deletion components requested for one reference input.
+
+    This helper is intentionally thin: it composes the independent sliding and
+    deletion helpers and returns their outputs in one typed container for later
+    diagnostics and summary generation.
+
+    Steps
+    -----
+    1. Run optional full-image sliding occlusion.
+    2. Run optional CAM-ranked deletion and collect its tables/previews.
+    3. Return every conditional artifact in a single container.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    model : nn.Module
+        Loaded evaluation-mode segmentation checkpoint.
+    image : SingleImage
+        Exact reference tensor used by all interventions.
+    baseline : SingleImage
+        Occlusion replacement tensor aligned with ``image``.
+    gt : ClassMap
+        Fixed ground-truth semantic class map.
+    target_id : int
+        Semantic target class ID.
+    cam : Optional[NumpyHeatmap]
+        Numerical Grad-CAM++ map for ranked deletion, when required.
+    original : InferenceMetrics
+        Metrics on the unmodified reference input.
+    directory : Path
+        Case output directory.
+
+    Returns
+    -------
+    CaseExperimentArtifacts
+        Sliding/deletion outputs required for diagnostics and summary statistics.
+    """
+    sensitivity = run_sliding_artifacts(
+        args, model, image, baseline, gt, target_id, directory
+    )
+    patch_frame, deletion_frame, previews, tiles = run_deletion_artifacts(
+        args,
+        model,
+        image,
+        baseline,
+        gt,
+        target_id,
+        cam,
+        original,
+        directory,
+    )
+    return CaseExperimentArtifacts(
+        sensitivity=sensitivity,
+        patch_frame=patch_frame,
+        deletion_frame=deletion_frame,
+        previews=previews,
+        tiles=tiles,
+    )
+
+
+def build_case_record(
+    args: argparse.Namespace,
+    context: PipelineContext,
+    model_name: str,
+    checkpoint_path: Path,
+    image_index: int,
+    image_path: Path,
+    mask_path: Path,
+    mode: ConcreteInputMode,
+    image: SingleImage,
+    group: pd.DataFrame,
+    cam_record: Optional[Dict[str, Any]],
+    directory: Path,
+    source_id: str,
+    config_id: str,
+) -> Dict[str, Any]:
+    """Build provenance metadata used by per-case and global summary manifests.
+
+    Selection rows can repeat the same source image under multiple categories. The
+    record preserves those categories as provenance while identifying the actual
+    experiment by model, input mode, source image, and configuration digest.
+
+    Steps
+    -----
+    1. Resolve the target class name and optional CAM path.
+    2. Collapse repeated selection categories/source rows into semicolon lists.
+    3. Record checkpoint, input hash, output directory, and experiment identifiers.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    context : PipelineContext
+        Shared pipeline state containing the target ID and resolved output context.
+    model_name : str
+        Human-readable checkpoint identifier.
+    checkpoint_path : Path
+        Resolved checkpoint file used for inference.
+    image_index : int
+        Stable test-split index of the source image.
+    image_path : Path
+        Resolved RGB source image path.
+    mask_path : Path
+        Resolved segmentation-mask path.
+    mode : ConcreteInputMode
+        Concrete input variant being evaluated.
+    image : SingleImage
+        Exact reference tensor used by the experiment.
+    group : pd.DataFrame
+        All selection rows referring to this source image for the current model.
+    cam_record : Optional[Dict[str, Any]]
+        Matching Grad-CAM++ manifest row, if one is required/available.
+    directory : Path
+        Case output directory.
+    source_id : str
+        Stable digest identifying the source image/mask pair.
+    config_id : str
+        Digest identifying the experiment configuration and reference artifacts.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Provenance record consumed by :func:`compute_summary`.
+    """
+    from evaluate_performance import CLASS_NAMES
+
+    cam_path = ""
+    if cam_record is not None:
+        cam_path = str(cam_record.get("heatmap_npy_path", ""))
+
+    return {
+        "model_name": model_name,
+        "checkpoint_path": str(checkpoint_path),
+        "image_index": image_index,
+        "image_path": str(image_path),
+        "mask_path": str(mask_path),
+        "input_mode": mode,
+        "target_class_id": context.target_id,
+        "target_class_name": CLASS_NAMES[context.target_id],
+        "baseline": args.baseline,
+        "experiment": args.experiment,
+        "experiment_id": config_id,
+        "input_sha256": tensor_hash(image),
+        "cam_path": cam_path,
+        "selection_categories": ";".join(dict.fromkeys(group.category.astype(str))),
+        "selection_rows": ";".join(str(int(value)) for value in group.source_row_index),
+        "output_dir": str(directory),
+        "unique_image_id": source_id,
+    }
+
+
+def persist_case_summary(
+    context: PipelineContext,
+    case_record: Dict[str, Any],
+    original: InferenceMetrics,
+    artifacts: CaseExperimentArtifacts,
+    directory: Path,
+) -> Dict[str, Any]:
+    """Compute and persist one case summary plus the deduplicated global manifest.
+
+    Steps
+    -----
+    1. Derive faithfulness statistics from original, tile, and deletion measurements.
+    2. Save both CSV and strict JSON representations inside the case directory.
+    3. Upsert the summary into the run-level occlusion manifest.
+
+    Parameters
+    ----------
+    context : PipelineContext
+        Shared pipeline state containing the global output directory.
+    case_record : Dict[str, Any]
+        Provenance metadata for the current model/input/image/configuration case.
+    original : InferenceMetrics
+        Baseline metrics evaluated on the unmodified reference input.
+    artifacts : CaseExperimentArtifacts
+        Optional sliding/deletion outputs produced for this case.
+    directory : Path
+        Case output directory receiving local summary files.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Fully populated case summary used for cross-model aggregation.
+    """
+    summary = compute_summary(
+        case_record,
+        original,
+        artifacts.patch_frame,
+        artifacts.deletion_frame,
+        artifacts.tiles,
+    )
+    pd.DataFrame([summary]).to_csv(directory / "summary.csv", index=False)
+
+    # JSON does not permit NaN/Inf. Converting only nonfinite float values to null
+    # preserves standards-compliant machine-readable summaries without changing CSV.
+    serializable = {
+        key: (None if isinstance(value, float) and not math.isfinite(value) else value)
+        for key, value in summary.items()
+    }
+    with open(directory / "summary.json", "w", encoding="utf-8") as file:
+        json.dump(serializable, file, indent=2, allow_nan=False)
+
+    save_csv_upsert(
+        context.output / "occlusion_manifest.csv",
+        [summary],
+        (
+            "model_name",
+            "image_path",
+            "mask_path",
+            "input_mode",
+            "target_class_id",
+            "experiment_id",
+        ),
+    )
+    return summary
+
+
+@jaxtyped(typechecker=beartype)
+def process_input_mode(
+    args: argparse.Namespace,
+    context: PipelineContext,
+    model: nn.Module,
+    model_name: str,
+    checkpoint_path: Path,
+    image_index: int,
+    image_path: Path,
+    mask_path: Path,
+    clean: SingleImage,
+    gt: ClassMap,
+    group: pd.DataFrame,
+    mode: ConcreteInputMode,
+) -> Dict[str, Any]:
+    """Process one clean or robust reference input from loading through persistence.
+
+    This is the smallest orchestration unit that represents one scientific case:
+    one checkpoint, one source image, one concrete input mode, and one target class.
+    Keeping this workflow separate makes each validation and artifact transition easy
+    to follow without nesting it inside model/image loops.
+
+    Steps
+    -----
+    1. Resolve the matching CAM record and exact saved reference tensor.
+    2. Validate geometry/reference score and construct the replacement baseline.
+    3. Create a deterministic output directory and save unmodified artifacts.
+    4. Execute sliding/deletion experiments, diagnostics, and summary persistence.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    context : PipelineContext
+        Shared pipeline state and manifest indexes.
+    model : nn.Module
+        Loaded evaluation-mode segmentation checkpoint.
+    model_name : str
+        Human-readable checkpoint identifier.
+    checkpoint_path : Path
+        Resolved checkpoint file path.
+    image_index : int
+        Stable test-split source image index.
+    image_path : Path
+        Resolved RGB source image path.
+    mask_path : Path
+        Resolved source segmentation-mask path.
+    clean : SingleImage
+        Freshly preprocessed clean dataset tensor.
+    gt : ClassMap
+        Fixed ground-truth semantic class map.
+    group : pd.DataFrame
+        Selection rows referring to this source image for the current model.
+    mode : ConcreteInputMode
+        Concrete input variant to evaluate.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Completed summary record for this unique scientific case.
+
+    Raises
+    ------
+    ValueError
+        If a required CAM record is absent, saved input/GT geometry disagrees, or
+        the saved Grad-CAM++ reference score is inconsistent.
+    OSError
+        If a referenced NumPy CAM/input artifact cannot be read.
+    ImportError
+        If Captum is requested but unavailable.
+    """
+    key: CamKey = (
+        model_name,
+        mode,
+        context.target_id,
+        str(image_path),
+        str(mask_path),
+    )
+    cam_record = context.cam_index.get(key)
+    if args.experiment != "sliding" and cam_record is None:
+        raise ValueError(f"Missing Grad-CAM++ record for {key}.")
+
+    # Robust mode must reuse the exact PGD tensor from Grad-CAM++; regenerating an
+    # attack here would test a different input and invalidate the faithfulness link.
+    image = load_reference_input(cam_record, clean, mode, context.root)
+    if tuple(image.shape[-2:]) != tuple(gt.shape):
+        raise ValueError("Input and GT spatial dimensions differ.")
+
+    cam = None
+    if args.experiment != "sliding":
+        if cam_record is None:
+            raise ValueError(f"Missing Grad-CAM++ record for {key}.")
+        cam = load_cam_data(cam_record, context.root, tuple(gt.shape))
+
+    baseline_mode = cast(BaselineMode, args.baseline)
+    baseline = replacement_baseline(
+        image, baseline_mode, args.blur_kernel, args.blur_sigma
+    )
+    original = infer_metrics(model, image, gt, context.target_id)
+    validate_cam_reference_score(cam_record, original, mode)
+
+    directory, source_id, config_id = prepare_case_directory(
+        args,
+        context,
+        model_name,
+        mode,
+        image_index,
+        image_path,
+        mask_path,
+        image,
+        cam,
+    )
+    save_reference_artifacts(directory, image, original)
+
+    artifacts = execute_case_experiments(
+        args,
+        model,
+        image,
+        baseline,
+        gt,
+        context.target_id,
+        cam,
+        original,
+        directory,
+    )
+    save_diagnostic(
+        directory,
+        image,
+        gt,
+        original["prediction"][0],
+        cam,
+        artifacts.sensitivity,
+        artifacts.previews,
+        artifacts.tiles,
+        context.palette,
+        baseline_mode,
+    )
+
+    case_record = build_case_record(
+        args,
+        context,
+        model_name,
+        checkpoint_path,
+        image_index,
+        image_path,
+        mask_path,
+        mode,
+        image,
+        group,
+        cam_record,
+        directory,
+        source_id,
+        config_id,
+    )
+    summary = persist_case_summary(
+        context, case_record, original, artifacts, directory
+    )
+    print(f"  {mode}: {image_path.name} -> {directory}", flush=True)
+    return summary
+
+
+def process_image_group(
+    args: argparse.Namespace,
+    context: PipelineContext,
+    model: nn.Module,
+    model_name: str,
+    checkpoint_path: Path,
+    image_index_value: object,
+    image_path_value: object,
+    mask_path_value: object,
+    group: pd.DataFrame,
+) -> List[Dict[str, Any]]:
+    """Process every requested input mode for one unique source image/mask pair.
+
+    Steps
+    -----
+    1. Resolve the selected source paths and load the clean image/ground truth once.
+    2. Skip cases without any target-class ground-truth pixels.
+    3. Reuse the loaded clean sample while processing each concrete input mode.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    context : PipelineContext
+        Shared pipeline state including requested input modes and target class.
+    model : nn.Module
+        Loaded evaluation-mode segmentation checkpoint.
+    model_name : str
+        Human-readable checkpoint identifier.
+    checkpoint_path : Path
+        Resolved checkpoint path used by ``model``.
+    image_index_value : object
+        Pandas group-key value containing the stable image index.
+    image_path_value : object
+        Pandas group-key value containing the source RGB path.
+    mask_path_value : object
+        Pandas group-key value containing the source mask path.
+    group : pd.DataFrame
+        All selection rows for this model and source image/mask pair.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        One summary record per processed concrete input mode.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the selected source image or mask cannot be loaded.
+    ValueError
+        If input/CAM/reference artifacts are inconsistent.
+    """
+    from explain_gradcam import load_single_sample
+    from evaluate_performance import Configuration
+
+    image_index = int(float(str(image_index_value)))
+    image_path = resolve_path(str(image_path_value), context.root)
+    mask_path = resolve_path(str(mask_path_value), context.root)
+    clean, gt = load_single_sample(image_path, mask_path, Configuration.DEVICE)
+
+    # A GT-region diagnostic is undefined when the target class is absent. Skipping
+    # here prevents later metric failures and mirrors the original selection intent.
+    if not bool((gt == context.target_id).any()):
+        print(f"Skipping {image_path_value}: no GT target pixels.")
+        return []
+
+    summaries: List[Dict[str, Any]] = []
+    for mode in context.input_modes:
+        summaries.append(
+            process_input_mode(
+                args,
+                context,
+                model,
+                model_name,
+                checkpoint_path,
+                image_index,
+                image_path,
+                mask_path,
+                clean,
+                gt,
+                group,
+                mode,
+            )
+        )
+    return summaries
+
+
+def process_model(
+    args: argparse.Namespace,
+    context: PipelineContext,
+    model_name: str,
+    checkpoint_name: str,
+) -> List[Dict[str, Any]]:
+    """Load one checkpoint once and process its unique selected source images.
+
+    Steps
+    -----
+    1. Filter selected rows for the model and validate/load its checkpoint.
+    2. Group repeated selection categories by source image/mask pair.
+    3. Delegate each group to :func:`process_image_group` and release GPU memory.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed and validated command-line namespace.
+    context : PipelineContext
+        Shared pipeline paths, selections, target class, and CAM index.
+    model_name : str
+        Human-readable checkpoint identifier supplied on the CLI.
+    checkpoint_name : str
+        Checkpoint path as supplied by ``parse_checkpoint_spec``.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Summary records for all processed source images and input modes of this model.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the checkpoint path does not exist.
+    ValueError
+        If any selected case has inconsistent reference/CAM artifacts.
+    """
+    from evaluate_performance import Configuration, load_trained_model
+
+    frame = context.cases[context.cases.model_name == model_name]
+    if frame.empty:
+        return []
+
+    checkpoint_path = resolve_path(checkpoint_name, context.root)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(checkpoint_path)
+
+    print(f"\nModel: {model_name} ({len(frame)} selected rows)", flush=True)
+    model = load_trained_model(str(checkpoint_path), Configuration.DEVICE)
+    model.eval()
+    summaries: List[Dict[str, Any]] = []
+
+    try:
+        # Deduplicate repeated selection categories before expensive inference. The
+        # category provenance is preserved in ``group`` and written into each summary.
+        grouped = frame.groupby(
+            ["image_index", "image_path", "mask_path"],
+            sort=False,
+            dropna=False,
+        )
+        for (image_index, image_path, mask_path), group in grouped:
+            summaries.extend(
+                process_image_group(
+                    args,
+                    context,
+                    model,
+                    model_name,
+                    checkpoint_path,
+                    image_index,
+                    image_path,
+                    mask_path,
+                    group,
+                )
+            )
+    finally:
+        # Explicitly release the model between checkpoints because robust deletion
+        # can create many perturbation batches and otherwise leave cached GPU memory.
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return summaries
+
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    """Coordinate occlusion faithfulness analysis across all requested checkpoints.
+
+    The detailed work is intentionally delegated to smaller helpers. This function
+    now describes the top-level program flow only: prepare shared state, process each
+    checkpoint, aggregate summaries, and report completion.
+
+    Steps
+    -----
+    1. Build one shared :class:`PipelineContext` from CLI arguments and manifests.
+    2. Process each checkpoint independently while accumulating per-case summaries.
+    3. Write paired model-comparison outputs when at least one case completed.
+    4. Print the final number of unique model/input/image cases.
 
     Parameters
     ----------
@@ -1841,209 +2967,34 @@ def run_pipeline(args: argparse.Namespace) -> None:
     Returns
     -------
     None
-        Nothing; writes per-case and aggregate faithfulness artifacts.
+        Nothing; delegates artifact creation to the processing helpers.
 
     Raises
     ------
     ValueError
-        If cases, CAMs, scores, or GT geometry are inconsistent.
+        If selections, CAM/reference artifacts, or experiment geometry are inconsistent.
     FileNotFoundError
-        If a checkpoint or required manifest cannot be found.
+        If a checkpoint or required manifest/artifact cannot be found.
     ImportError
-        If Captum is required but unavailable.
+        If Captum is required for sliding attribution but is unavailable.
     """
-    from explain_gradcam import (
-        expand_and_filter_cases, load_single_sample, parse_checkpoint_spec,
-        resolve_target_class, sanitise_filename,
-    )
-    from evaluate_performance import CLASS_COLORS, CLASS_NAMES, Configuration, load_trained_model
-
-    root = Path(args.project_root).expanduser().resolve()
-    output = resolve_path(args.output_dir, root)
-    output.mkdir(parents=True, exist_ok=True)
-    specs = [parse_checkpoint_spec(x) for x in args.checkpoint]
-    names = [name for name, _ in specs]
-    if len(set(names)) != len(names):
-        raise ValueError("Duplicate model names in --checkpoint.")
-    target_id = resolve_target_class(args.target_class)
-    if target_id == IGNORE_ID:
-        raise ValueError("The ignored class cannot be the explanation target.")
-    input_modes = ("clean", "robust") if args.input_mode == "all" else (args.input_mode,)
-    selected_path = resolve_path(args.selected_cases, root)
-    cases = expand_and_filter_cases(pd.read_csv(selected_path), names, max_cases=args.max_cases)
-    if cases.empty:
-        raise ValueError("No selected cases match the supplied checkpoints.")
-    cases.to_csv(output / "expanded_cases.csv", index=False)
-    cam_path = resolve_path(args.gradcam_manifest, root)
-    # Exact robust inputs always depend on the CAM manifest, including sliding-only.
-    need_manifest = args.experiment != "sliding" or "robust" in input_modes
-    cam_index = load_cam_index(cam_path, root) if need_manifest or cam_path.exists() else {}
-    palette = np.asarray(CLASS_COLORS)
+    context = prepare_pipeline_context(args)
     all_summaries: List[Dict[str, Any]] = []
 
-    # Load each checkpoint just once, then deduplicate repeated selection
-    # categories so expensive perturbation inference is not repeated.
-    for model_name, checkpoint_name in specs:
-        frame = cases[cases.model_name == model_name]
-        if frame.empty:
-            continue
-        checkpoint_path = resolve_path(checkpoint_name, root)
-        if not checkpoint_path.is_file():
-            raise FileNotFoundError(checkpoint_path)
-        print(f"\nModel: {model_name} ({len(frame)} selected rows)", flush=True)
-        model = load_trained_model(str(checkpoint_path), Configuration.DEVICE)
-        model.eval()
-        grouped = frame.groupby(["image_index", "image_path", "mask_path"], sort=False, dropna=False)
-        for (image_idx, image_name, mask_name), group in grouped:
-            image_path = resolve_path(str(image_name), root)
-            mask_path = resolve_path(str(mask_name), root)
-            clean, gt = load_single_sample(image_path, mask_path, Configuration.DEVICE)
-            if not bool((gt == target_id).any()):
-                print(f"Skipping {image_name}: no GT target pixels.")
-                continue
-            # Use the exact CAM input saved by the Grad-CAM run, especially
-            # under PGD; a newly sampled attack would invalidate comparisons.
-            for mode in input_modes:
-                key = (model_name, mode, target_id, str(image_path), str(mask_path))
-                cam_record = cam_index.get(key)
-                if args.experiment != "sliding" and cam_record is None:
-                    raise ValueError(f"Missing Grad-CAM++ record for {key}.")
-                image = load_reference_input(cam_record, clean, mode, root)
-                if tuple(image.shape[-2:]) != tuple(gt.shape):
-                    raise ValueError("Input and GT spatial dimensions differ.")
-                cam = None if args.experiment == "sliding" else load_cam_data(cam_record, root, tuple(gt.shape))
-                baseline = replacement_baseline(image, args.baseline, args.blur_kernel, args.blur_sigma)
-                original = infer_metrics(model, image, gt, target_id)
-                if cam_record is not None and cam_record.get("target_score") is not None:
-                    expected = cam_record["target_score"]
-                    actual = float(original["global_logit"][0])
-                    if pd.notna(expected) and not np.isclose(
-                        actual,
-                        float(expected),
-                        atol=1e-4,
-                        rtol=1e-4,
-                    ):
-                        raise ValueError(
-                            "Grad-CAM reference score mismatch after loading the exact "
-                            f"saved {mode} input: expected {float(expected):.10f}, "
-                            f"got {actual:.10f}. Regenerate Grad-CAM++ with the updated "
-                            "artifact pipeline and verify that the same checkpoint is used."
-                        )
-
-                source_id = hashlib.sha256(f"{image_path}|{mask_path}".encode()).hexdigest()[:12]
-                params = {
-                    "experiment": args.experiment, "patch_size": args.patch_size,
-                    "stride": args.stride, "tile_size": args.tile_size,
-                    "baseline": args.baseline, "blur_kernel": args.blur_kernel,
-                    "blur_sigma": args.blur_sigma, "budgets": args.budgets,
-                    "random_repeats": args.random_repeats, "seed": args.seed,
-                    "interior_threshold": args.interior_threshold,
-                    "sliding_gt_target": args.sliding_gt_target,
-                    "input_hash": tensor_hash(image),
-                }
-                if cam is not None:
-                    params["cam_hash"] = sha256_array(cam)
-                config_id = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:12]
-                directory = (output / sanitise_filename(model_name) / mode
-                             / f"img{int(float(image_idx)):05d}_{source_id}" / config_id)
-                directory.mkdir(parents=True, exist_ok=True)
-                with open(directory / "configuration.json", "w", encoding="utf-8") as file:
-                    json.dump(params, file, indent=2)
-                input_rgb = image.detach().cpu().numpy().astype(np.float32)
-                np.save(directory / "reference_input.npy", input_rgb)
-                np.save(directory / "original_prediction.npy", original["prediction"][0])
-                original_path = directory / "original_input.png"
-                plt.imsave(original_path, input_rgb[0].transpose(1, 2, 0))
-                sensitivity: Optional[NumpyHeatmap] = None
-                if args.experiment in ("all", "sliding"):
-                    sensitivity = sliding_occlusion(
-                        model, image, target_id, gt, args.patch_size, args.stride,
-                        baseline, args.perturbations_per_eval,
-                    )
-                    np.save(directory / "occlusion_global_signed.npy", sensitivity)
-                    save_heatmap(image, sensitivity, directory / "occlusion_global.png", "Full-image road-logit sensitivity")
-                    if args.sliding_gt_target:
-                        secondary = sliding_occlusion(
-                            model, image, target_id, gt, args.patch_size, args.stride,
-                            baseline, args.perturbations_per_eval, gt_target=True,
-                        )
-                        np.save(directory / "occlusion_gt_signed.npy", secondary)
-                        save_heatmap(image, secondary, directory / "occlusion_gt.png", "GT-road-logit sensitivity")
-                patch_frame = None
-                deletion_frame = None
-                previews: Dict[str, Tensor] = {}
-                tiles: List[Tile] = []
-                if cam is not None:
-                    # Ranking-based deletion measures whether the original CAM
-                    # predicts causal sensitivity better than controlled orders.
-                    tiles = build_tiles(cam, gt, target_id, args.tile_size, args.interior_threshold)
-                    patch_frame = tile_effects(model, image, baseline, gt, target_id, tiles,
-                                               args.perturbations_per_eval, original)
-                    patch_frame.to_csv(directory / "tile_effects.csv", index=False)
-                    all_rows: List[Dict[str, Any]] = []
-                    for policy in ("top", "bottom", "random", "matched_random"):
-                        repeats = args.random_repeats if policy in ("random", "matched_random") else 1
-                        for repeat in range(repeats):
-                            order = deletion_order(tiles, policy, seed=args.seed + repeat * 7919)
-                            rows, preview = ordered_deletion(
-                                model, image, baseline, gt, target_id, tiles,
-                                order, policy, repeat, args.budgets, original,
-                                args.perturbations_per_eval,
-                            )
-                            all_rows.extend(rows)
-                            if policy == "top":
-                                previews = preview
-                    deletion_frame = pd.DataFrame(all_rows)
-                    deletion_frame.to_csv(directory / "deletion.csv", index=False)
-                    save_curves(deletion_frame, directory)
-                    if previews:
-                        j = max(int(k.split("_")[1]) for k in previews if k.startswith("image_"))
-                        plt.imsave(directory / "occluded_top.png", previews[f"image_{j}"][0].cpu().permute(1, 2, 0).numpy())
-                        np.save(directory / "occluded_top_prediction.npy", previews[f"prediction_{j}"].numpy())
-                save_diagnostic(
-                    directory,
-                    image,
-                    gt,
-                    original["prediction"][0],
-                    cam,
-                    sensitivity,
-                    previews,
-                    tiles,
-                    palette,
-                    args.baseline,
-                )
-                case_record = {
-                    "model_name": model_name, "checkpoint_path": str(checkpoint_path),
-                    "image_index": int(float(image_idx)), "image_path": str(image_path),
-                    "mask_path": str(mask_path), "input_mode": mode,
-                    "target_class_id": target_id, "target_class_name": CLASS_NAMES[target_id],
-                    "baseline": args.baseline, "experiment": args.experiment,
-                    "experiment_id": config_id, "input_sha256": tensor_hash(image),
-                    "cam_path": str(cam_record.get("heatmap_npy_path", "")) if cam_record else "",
-                    "selection_categories": ";".join(dict.fromkeys(group.category.astype(str))),
-                    "selection_rows": ";".join(str(int(v)) for v in group.source_row_index),
-                    "output_dir": str(directory),
-                    "unique_image_id": source_id,
-                }
-                summary = compute_summary(case_record, original, patch_frame, deletion_frame, tiles)
-                pd.DataFrame([summary]).to_csv(directory / "summary.csv", index=False)
-                with open(directory / "summary.json", "w", encoding="utf-8") as file:
-                    serializable = {
-                        key: (None if isinstance(value, float) and not math.isfinite(value) else value)
-                        for key, value in summary.items()
-                    }
-                    json.dump(serializable, file, indent=2, allow_nan=False)
-                all_summaries.append(summary)
-                save_csv_upsert(output / "occlusion_manifest.csv", [summary],
-                                ("model_name", "image_path", "mask_path", "input_mode", "target_class_id", "experiment_id"))
-                print(f"  {mode}: {image_path.name} -> {directory}", flush=True)
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    # Each model is loaded exactly once. Per-image and per-mode helpers handle the
+    # nested scientific cases without exposing that implementation detail here.
+    for model_name, checkpoint_name in context.model_specs:
+        all_summaries.extend(
+            process_model(args, context, model_name, checkpoint_name)
+        )
 
     if all_summaries:
-        write_model_comparisons(output, all_summaries, args.seed)
-    print(f"\nOcclusion pipeline complete: {len(all_summaries)} unique model/input/image cases.")
+        write_model_comparisons(context.output, all_summaries, args.seed)
+
+    print(
+        "\nOcclusion pipeline complete: "
+        f"{len(all_summaries)} unique model/input/image cases."
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
