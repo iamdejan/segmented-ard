@@ -1763,12 +1763,14 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--baseline",
         choices=("blur", "gray", "white", "bright", "image_mean"),
-        default="blur",
+        default="white",
         help=(
-            "Occlusion replacement. 'blur' is recommended because it removes local "
-            "evidence without introducing an arbitrary solid color; 'white' and "
-            "'bright' are stronger high-intensity occluders, while 'gray' and "
+            "Occlusion replacement. 'white' is recommended because road, the default target class, has dark grey or grey color."
+            "By using 'white' color to occlude, the change in the segmentation will be more visible,"
+            " and this proves the Grad-CAM explanation;"
+            "'bright' is stronger high-intensity occluders, while 'gray' and "
             "'image_mean' remain useful sensitivity baselines."
+            "'blur' helps to blur the occlusion area."
         ),
     )
     parser.add_argument("--blur-kernel", type=int, default=31)
