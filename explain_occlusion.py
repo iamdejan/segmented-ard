@@ -90,6 +90,9 @@ DEFAULT_BUDGETS = (0.0, 0.05, 0.10, 0.20, 0.30)
 # fixed GT mask; keep their keys literal to help static TypedDict checking.
 MetricName = Literal["global_logit", "gt_logit", "road_iou"]
 METRIC_NAMES: Tuple[MetricName, ...] = ("global_logit", "gt_logit", "road_iou")
+# Blurred replacement is the recommended primary perturbation because it removes
+# local high-frequency evidence without introducing an arbitrary solid color.
+BaselineMode = Literal["blur", "gray", "image_mean", "white", "bright"]
 
 
 def resolve_path(path: Union[str, Path], root: Path) -> Path:
@@ -406,43 +409,99 @@ def gaussian_baseline(image: SingleImage, kernel_size: int, sigma: float) -> Sin
 
 
 @jaxtyped(typechecker=beartype)
-def replacement_baseline(image: SingleImage, mode: str, blur_kernel: int, blur_sigma: float) -> SingleImage:
-    """Select the replacement image for every independent occlusion policy.
+def image_mean_baseline(image: SingleImage) -> SingleImage:
+    """Fill an input with its own per-channel mean color.
+
+    This is a controlled constant-color alternative to neutral gray. It adapts to
+    the brightness and color balance of each scene, but still removes all local
+    spatial evidence inside an occluded tile. The baseline is useful for
+    sensitivity analysis, while Gaussian blur remains the recommended default.
 
     Steps
     -----
-    1. Validate NCHW RGB inputs and their [0, 1] intensity domain.
-    2. Create a neutral-gray or Gaussian-blurred baseline on the same device.
+    1. Average each RGB channel over the full spatial extent of the reference image.
+    2. Expand those three means back to the original image shape without changing
+       dtype or device.
+
+    Parameters
+    ----------
+    image : SingleImage
+        Reference NCHW RGB image tensor with one batch item.
+
+    Returns
+    -------
+    SingleImage
+        Spatially constant RGB tensor whose channel values match the reference
+        image's global channel means.
+    """
+    channel_means = image.mean(dim=(-2, -1), keepdim=True)
+    return channel_means.expand_as(image).clone()
+
+
+@jaxtyped(typechecker=beartype)
+def replacement_baseline(
+    image: SingleImage,
+    mode: BaselineMode,
+    blur_kernel: int,
+    blur_sigma: float,
+) -> SingleImage:
+    """Select the replacement image used by every occlusion policy.
+
+    A Gaussian-blurred reference is preferred over a fixed solid color because it
+    suppresses local texture and object detail while preserving coarse illumination
+    and scene color. This reduces the risk that the perturbation itself becomes an
+    out-of-distribution cue. ``gray``, ``white``, ``bright``, and ``image_mean``
+    remain available for baseline-sensitivity experiments.
+
+    Steps
+    -----
+    1. Validate the NCHW RGB input and its expected ``[0, 1]`` intensity domain.
+    2. Return a blurred, fixed-gray, white, bright, or image-adaptive mean-color replacement.
 
     Parameters
     ----------
     image : SingleImage
         Reference NCHW RGB image tensor, normally a single example.
-    mode : str
-        Input variant or replacement mode; see the owning function.
+    mode : BaselineMode
+        Replacement strategy: ``blur`` (recommended), ``gray``, ``white``, ``bright``, or ``image_mean``.
     blur_kernel : int
-        Odd Gaussian kernel size used in blurred baseline mode.
+        Odd Gaussian kernel size used only for ``blur`` mode.
     blur_sigma : float
-        Positive Gaussian blur standard deviation.
+        Positive Gaussian standard deviation used only for ``blur`` mode.
 
     Returns
     -------
     SingleImage
-        RGB replacement tensor with the same shape as the input.
+        RGB replacement tensor with the same shape, dtype, and device as ``image``.
 
     Raises
     ------
     ValueError
-        If the input is malformed, out of range, or the baseline mode is unknown.
+        If the input is malformed, outside the expected value range, or the
+        baseline mode is unknown.
     """
     if not torch.isfinite(image).all() or image.ndim != 4 or image.shape[1] != 3:
         raise ValueError("Expected a finite NCHW RGB tensor.")
     if float(image.min()) < -1e-5 or float(image.max()) > 1 + 1e-5:
         raise ValueError("Expected [0, 1] image tensors; check model preprocessing.")
-    if mode == "gray":
-        return torch.full_like(image, 0.5)
+
+    # Blurring is the primary baseline: it removes local discriminative structure
+    # without painting the road an arbitrary color that the model may interpret as
+    # a new semantic object or, conversely, as another road-like surface.
     if mode == "blur":
         return gaussian_baseline(image, blur_kernel, blur_sigma)
+    if mode == "gray":
+        return torch.full_like(image, 0.5)
+    if mode == "white":
+        # A saturated bright patch strongly removes road-like appearance and is a
+        # useful ablation when the user wants a deliberately conspicuous occluder.
+        return torch.ones_like(image)
+    if mode == "bright":
+        # A slightly off-white patch preserves the "bright occluder" intention while
+        # avoiding exact saturation at every pixel.
+        return torch.full_like(image, 0.9)
+    if mode == "image_mean":
+        return image_mean_baseline(image)
     raise ValueError(f"Unknown baseline: {mode}")
 
 
@@ -1119,6 +1178,7 @@ def save_diagnostic(
     directory: Path, image: SingleImage, gt: ClassMap, original_pred: NumpyClassMap,
     cam: Optional[NumpyHeatmap], sensitivity: Optional[NumpyHeatmap],
     preview: Dict[str, Tensor], tiles: Sequence[Tile], palette: NumpyPalette,
+    baseline_mode: BaselineMode,
 ) -> None:
     """Write the eight-panel reference, attribution, and deletion comparison.
 
@@ -1148,6 +1208,8 @@ def save_diagnostic(
         Deterministic tile metadata spanning the input image.
     palette : NumpyPalette
         RGB class-color lookup table from dataset configuration.
+    baseline_mode : BaselineMode
+        Replacement strategy used to create the displayed occluded input.
 
     Returns
     -------
@@ -1177,7 +1239,10 @@ def save_diagnostic(
             t = tiles[tile_idx]
             visual[t.y0:t.y1, t.x0:t.x1] = 0.65 * visual[t.y0:t.y1, t.x0:t.x1] + 0.35 * np.array([1, 0.2, 0.1])
         panels.append(("Top-ranked deletion tiles", visual))
-        panels.append(("Occluded input", preview[f"image_{j}"][0].cpu().permute(1, 2, 0).numpy()))
+        panels.append((
+            f"Occluded input ({baseline_mode})",
+            preview[f"image_{j}"][0].cpu().permute(1, 2, 0).numpy(),
+        ))
         panels.append(("Occluded prediction", colourise(preview[f"prediction_{j}"].numpy(), palette)))
     else:
         panels.extend([(label, np.zeros_like(rgb)) for label in ("Selected tiles", "Occluded input", "Occluded prediction")])
@@ -1695,7 +1760,17 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--experiment", choices=("sliding", "deletion", "all"), default="all")
     parser.add_argument("--patch-size", type=parse_pair, default=(32, 32))
     parser.add_argument("--stride", type=parse_pair, default=(32, 32))
-    parser.add_argument("--baseline", choices=("gray", "blur"), default="gray")
+    parser.add_argument(
+        "--baseline",
+        choices=("blur", "gray", "white", "bright", "image_mean"),
+        default="blur",
+        help=(
+            "Occlusion replacement. 'blur' is recommended because it removes local "
+            "evidence without introducing an arbitrary solid color; 'white' and "
+            "'bright' are stronger high-intensity occluders, while 'gray' and "
+            "'image_mean' remain useful sensitivity baselines."
+        ),
+    )
     parser.add_argument("--blur-kernel", type=int, default=31)
     parser.add_argument("--blur-sigma", type=float, default=8.0)
     parser.add_argument("--perturbations-per-eval", type=int, default=4)
@@ -1738,7 +1813,9 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--interior-threshold must lie in (0,1].")
     if any(x > y for x, y in zip(args.stride, args.patch_size, strict=True)):
         raise ValueError("Sliding stride cannot exceed patch size.")
-    if args.blur_kernel < 3 or args.blur_kernel % 2 == 0 or args.blur_sigma <= 0:
+    if args.baseline == "blur" and (
+        args.blur_kernel < 3 or args.blur_kernel % 2 == 0 or args.blur_sigma <= 0
+    ):
         raise ValueError("Gaussian blur requires an odd kernel >= 3 and sigma > 0.")
 
 
@@ -1921,8 +1998,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
                         j = max(int(k.split("_")[1]) for k in previews if k.startswith("image_"))
                         plt.imsave(directory / "occluded_top.png", previews[f"image_{j}"][0].cpu().permute(1, 2, 0).numpy())
                         np.save(directory / "occluded_top_prediction.npy", previews[f"prediction_{j}"].numpy())
-                save_diagnostic(directory, image, gt, original["prediction"][0],
-                                cam, sensitivity, previews, tiles, palette)
+                save_diagnostic(
+                    directory,
+                    image,
+                    gt,
+                    original["prediction"][0],
+                    cam,
+                    sensitivity,
+                    previews,
+                    tiles,
+                    palette,
+                    args.baseline,
+                )
                 case_record = {
                     "model_name": model_name, "checkpoint_path": str(checkpoint_path),
                     "image_index": int(float(image_idx)), "image_path": str(image_path),
