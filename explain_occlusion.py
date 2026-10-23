@@ -92,7 +92,7 @@ MetricName = Literal["global_logit", "gt_logit", "road_iou"]
 METRIC_NAMES: Tuple[MetricName, ...] = ("global_logit", "gt_logit", "road_iou")
 # Blurred replacement is the recommended primary perturbation because it removes
 # local high-frequency evidence without introducing an arbitrary solid color.
-BaselineMode = Literal["blur", "gray", "image_mean", "white", "bright"]
+BaselineMode = Literal["blur", "gray", "image_mean", "white", "bright", "noise"]
 ConcreteInputMode = Literal["clean", "robust"]
 ModelSpec = Tuple[str, str]
 CamKey = Tuple[str, str, int, str, str]
@@ -485,36 +485,115 @@ def image_mean_baseline(image: SingleImage) -> SingleImage:
     return channel_means.expand_as(image).clone()
 
 
+def derive_noise_seed(base_seed: int, image_index: int) -> int:
+    """Derive a stable per-image random seed for the colored-noise baseline.
+
+    Using one global noise realization for every source image would repeatedly
+    place identical random structures at the same coordinates. A per-image seed
+    avoids that unwanted spatial coupling while preserving exact reproducibility
+    for repeated runs and paired checkpoint comparisons.
+
+    Steps
+    -----
+    1. Combine the user-provided base seed with the stable dataset image index.
+    2. Hash the pair so nearby image indices do not produce trivially related seeds.
+    3. Restrict the result to PyTorch's nonnegative 63-bit seed range.
+
+    Parameters
+    ----------
+    base_seed : int
+        Global reproducibility seed supplied through ``--seed``.
+    image_index : int
+        Stable dataset/test-split image index used to identify the source image.
+
+    Returns
+    -------
+    int
+        Deterministic nonnegative seed used only for the colored-noise baseline.
+    """
+    payload = f"{base_seed}:{image_index}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False) % (2**63 - 1)
+
+
+@jaxtyped(typechecker=beartype)
+def uniform_noise_baseline(image: SingleImage, seed: int) -> SingleImage:
+    """Generate a reproducible uniform colored-noise replacement image.
+
+    Each RGB value is sampled independently from ``Uniform(0, 1)``. Independent
+    channel sampling is important: using one random value shared across RGB would
+    create grayscale noise rather than the requested colored noise. The complete
+    noise tensor is generated once and then reused for every tile and deletion
+    budget in the case so the occlusion baseline itself does not change between
+    interventions.
+
+    Steps
+    -----
+    1. Create a private CPU random generator and initialize it with ``seed``.
+    2. Sample one independent value in ``[0, 1)`` for every RGB pixel/channel.
+    3. Move the noise tensor to the reference image's device and dtype.
+
+    Parameters
+    ----------
+    image : SingleImage
+        Reference NCHW RGB tensor whose shape, dtype, and device are preserved.
+    seed : int
+        Deterministic seed controlling this case's colored-noise realization.
+
+    Returns
+    -------
+    SingleImage
+        RGB tensor with independent uniformly distributed values in ``[0, 1)``.
+    """
+    # Generate on CPU with a private RNG so creating the baseline does not consume
+    # CUDA/global random state that is also used by other experiment components.
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    noise = torch.rand(
+        tuple(image.shape),
+        dtype=torch.float32,
+        device="cpu",
+        generator=generator,
+    )
+    return cast(
+        SingleImage,
+        noise.to(device=image.device, dtype=image.dtype),
+    )
+
+
 @jaxtyped(typechecker=beartype)
 def replacement_baseline(
     image: SingleImage,
     mode: BaselineMode,
     blur_kernel: int,
     blur_sigma: float,
+    noise_seed: int = 0,
 ) -> SingleImage:
     """Select the replacement image used by every occlusion policy.
 
     A Gaussian-blurred reference is preferred over a fixed solid color because it
     suppresses local texture and object detail while preserving coarse illumination
     and scene color. This reduces the risk that the perturbation itself becomes an
-    out-of-distribution cue. ``gray``, ``white``, ``bright``, and ``image_mean``
-    remain available for baseline-sensitivity experiments.
+    out-of-distribution cue. ``gray``, ``white``, ``bright``, ``noise``, and
+    ``image_mean`` remain available for baseline-sensitivity experiments.
 
     Steps
     -----
     1. Validate the NCHW RGB input and its expected ``[0, 1]`` intensity domain.
-    2. Return a blurred, fixed-gray, white, bright, or image-adaptive mean-color replacement.
+    2. Return a blurred, constant-color, colored-noise, or image-adaptive replacement.
 
     Parameters
     ----------
     image : SingleImage
         Reference NCHW RGB image tensor, normally a single example.
     mode : BaselineMode
-        Replacement strategy: ``blur`` (recommended), ``gray``, ``white``, ``bright``, or ``image_mean``.
+        Replacement strategy: ``blur``, ``gray``, ``white``, ``bright``, ``noise``, or ``image_mean``.
     blur_kernel : int
         Odd Gaussian kernel size used only for ``blur`` mode.
     blur_sigma : float
         Positive Gaussian standard deviation used only for ``blur`` mode.
+    noise_seed : int, optional
+        Random seed used only for ``noise`` mode. Defaults to ``0``.
 
     Returns
     -------
@@ -547,6 +626,10 @@ def replacement_baseline(
         # A slightly off-white patch preserves the "bright occluder" intention while
         # avoiding exact saturation at every pixel.
         return torch.full_like(image, 0.9)
+    if mode == "noise":
+        # Colored noise intentionally destroys local texture and color continuity.
+        # One full-image realization is reused across all interventions in this case.
+        return uniform_noise_baseline(image, noise_seed)
     if mode == "image_mean":
         return image_mean_baseline(image)
     raise ValueError(f"Unknown baseline: {mode}")
@@ -1809,15 +1892,16 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--stride", type=parse_pair, default=(32, 32))
     parser.add_argument(
         "--baseline",
-        choices=("blur", "gray", "white", "bright", "image_mean"),
+        choices=("blur", "gray", "white", "bright", "noise", "image_mean"),
         default="white",
         help=(
             "Occlusion replacement. 'white' is recommended because road, the default target class, has dark grey or grey color."
             "By using 'white' color to occlude, the change in the segmentation will be more visible,"
             " and this proves the Grad-CAM explanation;"
-            "'bright' is stronger high-intensity occluders, while 'gray' and "
-            "'image_mean' remain useful sensitivity baselines."
-            "'blur' helps to blur the occlusion area."
+            "'bright' is a high-intensity occluder; 'noise' replaces regions "
+            "with reproducible uniform colored RGB noise; 'gray' and 'image_mean' "
+            "remain useful sensitivity baselines. 'blur' suppresses local detail "
+            "while preserving coarse image structure."
         ),
     )
     parser.add_argument("--blur-kernel", type=int, default=31)
@@ -2109,6 +2193,11 @@ def prepare_case_directory(
         "budgets": args.budgets,
         "random_repeats": args.random_repeats,
         "seed": args.seed,
+        "noise_seed": (
+            derive_noise_seed(args.seed, image_index)
+            if args.baseline == "noise"
+            else None
+        ),
         "interior_threshold": args.interior_threshold,
         "sliding_gt_target": args.sliding_gt_target,
         "input_hash": tensor_hash(image),
@@ -2536,6 +2625,11 @@ def build_case_record(
         "target_class_id": context.target_id,
         "target_class_name": CLASS_NAMES[context.target_id],
         "baseline": args.baseline,
+        "noise_seed": (
+            derive_noise_seed(args.seed, image_index)
+            if args.baseline == "noise"
+            else None
+        ),
         "experiment": args.experiment,
         "experiment_id": config_id,
         "input_sha256": tensor_hash(image),
@@ -2708,8 +2802,13 @@ def process_input_mode(
         cam = load_cam_data(cam_record, context.root, tuple(gt.shape))
 
     baseline_mode = cast(BaselineMode, args.baseline)
+    noise_seed = derive_noise_seed(args.seed, image_index)
     baseline = replacement_baseline(
-        image, baseline_mode, args.blur_kernel, args.blur_sigma
+        image,
+        baseline_mode,
+        args.blur_kernel,
+        args.blur_sigma,
+        noise_seed=noise_seed,
     )
     original = infer_metrics(model, image, gt, context.target_id)
     validate_cam_reference_score(cam_record, original, mode)
