@@ -10,6 +10,7 @@ Grad-CAM++ score. Unusable Grad-CAM++ maps raise errors without a fallback.
 """
 
 import argparse
+import hashlib
 import re
 from pathlib import Path as FilePath
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, cast
@@ -1077,6 +1078,143 @@ def generate_robust_input(
     return cast(BatchImage, robust_image.detach())
 
 
+@jaxtyped(typechecker=beartype)
+def save_input_artifact(
+    output_dir: FilePath,
+    model_name: str,
+    input_mode: str,
+    image_index: int,
+    source_digest: str,
+    image: BatchImage,
+) -> Tuple[FilePath, str]:
+    """Persist one exact model input in a mode-specific artifact directory.
+
+    The saved array is the canonical input for later faithfulness experiments.
+    Clean and PGD-perturbed tensors are deliberately stored under different
+    directory trees so a robust artifact can never overwrite or be mistaken for
+    its clean counterpart.
+
+    Steps
+    -----
+    1. Validate that the concrete input mode is either ``clean`` or ``robust``.
+    2. Convert the exact NCHW tensor to contiguous float32 CPU storage.
+    3. Save it atomically under ``_inputs/<mode>/<model>/`` and hash its bytes.
+
+    Parameters
+    ----------
+    output_dir : FilePath
+        Root directory receiving Grad-CAM++ artifacts.
+    model_name : str
+        Human-readable checkpoint identifier used to namespace the artifact.
+    input_mode : str
+        Concrete input variant, either ``clean`` or ``robust``.
+    image_index : int
+        Stable dataset index of the source image.
+    source_digest : str
+        Short digest of the resolved image/mask paths.
+    image : BatchImage
+        Exact NCHW tensor that will subsequently be scored and explained.
+
+    Returns
+    -------
+    Tuple[FilePath, str]
+        Saved ``.npy`` path and SHA-256 digest of its contiguous bytes.
+
+    Raises
+    ------
+    ValueError
+        If ``input_mode`` is not ``clean`` or ``robust``.
+    OSError
+        If the artifact cannot be written or atomically replaced.
+    """
+    if input_mode not in {"clean", "robust"}:
+        raise ValueError("input_mode must be either 'clean' or 'robust'.")
+
+    # Persist exactly the values used by the model. Explicit float32 storage keeps
+    # the artifact format stable and matches the network input dtype in this project.
+    cpu_input = (
+        image.detach()
+        .to(dtype=torch.float32, device="cpu")
+        .contiguous()
+        .numpy()
+    )
+    input_digest = hashlib.sha256(cpu_input.tobytes()).hexdigest()
+
+    # Separate mode-first directories make provenance visually obvious and prevent
+    # a robust run from replacing the clean tensor for the same source image.
+    artifact_path = (
+        output_dir
+        / "_inputs"
+        / input_mode
+        / sanitise_filename(model_name)
+        / f"img{image_index:05d}_{source_digest}.npy"
+    )
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = artifact_path.with_suffix(".tmp.npy")
+    np.save(temporary_path, cpu_input, allow_pickle=False)
+    temporary_path.replace(artifact_path)
+    return artifact_path, input_digest
+
+
+@jaxtyped(typechecker=beartype)
+def load_saved_input_artifact(
+    artifact_path: FilePath,
+    reference: BatchImage,
+    expected_hash: str,
+) -> BatchImage:
+    """Reload a saved input so scoring and CAM use the persisted artifact.
+
+    Reloading immediately after persistence makes the NPY file the single source
+    of truth shared with ``explain_occlusion.py``. This avoids a subtle mismatch
+    where the manifest score could otherwise come from one in-memory PGD tensor
+    while the later faithfulness run reads another tensor from disk.
+
+    Steps
+    -----
+    1. Load the saved NPY without pickle support and validate its shape.
+    2. Verify its SHA-256 against the digest computed at save time.
+    3. Move a private copy back to the model device using the reference dtype.
+
+    Parameters
+    ----------
+    artifact_path : FilePath
+        Path of the just-saved clean or robust NPY artifact.
+    reference : BatchImage
+        Original in-memory tensor supplying the expected shape, dtype, and device.
+    expected_hash : str
+        SHA-256 digest recorded when the artifact was written.
+
+    Returns
+    -------
+    BatchImage
+        Reloaded tensor whose bytes are guaranteed to match the saved artifact.
+
+    Raises
+    ------
+    ValueError
+        If the stored shape or hash does not match the expected input.
+    OSError
+        If the NPY artifact cannot be read.
+    """
+    array = np.load(artifact_path, allow_pickle=False)
+    if tuple(array.shape) != tuple(reference.shape):
+        raise ValueError(
+            f"Saved input shape {array.shape} does not match expected "
+            f"{tuple(reference.shape)}."
+        )
+    actual_hash = hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"Saved input SHA-256 mismatch for {artifact_path}: "
+            f"expected {expected_hash}, got {actual_hash}."
+        )
+    tensor = torch.from_numpy(np.array(array, copy=True)).to(
+        device=reference.device,
+        dtype=reference.dtype,
+    )
+    return cast(BatchImage, tensor)
+
+
 def case_output_paths(
     output_dir: FilePath,
     row: pd.Series,
@@ -1292,26 +1430,78 @@ def explain_cases_for_model(
         # but does not define or restrict the global Grad-CAM++ target score.
         target_numpy = tensor_class_map_to_numpy(target)
 
-        # Build robust input only when requested because PGD requires ten backward
-        # passes and would otherwise add substantial cost to clean-only explanations.
-        input_variants: List[Tuple[str, BatchImage]] = []
-        if input_mode in {"clean", "all"}:
-            input_variants.append(("clean", clean_image))
+        source_digest = hashlib.sha256(
+            f"{image_path.resolve()}|{mask_path.resolve()}".encode()
+        ).hexdigest()[:12]
+
+        # Always persist the clean tensor, including robust-only runs. The clean
+        # artifact records the PGD starting point and lives in a directory that is
+        # physically separate from every adversarial artifact.
+        clean_input_path, clean_input_digest = save_input_artifact(
+            output_dir=output_dir,
+            model_name=model_name,
+            input_mode="clean",
+            image_index=image_index,
+            source_digest=source_digest,
+            image=clean_image,
+        )
+        clean_reference = load_saved_input_artifact(
+            artifact_path=clean_input_path,
+            reference=clean_image,
+            expected_hash=clean_input_digest,
+        )
+
+        # PGD is intentionally generated only once per checkpoint/source image.
+        # The resulting tensor is saved immediately and reloaded before any score
+        # or Grad-CAM computation, making that NPY the canonical robust reference.
+        robust_input_path: Optional[FilePath] = None
+        robust_input_digest: Optional[str] = None
+        robust_reference: Optional[BatchImage] = None
         if input_mode in {"robust", "all"}:
+            robust_generated = generate_robust_input(
+                model=model,
+                image=clean_reference,
+                target=target,
+            )
+            robust_input_path, robust_input_digest = save_input_artifact(
+                output_dir=output_dir,
+                model_name=model_name,
+                input_mode="robust",
+                image_index=image_index,
+                source_digest=source_digest,
+                image=robust_generated,
+            )
+            robust_reference = load_saved_input_artifact(
+                artifact_path=robust_input_path,
+                reference=robust_generated,
+                expected_hash=robust_input_digest,
+            )
+            del robust_generated
+
+        input_variants: List[Tuple[str, BatchImage, FilePath, str]] = []
+        if input_mode in {"clean", "all"}:
+            input_variants.append(
+                ("clean", clean_reference, clean_input_path, clean_input_digest)
+            )
+        if input_mode in {"robust", "all"}:
+            if (
+                robust_reference is None
+                or robust_input_path is None
+                or robust_input_digest is None
+            ):
+                raise RuntimeError("Robust input artifact was not created.")
             input_variants.append(
                 (
                     "robust",
-                    generate_robust_input(
-                        model=model,
-                        image=clean_image,
-                        target=target,
-                    ),
+                    robust_reference,
+                    robust_input_path,
+                    robust_input_digest,
                 )
             )
 
-        for concrete_input_mode, image in input_variants:
-            # Inference supplies the diagnostic prediction and full-image mean
-            # class logit; CAM performs its own gradient-enabled forward pass.
+        for concrete_input_mode, image, input_artifact_path, input_digest in input_variants:
+            # The tensor below was reloaded from the exact NPY that occlusion will
+            # consume later, so target_score and Grad-CAM++ share its exact bytes.
             with torch.no_grad():
                 logits_raw = model(image)
             if not isinstance(logits_raw, Tensor):
@@ -1330,13 +1520,33 @@ def explain_cases_for_model(
             # All selected rows for this image share the same target and input.
             # Generate the expensive map only once and reuse it for their panels.
             target_score = cam_target(cast(SingleLogits, logits[0]))
+            # Give the CAM library a private clone so hooks cannot accidentally
+            # alter the canonical tensor used for scoring or saved for occlusion.
+            cam_input = cast(BatchImage, image.detach().clone())
             heatmap = generate_cam(
                 model=model,
                 target_layer=target_layer,
-                image=image,
+                image=cam_input,
                 target=cam_target,
                 epsilon=epsilon,
             )
+
+            # A CAM implementation is not expected to mutate its input. Detecting
+            # such mutation here is preferable to producing a manifest whose score,
+            # heatmap, and saved NPY silently refer to different tensors.
+            cam_input_numpy = (
+                cam_input.detach()
+                .to(dtype=torch.float32, device="cpu")
+                .contiguous()
+                .numpy()
+            )
+            cam_input_digest = hashlib.sha256(cam_input_numpy.tobytes()).hexdigest()
+            if cam_input_digest != input_digest:
+                raise RuntimeError(
+                    "Grad-CAM++ modified its input tensor; refusing to save "
+                    "inconsistent explanation artifacts."
+                )
+
             input_numpy = tensor_image_to_numpy(image)
             prediction_numpy = tensor_class_map_to_numpy(prediction)
 
@@ -1357,6 +1567,12 @@ def explain_cases_for_model(
                     target_class=target_class,
                     input_mode=concrete_input_mode,
                 )
+
+                # PNG heatmaps are color-rendered and lose numerical fidelity;
+                # save the actual library-normalized spatial CAM for occlusion.
+                heatmap_npy_path = heatmap_path.with_suffix(".npy")
+                heatmap_npy_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(heatmap_npy_path, heatmap.astype(np.float32), allow_pickle=False)
 
                 save_case_visualisations(
                     image=input_numpy,
@@ -1403,6 +1619,29 @@ def explain_cases_for_model(
                         "target_layer": layer_name,
                         "method_used": "gradcam++",
                         "heatmap_path": str(heatmap_path),
+                        "heatmap_npy_path": str(heatmap_npy_path),
+                        # Keep legacy exact-input fields while also recording
+                        # explicit clean/robust paths for unambiguous consumers.
+                        "input_tensor_path": str(input_artifact_path),
+                        "input_sha256": input_digest,
+                        "input_artifact_mode": concrete_input_mode,
+                        "clean_input_tensor_path": str(clean_input_path),
+                        "clean_input_sha256": clean_input_digest,
+                        "robust_input_tensor_path": (
+                            str(robust_input_path)
+                            if robust_input_path is not None
+                            else ""
+                        ),
+                        "robust_input_sha256": (
+                            robust_input_digest
+                            if robust_input_digest is not None
+                            else ""
+                        ),
+                        "attack_provenance": (
+                            "evaluate_robustness.pgd_attack defaults"
+                            if concrete_input_mode == "robust"
+                            else "none"
+                        ),
                         "overlay_path": str(overlay_path),
                         "panel_path": str(panel_path),
                     }
@@ -1414,7 +1653,9 @@ def explain_cases_for_model(
 
         # Release per-image tensors before the next group because manifests can
         # contain hundreds of cases and robust mode adds an adversarial tensor too.
-        del clean_image, target, input_variants, image
+        del clean_image, clean_reference, target, input_variants, image
+        if robust_reference is not None:
+            del robust_reference
 
     return manifest_rows
 
@@ -1651,20 +1892,20 @@ def main() -> None:
         )
         all_manifest_rows.extend(model_rows)
 
-        # Persist each completed checkpoint immediately. If a later checkpoint
-        # runs out of memory, the work that already finished remains recorded and
-        # a subsequent invocation can safely append the remaining checkpoints.
+        # Upsert manifest rows for reproducible reruns. The old append behavior
+        # could write mismatched columns after new artifact fields were added and
+        # produced duplicates when a checkpoint was processed twice.
         model_manifest = pd.DataFrame(model_rows)
         if not model_manifest.empty:
-            manifest_exists = (
-                manifest_path.is_file() and manifest_path.stat().st_size > 0
-            )
-            model_manifest.to_csv(
-                manifest_path,
-                mode="a",
-                header=not manifest_exists,
-                index=False,
-            )
+            if manifest_path.is_file() and manifest_path.stat().st_size > 0:
+                previous = pd.read_csv(manifest_path)
+                model_manifest = pd.concat(
+                    [previous, model_manifest], ignore_index=True
+                )
+            model_manifest.drop_duplicates(
+                subset=["source_row_index", "model_name", "input_mode", "target_class_id"],
+                keep="last",
+            ).to_csv(manifest_path, index=False)
 
         # Release the checkpoint before loading the next one. The explanation
         # workload uses backward graphs, so explicit cleanup avoids cumulative VRAM.

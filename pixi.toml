@@ -28,7 +28,7 @@ cmd = "python3 evaluate_{{aspect}}.py"
 
 [tasks.explain]
 args = [
-    {"arg" = "mode", "choices" = ["choose", "gradcam"]}
+    {"arg" = "mode", "choices" = ["choose", "gradcam", "occlusion"]}
 ]
 cmd = "python3 explain_{{mode}}.py"
 
@@ -65,3 +65,4 @@ pyqt6 = ">=6.9.1, <7"
 tqdm = ">=4.70.0, <5"
 albumentations = ">=2.0.8, <3"
 grad-cam = ">=1.5.7, <2"
+captum = ">=0.8.0, <1"
