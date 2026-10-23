@@ -28,7 +28,7 @@ cmd = "python3 evaluate_{{aspect}}.py"
 
 [tasks.explain]
 args = [
-    {"arg" = "mode", "choices" = ["choose", "gradcam", "occlusion"]}
+    {"arg" = "mode", "choices" = ["choose", "gradcam", "occlusion", "cka"]}
 ]
 cmd = "python3 explain_{{mode}}.py"
 

@@ -25,6 +25,7 @@ from beartype import beartype
 from jaxtyping import Float, jaxtyped
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+from torchinfo import summary
 
 from evaluate_performance import (
     BDDSegmentationDataset,
@@ -678,6 +679,42 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,  # identical row ordering is mandatory for teacher/student CKA
         num_workers=Configuration.NUM_WORKERS,
+    )
+
+    # Print the representation of the teacher model
+    print(
+        summary(
+            model=unwrap_model(teacher),
+            input_size=(
+                args.batch_size,
+                Configuration.CHANNELS,
+                Configuration.IMAGE_HEIGHT,
+                Configuration.IMAGE_WIDTH,
+            ),
+            col_names=["output_size", "num_params", "trainable"],
+            col_width=30,
+            row_settings=["var_names"],
+            depth=5,
+            verbose=0,
+        )
+    )
+
+    # Print the representation of the student model
+    print(
+        summary(
+            model=unwrap_model(student),
+            input_size=(
+                args.batch_size,
+                Configuration.CHANNELS,
+                Configuration.IMAGE_HEIGHT,
+                Configuration.IMAGE_WIDTH,
+            ),
+            col_names=["output_size", "num_params", "trainable"],
+            col_width=30,
+            row_settings=["var_names"],
+            depth=5,
+            verbose=0,
+        )
     )
 
     print("Computing stage-wise linear CKA...")
