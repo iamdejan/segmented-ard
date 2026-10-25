@@ -1,15 +1,17 @@
-"""Centered Kernel Alignment evaluation for teacher and student encoders.
+"""Centered Kernel Alignment evaluation for teacher and student U-Net models.
 
 This script mirrors the BDD100k loading and checkpoint conventions used by
-``evaluate_performance.py`` and compares the internal encoder representations of
-a teacher model and a student model with linear Centered Kernel Alignment (CKA).
+``evaluate_performance.py`` and compares representative internal outputs across
+the complete teacher and student segmentation pathways with linear Centered
+Kernel Alignment (CKA).
 
-The compared representations come from explicitly named encoder modules, which
-makes every CKA row and column traceable to the exact module output that
-generated it. Each selected output is globally average pooled from
-``(B, C, H, W)`` to ``(B, C)`` before comparison. The implementation
-accumulates sufficient statistics batch-by-batch, so it does not keep the
-complete activation dataset or any ``N x N`` Gram matrix in memory.
+The default comparison includes five encoder endpoints, all five U-Net decoder
+block outputs, and the final segmentation-head output. Each selected
+``(B, C, H, W)`` output is globally average pooled to ``(B, C)`` inside its
+forward hook. Pooling inside the hook keeps high-resolution decoder activations
+from being retained after their producing module has finished. Dataset-level CKA
+statistics are accumulated batch-by-batch, so the implementation does not keep
+the complete activation dataset or any ``N x N`` Gram matrix in memory.
 """
 
 import argparse
@@ -42,42 +44,57 @@ from evaluate_performance import (
 
 
 # CKA operates on one vector per image and selected module output. The anonymous
-# feature axis allows teacher and student layers to have different channel
-# widths while the named batch axis still verifies corresponding image rows.
+# feature axis permits teacher/student layers to have different channel widths,
+# while the named batch axis verifies that rows correspond to identical images.
 PooledRepresentation = Float[Tensor, "b _feature"]
 CKAMatrix = Float[np.ndarray, "teacher_layer student_layer"]
 FeatureMapTensor = Float[Tensor, "b c h w"]
-ActivationStore = Dict[str, List[Tensor]]
+ActivationShape = Tuple[int, int, int]
+ActivationRecord = Tuple[PooledRepresentation, ActivationShape]
+ActivationStore = Dict[str, List[ActivationRecord]]
 ForwardHook = Callable[[nn.Module, Tuple[object, ...], object], None]
 
 
-# These defaults identify the exact encoder modules whose *outputs* correspond
-# to the five multi-resolution feature maps used by the U-Net decoder. Keeping
-# the names explicit makes the exported CKA matrix auditable instead of relying
-# on anonymous stage positions such as T1/S1.
+# These defaults sample the complete U-Net computation path at meaningful stage
+# boundaries instead of restricting CKA to the encoders. ``decoder.center`` is
+# intentionally omitted because it is Identity for these checkpoints and would
+# duplicate the deepest encoder representation. Individual convolutions inside
+# each decoder block are also omitted because the block output is the natural
+# stage representation passed to the following decoder block.
 DEFAULT_TEACHER_LAYERS: Tuple[str, ...] = (
-    "relu",
-    "layer1",
-    "layer2",
-    "layer3",
-    "layer4",
+    "encoder.relu",
+    "encoder.layer1",
+    "encoder.layer2",
+    "encoder.layer3",
+    "encoder.layer4",
+    "decoder.blocks.0",
+    "decoder.blocks.1",
+    "decoder.blocks.2",
+    "decoder.blocks.3",
+    "decoder.blocks.4",
+    "segmentation_head",
 )
 DEFAULT_STUDENT_LAYERS: Tuple[str, ...] = (
-    "features.1",
-    "features.3",
-    "features.6",
-    "features.13",
-    "features.18",
+    "encoder.features.1",
+    "encoder.features.3",
+    "encoder.features.6",
+    "encoder.features.13",
+    "encoder.features.18",
+    "decoder.blocks.0",
+    "decoder.blocks.1",
+    "decoder.blocks.2",
+    "decoder.blocks.3",
+    "decoder.blocks.4",
+    "segmentation_head",
 )
 
 
 def unwrap_model(model: nn.Module) -> nn.Module:
     """Return the underlying model when evaluation uses ``nn.DataParallel``.
 
-    The serialized checkpoints may contain either a plain module or a
-    ``DataParallel`` wrapper. CKA needs direct access to the segmentation
-    model's ``encoder`` attribute, so this helper normalizes both cases before
-    feature extraction.
+    CKA hooks must resolve names against the actual segmentation model rather
+    than against the outer ``DataParallel`` wrapper. This helper normalizes both
+    checkpoint forms before module lookup.
 
     Steps
     -----
@@ -93,78 +110,40 @@ def unwrap_model(model: nn.Module) -> nn.Module:
     Returns
     -------
     nn.Module
-        The underlying segmentation model that exposes encoder components.
+        Underlying segmentation model used for named-module lookup and forward
+        execution.
     """
-    # DataParallel stores the user model under ``module``; unwrapping it keeps
-    # encoder access consistent with the visualization path in the template.
+    # ``DataParallel`` stores the user model under ``module``. Unwrapping keeps
+    # CLI paths such as ``decoder.blocks.0`` independent of checkpoint wrapping.
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-def get_encoder(model: nn.Module) -> nn.Module:
-    """Return the encoder module from a loaded segmentation model.
+def normalize_layer_names(layer_names: Sequence[str]) -> List[str]:
+    """Normalize requested CKA module paths relative to the full model.
 
-    The CKA analysis compares encoder representations only. Centralizing the
-    encoder lookup avoids duplicating wrapper handling and gives a clear error
-    when a checkpoint does not expose the architecture expected by this script.
-
-    Steps
-    -----
-    1. Unwrap ``nn.DataParallel`` when present.
-    2. Read the model's ``encoder`` attribute.
-    3. Validate that the attribute is an ``nn.Module`` before returning it.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Loaded teacher or student segmentation model.
-
-    Returns
-    -------
-    nn.Module
-        Encoder module used for named-layer activation extraction.
-
-    Raises
-    ------
-    AttributeError
-        If the model does not expose an ``nn.Module`` named ``encoder``.
-    """
-    # CKA layer names are resolved relative to the encoder so the command line
-    # stays concise (for example ``layer3`` rather than ``encoder.layer3``).
-    base_model = unwrap_model(model)
-    encoder = getattr(base_model, "encoder", None)
-    if not isinstance(encoder, nn.Module):
-        raise AttributeError(
-            f"{base_model.__class__.__name__} does not expose an nn.Module "
-            "'encoder' attribute required for named-layer CKA."
-        )
-    return encoder
-
-
-def normalize_encoder_layer_names(layer_names: Sequence[str]) -> List[str]:
-    """Normalize requested layer names to encoder-relative module paths.
-
-    Users may provide either ``layer3`` or ``encoder.layer3``. Internally the
-    hooks are registered on ``model.encoder``, so the optional ``encoder.``
-    prefix is removed while preserving the requested ordering.
+    Full paths such as ``encoder.layer3`` and ``decoder.blocks.1`` are preserved.
+    For backward compatibility with the earlier encoder-only script, an input
+    such as ``layer3`` or ``features.13`` is interpreted as encoder-relative and
+    receives the ``encoder.`` prefix.
 
     Steps
     -----
-    1. Strip whitespace from every requested layer path.
-    2. Remove a leading ``encoder.`` prefix when present.
-    3. Reject empty or duplicated paths because they would make matrix labels
-       ambiguous.
+    1. Strip whitespace from each requested path.
+    2. Preserve paths rooted at ``encoder``, ``decoder``, or
+       ``segmentation_head``.
+    3. Prefix any legacy encoder-relative path with ``encoder.``.
+    4. Reject empty or duplicate paths because ambiguous matrix labels would
+       make the exported comparison difficult to audit.
 
     Parameters
     ----------
     layer_names : Sequence[str]
-        Requested module paths, either encoder-relative or prefixed by
-        ``encoder.``.
+        Requested full-model module paths or legacy encoder-relative paths.
 
     Returns
     -------
     List[str]
-        Ordered encoder-relative module paths suitable for
-        ``encoder.named_modules()`` lookup.
+        Ordered full-model module paths suitable for ``model.named_modules()``.
 
     Raises
     ------
@@ -173,20 +152,57 @@ def normalize_encoder_layer_names(layer_names: Sequence[str]) -> List[str]:
     """
     normalized: List[str] = []
     for layer_name in layer_names:
-        # Accepting the full ``encoder.*`` spelling makes CLI arguments match
-        # the labels shown in the final heatmap without changing hook lookup.
+        # Preserve explicit full-model paths. Bare names from the prior CLI are
+        # treated as encoder-relative so existing commands keep working.
         name = layer_name.strip()
-        if name.startswith("encoder."):
-            name = name[len("encoder.") :]
         if not name:
             raise ValueError("CKA layer names must not be empty.")
+        if not (
+            name.startswith("encoder.")
+            or name.startswith("decoder.")
+            or name == "segmentation_head"
+            or name.startswith("segmentation_head.")
+        ):
+            name = f"encoder.{name}"
         normalized.append(name)
 
     if not normalized:
-        raise ValueError("At least one encoder layer must be selected for CKA.")
+        raise ValueError("At least one model layer must be selected for CKA.")
     if len(set(normalized)) != len(normalized):
         raise ValueError(f"CKA layer names must be unique, got {normalized}.")
     return normalized
+
+
+@jaxtyped(typechecker=beartype)
+def global_average_pool(feature_map: FeatureMapTensor) -> PooledRepresentation:
+    """Collapse a convolutional feature map to one channel vector per image.
+
+    Global average pooling makes stage-level CKA practical across encoder,
+    decoder, and output resolutions. It preserves one aggregate response per
+    channel while intentionally discarding spatial location, leaving spatial
+    explanation to complementary analyses such as Grad-CAM or mask comparison.
+
+    Steps
+    -----
+    1. Average every channel over its complete spatial extent.
+    2. Flatten the two singleton spatial dimensions to obtain ``(B, C)``.
+
+    Parameters
+    ----------
+    feature_map : Float[Tensor, "b c h w"]
+        Selected module activation with shape ``(B, C, H, W)``.
+
+    Returns
+    -------
+    PooledRepresentation
+        Per-image representation matrix with shape ``(B, C)``.
+    """
+    # Adaptive pooling works for every resolution in the encoder, decoder, and
+    # segmentation head without assuming teacher/student spatial equality.
+    return cast(
+        PooledRepresentation,
+        F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(start_dim=1),
+    )
 
 
 def make_activation_hook(
@@ -194,26 +210,29 @@ def make_activation_hook(
     activation_store: ActivationStore,
     model_label: str,
 ) -> ForwardHook:
-    """Create a forward hook that records one named module's tensor output.
+    """Create a forward hook that stores one pooled named-module output.
 
-    Recording outputs through hooks follows the same layer-selection principle
-    used by common PyTorch CKA libraries: a matrix coordinate refers directly
-    to a named module output rather than to an inferred stage index. Outputs are
-    appended instead of overwritten so reused modules can be detected later.
+    The hook performs global average pooling immediately rather than retaining
+    the complete feature map until the end of the U-Net forward pass. This is
+    especially important for decoder outputs such as ``(B, 16, 360, 640)``.
+    Shape metadata is retained so exported labels still identify the original
+    tensor that produced each pooled representation.
 
     Steps
     -----
     1. Receive the selected module's forward output.
-    2. Verify that the output is a tensor suitable for convolutional CKA.
-    3. Append it to the per-layer activation list for this forward pass.
+    2. Require a four-dimensional tensor suitable for convolutional CKA.
+    3. Record the original channel and spatial dimensions.
+    4. Global-average-pool the tensor and append only the compact representation
+       plus its original shape metadata.
 
     Parameters
     ----------
     layer_name : str
-        Encoder-relative module path being observed.
+        Full module path being observed.
     activation_store : ActivationStore
-        Mutable mapping from module path to outputs captured in the current
-        encoder forward pass.
+        Mutable mapping from module path to pooled outputs captured in the
+        current model forward pass.
     model_label : str
         Human-readable model label used in validation errors.
 
@@ -226,6 +245,8 @@ def make_activation_hook(
     ------
     TypeError
         If the selected module returns a non-tensor output.
+    ValueError
+        If the selected module output is not shaped ``(B, C, H, W)``.
     """
 
     def capture_output(
@@ -233,45 +254,56 @@ def make_activation_hook(
         _inputs: Tuple[object, ...],
         output: object,
     ) -> None:
-        # CKA expects one tensor representation from each named endpoint. A
-        # tuple/dict output would require an explicit policy for which element
-        # represents the layer, so fail instead of selecting one silently.
+        # A tuple/dict output would need an explicit policy for choosing the
+        # representation, so fail rather than selecting an element silently.
         if not isinstance(output, Tensor):
             raise TypeError(
-                f"{model_label} layer 'encoder.{layer_name}' returned "
-                f"{type(output)}, but CKA requires a Tensor output."
+                f"{model_label} layer '{layer_name}' returned {type(output)}, "
+                "but CKA requires a Tensor output."
             )
-        activation_store[layer_name].append(output)
+        if output.ndim != 4:
+            raise ValueError(
+                f"{model_label} layer '{layer_name}' has output shape "
+                f"{tuple(output.shape)}; CKA expects (B, C, H, W)."
+            )
+
+        # Pool inside the hook so full-resolution decoder activations can be
+        # released by PyTorch as the forward pass progresses.
+        _, channels, height, width = output.shape
+        pooled = global_average_pool(cast(FeatureMapTensor, output))
+        activation_store[layer_name].append(
+            (pooled, (int(channels), int(height), int(width)))
+        )
 
     return capture_output
 
 
 def register_named_activation_hooks(
-    encoder: nn.Module,
+    model: nn.Module,
     layer_names: Sequence[str],
     activation_store: ActivationStore,
     model_label: str,
 ) -> List[RemovableHandle]:
-    """Register forward hooks on explicitly selected encoder modules.
+    """Register forward hooks on explicitly selected full-model modules.
 
-    The requested paths are resolved against ``encoder.named_modules()`` before
-    any evaluation begins. This guarantees that every heatmap label names a
-    real module in the loaded checkpoint and prevents silent fallback to a
-    different architectural stage.
+    Paths are resolved against ``model.named_modules()`` before evaluation. This
+    makes every CKA matrix coordinate traceable to an actual module in the
+    loaded checkpoint and allows encoder, decoder, and segmentation-head outputs
+    to participate in the same analysis.
 
     Steps
     -----
-    1. Build a lookup from ``encoder.named_modules()``.
-    2. Validate that every requested path exists.
+    1. Build a lookup from ``model.named_modules()``.
+    2. Validate that every requested module path exists.
     3. Initialize one activation list per selected path.
-    4. Register a forward hook on each selected module in the requested order.
+    4. Register a forward hook on each selected module in requested order.
 
     Parameters
     ----------
-    encoder : nn.Module
-        Teacher or student encoder on which hooks are registered.
+    model : nn.Module
+        Unwrapped teacher or student segmentation model.
     layer_names : Sequence[str]
-        Ordered encoder-relative module paths to capture.
+        Ordered full-model module paths to capture.
     activation_store : ActivationStore
         Mutable mapping populated by the registered hooks.
     model_label : str
@@ -285,20 +317,20 @@ def register_named_activation_hooks(
     Raises
     ------
     ValueError
-        If a requested module path does not exist in the encoder.
+        If a requested module path does not exist in the model.
     """
-    named_modules = dict(encoder.named_modules())
+    named_modules = dict(model.named_modules())
     missing_layers = [name for name in layer_names if name not in named_modules]
     if missing_layers:
         raise ValueError(
-            f"{model_label} encoder does not contain requested CKA layer(s): "
-            f"{missing_layers}. Use names from model.encoder.named_modules()."
+            f"{model_label} does not contain requested CKA module(s): "
+            f"{missing_layers}. Use names from model.named_modules()."
         )
 
     handles: List[RemovableHandle] = []
     for layer_name in layer_names:
-        # Pre-create the list so the hook can append without mutating the set of
-        # mapping keys during an encoder forward pass.
+        # Pre-create the list so the hook can append without changing mapping
+        # keys while the model is executing.
         activation_store[layer_name] = []
         hook = make_activation_hook(layer_name, activation_store, model_label)
         handles.append(named_modules[layer_name].register_forward_hook(hook))
@@ -306,72 +338,40 @@ def register_named_activation_hooks(
 
 
 @jaxtyped(typechecker=beartype)
-def global_average_pool(feature_map: FeatureMapTensor) -> PooledRepresentation:
-    """Collapse a convolutional feature map to one channel vector per image.
-
-    CKA should compare compact named-layer representations rather than flattened
-    spatial maps, which would make early high-resolution layers prohibitively
-    expensive. Global average pooling preserves each channel's aggregate
-    response while removing the spatial axes.
-
-    Steps
-    -----
-    1. Average every channel over its complete spatial extent.
-    2. Flatten the two singleton spatial dimensions to obtain ``(B, C)``.
-
-    Parameters
-    ----------
-    feature_map : Float[Tensor, "b c h w"]
-        Selected encoder-module activation tensor with shape ``(B, C, H, W)``.
-
-    Returns
-    -------
-    PooledRepresentation
-        Per-image representation matrix with shape ``(B, C)``.
-    """
-    # Adaptive pooling avoids assuming that the selected ResNet-18 and
-    # MobileNetV2 outputs have matching spatial resolutions.
-    return cast(
-        PooledRepresentation,
-        F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(start_dim=1),
-    )
-
-
-@jaxtyped(typechecker=beartype)
-def extract_named_encoder_representations(
-    encoder: nn.Module,
+def extract_named_representations(
+    model: nn.Module,
     x: BatchImage,
     layer_names: Sequence[str],
     activation_store: ActivationStore,
     model_label: str,
 ) -> Tuple[List[PooledRepresentation], List[str]]:
-    """Extract globally pooled outputs from explicitly named encoder modules.
+    """Run the full model and collect pooled outputs from named modules.
 
-    Forward hooks identify the exact module that produced every compared
-    representation. The encoder is still run only once per batch, and each
-    captured feature map is globally average pooled immediately so the
-    streaming CKA calculation remains memory-efficient.
+    Forward hooks define the exact representations used by CKA. The entire U-Net
+    is executed once per batch so selected encoder, decoder, and segmentation
+    head modules all fire. Because pooling occurs inside each hook, only compact
+    ``(B, C)`` representations survive after their module executes.
 
     Steps
     -----
-    1. Reset the hook store for the selected module names.
-    2. Run the encoder once so every selected forward hook captures its output.
-    3. Require each selected module to execute exactly once, avoiding ambiguous
+    1. Reset the hook store for every selected module.
+    2. Run one full model forward pass.
+    3. Require every selected module to execute exactly once, avoiding ambiguous
        outputs from reused modules.
-    4. Global-average-pool each captured ``(B, C, H, W)`` tensor to ``(B, C)``.
-    5. Build labels containing the exact module path, channel count, and spatial
-       size, then release references to the large feature maps.
+    4. Collect the pooled representation and construct a label containing the
+       exact module path plus its original channel/spatial dimensions.
+    5. Clear hook stores so no batch tensors remain referenced unnecessarily.
 
     Parameters
     ----------
-    encoder : nn.Module
-        Encoder whose selected named modules already have forward hooks.
+    model : nn.Module
+        Unwrapped segmentation model whose selected modules have hooks.
     x : BatchImage
         Input image batch with shape ``(B, 3, H, W)``.
     layer_names : Sequence[str]
-        Ordered encoder-relative module paths whose outputs are compared.
+        Ordered full-model module paths whose outputs are compared.
     activation_store : ActivationStore
-        Hook-populated mapping from module path to captured outputs.
+        Hook-populated mapping from module path to pooled outputs and shapes.
     model_label : str
         Human-readable model label used in validation errors.
 
@@ -383,17 +383,16 @@ def extract_named_encoder_representations(
     Raises
     ------
     ValueError
-        If a selected module is not executed exactly once or its output does
-        not use the expected ``(B, C, H, W)`` layout.
+        If a selected module is not executed exactly once in the model forward.
     """
-    # Reset existing references before the forward pass so the validation below
-    # describes exactly this batch rather than activations from an earlier one.
+    # Reset prior batch records so execution-count validation describes only the
+    # current forward pass.
     for layer_name in layer_names:
         activation_store[layer_name] = []
 
-    # The encoder's returned feature sequence is intentionally ignored here:
-    # named forward hooks, not positional stage outputs, define the CKA inputs.
-    encoder(x)
+    # A complete forward is required because decoder and segmentation-head
+    # modules do not execute when only ``model.encoder`` is called.
+    model(x)
 
     representations: List[PooledRepresentation] = []
     labels: List[str] = []
@@ -402,31 +401,19 @@ def extract_named_encoder_representations(
             captured_outputs = activation_store[layer_name]
             if len(captured_outputs) != 1:
                 raise ValueError(
-                    f"{model_label} layer 'encoder.{layer_name}' executed "
-                    f"{len(captured_outputs)} times in one encoder forward; CKA "
+                    f"{model_label} layer '{layer_name}' executed "
+                    f"{len(captured_outputs)} times in one model forward; CKA "
                     "requires an unambiguous single output per selected layer."
                 )
 
-            feature = captured_outputs[0]
-            if feature.ndim != 4:
-                raise ValueError(
-                    f"{model_label} layer 'encoder.{layer_name}' has output "
-                    f"shape {tuple(feature.shape)}; CKA expects (B, C, H, W)."
-                )
-
-            # Pool before accumulation so early high-resolution feature maps do
-            # not make CKA memory/computation scale with H x W.
-            pooled = global_average_pool(cast(FeatureMapTensor, feature))
-            representations.append(pooled)
-
-            _, channels, height, width = feature.shape
+            pooled, (channels, height, width) = captured_outputs[0]
+            representations.append(cast(PooledRepresentation, pooled))
             labels.append(
-                f"encoder.{layer_name}\nC={channels}, {height}x{width}"
+                f"{layer_name}\nC={channels}, {height}x{width}"
             )
     finally:
-        # Hooks otherwise keep references to full-resolution activations. Clear
-        # them immediately after pooling so only the compact (B, C) tensors live
-        # through the dataset-wide streaming calculation.
+        # Remove references to pooled batch tensors after copying them into the
+        # returned list. Full-resolution activations were never retained here.
         for layer_name in layer_names:
             activation_store[layer_name] = []
 
@@ -442,45 +429,38 @@ def compute_linear_cka_matrix(
     dataloader: DataLoader[Tuple[ImageTensor, MaskTensor]],
     device: torch.device,
 ) -> Tuple[CKAMatrix, List[str], List[str], int]:
-    """Compute named-layer linear CKA using streaming sufficient statistics.
+    """Compute full-model named-layer linear CKA with streaming statistics.
 
     For centered representation matrices ``X`` and ``Y``, linear CKA is
-    ``||X_c^T Y_c||_F^2 / (||X_c^T X_c||_F ||Y_c^T Y_c||_F)``. Instead of
-    storing every pooled activation, this function accumulates the sums and
-    second moments needed to construct the globally centered cross-products at
-    the end. Explicit forward hooks ensure each row/column remains associated
-    with an exact encoder module output, while global average pooling keeps
-    memory dependent on channel widths rather than on spatial resolution or the
-    number of evaluation images.
+    ``||X_c^T Y_c||_F^2 / (||X_c^T X_c||_F ||Y_c^T Y_c||_F)``. The selected
+    representations may come from the encoder, decoder, or segmentation head.
+    Instead of retaining all image activations, this function accumulates the
+    first and second moments required to center the complete dataset exactly.
 
     Steps
     -----
-    1. Normalize and validate the requested teacher/student module paths.
-    2. Register forward hooks on the exact named encoder modules.
+    1. Normalize and validate teacher/student full-model module paths.
+    2. Register hooks on every exact selected module.
     3. Iterate over identical image batches under ``torch.inference_mode`` and
-       globally average pool each captured module output.
+       run each complete U-Net once per batch.
     4. Accumulate per-layer sums and self-products plus one concatenated
        teacher-by-student cross-product matrix.
     5. Remove all hooks even if evaluation raises an exception.
-    6. Apply global centering analytically from the accumulated first moments,
-       then normalize every named teacher/student layer pair into its CKA score.
+    6. Apply dataset-wide centering analytically and normalize every selected
+       teacher/student module pair into its linear CKA score.
 
     Parameters
     ----------
     teacher : nn.Module
-        Teacher segmentation model whose encoder representations form rows of
-        the output matrix.
+        Teacher segmentation model whose selected outputs form matrix rows.
     student : nn.Module
-        Student segmentation model whose encoder representations form columns
-        of the output matrix.
+        Student segmentation model whose selected outputs form matrix columns.
     teacher_layer_names : Sequence[str]
-        Ordered teacher encoder module paths whose outputs form matrix rows.
-        Names may be encoder-relative (``layer3``) or prefixed with
-        ``encoder.``.
+        Ordered teacher module paths. Bare legacy names are interpreted as
+        encoder-relative paths.
     student_layer_names : Sequence[str]
-        Ordered student encoder module paths whose outputs form matrix columns.
-        Names may be encoder-relative (``features.13``) or prefixed with
-        ``encoder.``.
+        Ordered student module paths. Bare legacy names are interpreted as
+        encoder-relative paths.
     dataloader : DataLoader[Tuple[ImageTensor, MaskTensor]]
         Deterministic evaluation loader. Masks are ignored, but the template's
         dataset loader is reused so image preprocessing remains identical.
@@ -491,12 +471,10 @@ def compute_linear_cka_matrix(
     -------
     Tuple[CKAMatrix, List[str], List[str], int]
         CKA matrix, teacher named-module labels, student named-module labels,
-        and the number of images included in the calculation.
+        and number of images included in the calculation.
 
     Raises
     ------
-    AttributeError
-        If either loaded model does not expose an encoder module.
     TypeError
         If a selected module returns a non-tensor output.
     ValueError
@@ -507,12 +485,12 @@ def compute_linear_cka_matrix(
     teacher.eval()
     student.eval()
 
-    # Resolve all paths relative to the encoders and validate them before the
-    # expensive dataset pass so typos fail immediately.
-    normalized_teacher_layers = normalize_encoder_layer_names(teacher_layer_names)
-    normalized_student_layers = normalize_encoder_layer_names(student_layer_names)
-    teacher_encoder = get_encoder(teacher)
-    student_encoder = get_encoder(student)
+    # Resolve names against unwrapped full models so decoder/head modules can be
+    # selected in addition to encoder endpoints.
+    normalized_teacher_layers = normalize_layer_names(teacher_layer_names)
+    normalized_student_layers = normalize_layer_names(student_layer_names)
+    teacher_model = unwrap_model(teacher)
+    student_model = unwrap_model(student)
 
     teacher_activations: ActivationStore = {}
     student_activations: ActivationStore = {}
@@ -534,16 +512,16 @@ def compute_linear_cka_matrix(
     sample_count = 0
 
     try:
-        # Register hooks inside the protected region so hooks already attached
-        # to one model are still removed if registration for the other fails.
+        # Hook registration is inside the protected region so partially
+        # registered hooks are still removed if the second model fails lookup.
         teacher_handles = register_named_activation_hooks(
-            teacher_encoder,
+            teacher_model,
             normalized_teacher_layers,
             teacher_activations,
             "Teacher",
         )
         student_handles = register_named_activation_hooks(
-            student_encoder,
+            student_model,
             normalized_student_layers,
             student_activations,
             "Student",
@@ -551,26 +529,22 @@ def compute_linear_cka_matrix(
 
         with torch.inference_mode():
             for batch_index, (images, _) in enumerate(dataloader):
-                # The same image rows are fed to both encoders, which is required
-                # because CKA compares geometry over corresponding observations.
+                # Both models receive identical image rows because CKA compares
+                # representational geometry over corresponding observations.
                 images = images.to(device)
-                teacher_reps, current_teacher_labels = (
-                    extract_named_encoder_representations(
-                        teacher_encoder,
-                        images,
-                        normalized_teacher_layers,
-                        teacher_activations,
-                        "Teacher",
-                    )
+                teacher_reps, current_teacher_labels = extract_named_representations(
+                    teacher_model,
+                    images,
+                    normalized_teacher_layers,
+                    teacher_activations,
+                    "Teacher",
                 )
-                student_reps, current_student_labels = (
-                    extract_named_encoder_representations(
-                        student_encoder,
-                        images,
-                        normalized_student_layers,
-                        student_activations,
-                        "Student",
-                    )
+                student_reps, current_student_labels = extract_named_representations(
+                    student_model,
+                    images,
+                    normalized_student_layers,
+                    student_activations,
+                    "Student",
                 )
 
                 current_teacher_widths = [int(rep.shape[1]) for rep in teacher_reps]
@@ -582,8 +556,8 @@ def compute_linear_cka_matrix(
                     teacher_widths = current_teacher_widths
                     student_widths = current_student_widths
 
-                    # Accumulate first/second moments in float64 to reduce the
-                    # cancellation error introduced by global centering.
+                    # Accumulate in float64 to reduce cancellation error when
+                    # global centering subtracts dataset first moments later.
                     teacher_sums = [
                         torch.zeros(width, dtype=torch.float64, device=device)
                         for width in teacher_widths
@@ -593,11 +567,19 @@ def compute_linear_cka_matrix(
                         for width in student_widths
                     ]
                     teacher_second_moments = [
-                        torch.zeros((width, width), dtype=torch.float64, device=device)
+                        torch.zeros(
+                            (width, width),
+                            dtype=torch.float64,
+                            device=device,
+                        )
                         for width in teacher_widths
                     ]
                     student_second_moments = [
-                        torch.zeros((width, width), dtype=torch.float64, device=device)
+                        torch.zeros(
+                            (width, width),
+                            dtype=torch.float64,
+                            device=device,
+                        )
                         for width in student_widths
                     ]
 
@@ -609,23 +591,29 @@ def compute_linear_cka_matrix(
                         device=device,
                     )
                     teacher_total_sum = torch.zeros(
-                        teacher_total_width, dtype=torch.float64, device=device
+                        teacher_total_width,
+                        dtype=torch.float64,
+                        device=device,
                     )
                     student_total_sum = torch.zeros(
-                        student_total_width, dtype=torch.float64, device=device
+                        student_total_width,
+                        dtype=torch.float64,
+                        device=device,
                     )
                 else:
-                    # Stable widths ensure each accumulated matrix block keeps
-                    # referring to the same named layer/channel across batches.
+                    # Stable widths guarantee that each block of the accumulated
+                    # matrices keeps referring to the same named module/channel.
                     if current_teacher_widths != teacher_widths:
                         raise ValueError(
-                            "Teacher encoder feature widths changed across batches: "
-                            f"expected {teacher_widths}, got {current_teacher_widths}."
+                            "Teacher feature widths changed across batches: "
+                            f"expected {teacher_widths}, got "
+                            f"{current_teacher_widths}."
                         )
                     if current_student_widths != student_widths:
                         raise ValueError(
-                            "Student encoder feature widths changed across batches: "
-                            f"expected {student_widths}, got {current_student_widths}."
+                            "Student feature widths changed across batches: "
+                            f"expected {student_widths}, got "
+                            f"{current_student_widths}."
                         )
 
                 if (
@@ -637,16 +625,18 @@ def compute_linear_cka_matrix(
                         "CKA accumulators were not initialized from the first batch."
                     )
 
-                # Concatenating only pooled named-layer vectors lets one GEMM
+                # Concatenating only already-pooled outputs lets one GEMM
                 # accumulate every teacher-layer x student-layer cross-product.
                 teacher_concat = torch.cat(teacher_reps, dim=1)
                 student_concat = torch.cat(student_reps, dim=1)
                 batch_size = int(teacher_concat.shape[0])
                 sample_count += batch_size
 
-                # Matrix multiplications run in the model's native precision for
-                # GPU efficiency; promote their results before accumulation.
-                cross_moment += (teacher_concat.T @ student_concat).to(torch.float64)
+                # GEMMs use the model's native precision for throughput, then
+                # promote results before adding to dataset-level accumulators.
+                cross_moment += (teacher_concat.T @ student_concat).to(
+                    torch.float64
+                )
                 teacher_total_sum += teacher_concat.sum(dim=0).to(torch.float64)
                 student_total_sum += student_concat.sum(dim=0).to(torch.float64)
 
@@ -671,9 +661,8 @@ def compute_linear_cka_matrix(
                     f"({sample_count} images)."
                 )
     finally:
-        # Forward hooks persist on modules until explicitly removed. Always
-        # detach them so later evaluation/inference cannot accidentally keep
-        # collecting activations or retaining large tensors.
+        # Hooks persist until removed. Always detach them so later inference does
+        # not accidentally keep capturing activations after CKA finishes/fails.
         for handle in teacher_handles + student_handles:
             handle.remove()
 
@@ -685,28 +674,31 @@ def compute_linear_cka_matrix(
     ):
         raise ValueError("The CKA dataloader yielded no images.")
 
-    # Center the concatenated teacher-student cross moment with the exact global
-    # dataset means; this is equivalent to explicitly forming X_c and Y_c.
+    # Center the concatenated teacher-student moment using exact global dataset
+    # means; this is equivalent to explicitly constructing centered X and Y.
     centered_cross = cross_moment - torch.outer(
-        teacher_total_sum, student_total_sum
+        teacher_total_sum,
+        student_total_sum,
     ) / float(sample_count)
 
     teacher_centered_self: List[Tensor] = []
     student_centered_self: List[Tensor] = []
     for layer_index, second_moment in enumerate(teacher_second_moments):
         centered = second_moment - torch.outer(
-            teacher_sums[layer_index], teacher_sums[layer_index]
+            teacher_sums[layer_index],
+            teacher_sums[layer_index],
         ) / float(sample_count)
         teacher_centered_self.append(centered)
 
     for layer_index, second_moment in enumerate(student_second_moments):
         centered = second_moment - torch.outer(
-            student_sums[layer_index], student_sums[layer_index]
+            student_sums[layer_index],
+            student_sums[layer_index],
         ) / float(sample_count)
         student_centered_self.append(centered)
 
-    # Convert layer widths to slice boundaries so each heatmap cell receives the
-    # correct block from the one large centered cross-product matrix.
+    # Slice boundaries map each named output back out of the concatenated
+    # cross-product matrix before computing its independently normalized CKA.
     teacher_offsets = np.cumsum([0] + teacher_widths).tolist()
     student_offsets = np.cumsum([0] + student_widths).tolist()
     cka = np.zeros((len(teacher_widths), len(student_widths)), dtype=np.float64)
@@ -717,8 +709,8 @@ def compute_linear_cka_matrix(
         )
         if teacher_self_energy <= 0:
             raise ValueError(
-                f"Teacher layer '{teacher_labels[teacher_index]}' has zero centered "
-                "variance; linear CKA is undefined for that output."
+                f"Teacher layer '{teacher_labels[teacher_index]}' has zero "
+                "centered variance; linear CKA is undefined for that output."
             )
 
         teacher_start = teacher_offsets[teacher_index]
@@ -742,14 +734,25 @@ def compute_linear_cka_matrix(
             ]
 
             numerator = torch.sum(cross_block ** 2)
-            denominator = torch.sqrt(teacher_self_energy * student_self_energy)
+            denominator = torch.sqrt(
+                teacher_self_energy * student_self_energy
+            )
 
-            # The exact statistic lies in [0, 1]. Clamp only tiny numerical
-            # excursions caused by finite precision, not the underlying data.
-            score = torch.clamp(numerator / denominator, min=0.0, max=1.0)
+            # The mathematical value is in [0, 1]. Clamp only finite-precision
+            # excursions instead of changing the underlying statistic.
+            score = torch.clamp(
+                numerator / denominator,
+                min=0.0,
+                max=1.0,
+            )
             cka[teacher_index, student_index] = float(score.item())
 
-    return cast(CKAMatrix, cka.astype(np.float32)), teacher_labels, student_labels, sample_count
+    return (
+        cast(CKAMatrix, cka.astype(np.float32)),
+        teacher_labels,
+        student_labels,
+        sample_count,
+    )
 
 
 @jaxtyped(typechecker=beartype)
@@ -759,20 +762,18 @@ def save_cka_outputs(
     student_labels: List[str],
     output_dir: str,
 ) -> Tuple[str, str]:
-    """Save the CKA matrix as both CSV data and an annotated heatmap.
+    """Save the full-model CKA matrix as CSV data and an annotated heatmap.
 
-    The CSV preserves exact numeric results for later statistical analysis,
-    while both CSV axes and heatmap ticks preserve the exact named module whose
-    output generated each representation. This makes every CKA cell auditable
-    without consulting an external T1/S1 stage mapping.
+    Both output axes preserve the exact module path and original feature-map
+    shape. A fixed ``[0, 1]`` color scale keeps results comparable across KD and
+    non-distilled baseline experiments.
 
     Steps
     -----
-    1. Create ``output_dir`` if it does not already exist.
-    2. Write the matrix to ``cka_matrix.csv`` with named-layer labels on both
-       axes.
-    3. Render a fixed-range ``[0, 1]`` heatmap and annotate every cell.
-    4. Save the figure to ``cka_heatmap.png``.
+    1. Create ``output_dir`` if it does not exist.
+    2. Write ``cka_matrix.csv`` with exact named-module labels on both axes.
+    3. Render a fixed-range heatmap and annotate every cell with its CKA value.
+    4. Save the figure as ``cka_heatmap.png``.
 
     Parameters
     ----------
@@ -780,9 +781,9 @@ def save_cka_outputs(
         Two-dimensional CKA array with teacher module outputs on rows and
         student module outputs on columns.
     teacher_labels : List[str]
-        Row labels naming the teacher module outputs being compared.
+        Row labels naming teacher module outputs and their original shapes.
     student_labels : List[str]
-        Column labels naming the student module outputs being compared.
+        Column labels naming student module outputs and their original shapes.
     output_dir : str
         Directory where CSV and PNG outputs are written.
 
@@ -794,7 +795,7 @@ def save_cka_outputs(
     Raises
     ------
     ValueError
-        If the matrix shape does not match the supplied named-layer labels.
+        If the matrix shape does not match the supplied module labels.
     """
     expected_shape = (len(teacher_labels), len(student_labels))
     if tuple(cka_matrix.shape) != expected_shape:
@@ -803,8 +804,8 @@ def save_cka_outputs(
             f"{expected_shape}."
         )
 
-    # Persist the raw scores separately from the figure so downstream analysis
-    # never has to recover values from image annotations.
+    # Save exact values separately so later statistical analysis never needs to
+    # recover numbers from heatmap annotations.
     os.makedirs(output_dir, exist_ok=True)
     csv_path = os.path.join(output_dir, "cka_matrix.csv")
     heatmap_path = os.path.join(output_dir, "cka_heatmap.png")
@@ -813,22 +814,28 @@ def save_cka_outputs(
         index=[label.replace("\n", " | ") for label in teacher_labels],
         columns=[label.replace("\n", " | ") for label in student_labels],
     )
-    cka_df.to_csv(csv_path, index_label="teacher_layer_output")
+    cka_df.to_csv(csv_path, index_label="teacher_module_output")
 
-    # Keep a fixed [0, 1] scale so multiple experiments (for example KD versus
-    # a non-distilled baseline) remain visually comparable without re-scaling.
-    figure_width = max(8.0, 1.6 * len(student_labels) + 3.0)
-    figure_height = max(6.0, 1.2 * len(teacher_labels) + 2.5)
+    # The larger default set includes encoder, decoder, and output modules, so
+    # allocate enough space for readable exact-path tick labels.
+    figure_width = max(12.0, 1.35 * len(student_labels) + 4.0)
+    figure_height = max(9.0, 1.0 * len(teacher_labels) + 3.0)
     fig, ax = plt.subplots(figsize=(figure_width, figure_height))
-    image = ax.imshow(cka_matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
+    image = ax.imshow(
+        cka_matrix,
+        vmin=0.0,
+        vmax=1.0,
+        aspect="auto",
+        cmap="viridis",
+    )
 
     ax.set_xticks(np.arange(len(student_labels)))
     ax.set_yticks(np.arange(len(teacher_labels)))
-    ax.set_xticklabels(student_labels, rotation=45, ha="right")
+    ax.set_xticklabels(student_labels, rotation=50, ha="right")
     ax.set_yticklabels(teacher_labels)
-    ax.set_xlabel("Student encoder module outputs")
-    ax.set_ylabel("Teacher encoder module outputs")
-    ax.set_title("Teacher-Student Linear CKA (Named Encoder Outputs)")
+    ax.set_xlabel("Student module outputs")
+    ax.set_ylabel("Teacher module outputs")
+    ax.set_title("Teacher-Student Linear CKA (Encoder + Decoder + Output)")
 
     for teacher_index in range(cka_matrix.shape[0]):
         for student_index in range(cka_matrix.shape[1]):
@@ -841,7 +848,7 @@ def save_cka_outputs(
                 ha="center",
                 va="center",
                 color=text_color,
-                fontsize=9,
+                fontsize=8,
             )
 
     colorbar = fig.colorbar(image, ax=ax)
@@ -854,31 +861,29 @@ def save_cka_outputs(
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for teacher-student CKA evaluation.
+    """Parse command-line arguments for full-model teacher-student CKA.
 
-    The teacher and student checkpoints are mandatory. Layer-selection options
-    default to the ResNet-18 and MobileNetV2 endpoints used by this experiment,
-    while runtime options control DataLoader throughput, deterministic subset
-    size, and output location.
+    Teacher and student checkpoints are mandatory. The default module lists
+    sample the encoder, decoder, and segmentation head, while layer-selection
+    arguments remain configurable for architecture-specific experiments.
 
     Steps
     -----
     1. Require separate teacher and student checkpoint paths.
-    2. Add explicit teacher/student encoder module selections with architecture-
-       appropriate defaults.
-    3. Add optional batch-size, maximum-sample, and output-directory controls.
+    2. Add explicit teacher/student module selections with full U-Net defaults.
+    3. Add batch-size, maximum-sample, and output-directory controls.
     4. Parse and return the command-line namespace.
 
     Returns
     -------
     argparse.Namespace
-        Parsed CLI arguments containing checkpoint paths, selected named encoder
-        layers, DataLoader settings, optional sample cap, and output directory.
+        Parsed arguments containing checkpoint paths, selected named modules,
+        DataLoader settings, optional sample cap, and output directory.
     """
     parser = argparse.ArgumentParser(
         description=(
-            "Compare explicitly named teacher and student encoder module "
-            "outputs with linear Centered Kernel Alignment (CKA)."
+            "Compare named encoder, decoder, and segmentation-head outputs "
+            "between teacher and student models with linear CKA."
         )
     )
     parser.add_argument(
@@ -899,9 +904,10 @@ def parse_arguments() -> argparse.Namespace:
         nargs="+",
         default=list(DEFAULT_TEACHER_LAYERS),
         help=(
-            "Teacher encoder module outputs to compare, in matrix-row order. "
-            "Names are relative to model.encoder; an 'encoder.' prefix is also "
-            "accepted. Defaults to ResNet-18 relu/layer1/layer2/layer3/layer4."
+            "Teacher module outputs in matrix-row order. Defaults cover five "
+            "ResNet-18 encoder endpoints, five U-Net decoder blocks, and the "
+            "segmentation head. Bare names remain encoder-relative for "
+            "backward compatibility."
         ),
     )
     parser.add_argument(
@@ -910,24 +916,28 @@ def parse_arguments() -> argparse.Namespace:
         nargs="+",
         default=list(DEFAULT_STUDENT_LAYERS),
         help=(
-            "Student encoder module outputs to compare, in matrix-column order. "
-            "Names are relative to model.encoder; an 'encoder.' prefix is also "
-            "accepted. Defaults to MobileNetV2 feature endpoints 1/3/6/13/18."
+            "Student module outputs in matrix-column order. Defaults cover "
+            "five MobileNetV2 encoder endpoints, five U-Net decoder blocks, "
+            "and the segmentation head. Bare names remain encoder-relative "
+            "for backward compatibility."
         ),
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=Configuration.BATCH_SIZE,
-        help="DataLoader batch size. Defaults to the performance-evaluation configuration.",
+        help=(
+            "DataLoader batch size. Defaults to the performance-evaluation "
+            "configuration."
+        ),
     )
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
         help=(
-            "Optional maximum number of test images used for CKA. "
-            "By default the complete held-out test split is used."
+            "Optional maximum number of test images used for CKA. By default "
+            "the complete held-out test split is used."
         ),
     )
     parser.add_argument(
@@ -940,30 +950,29 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load teacher/student checkpoints and export their encoder CKA matrix.
+    """Load checkpoints and export CKA across the complete U-Net pathway.
 
-    The pipeline deliberately reuses the test split and inference resize from
-    ``evaluate_performance.py`` so CKA is measured on the same held-out images
-    used for predictive evaluation. Explicit named-module hooks make every CKA
-    row/column traceable to an exact encoder output, while global average
-    pooling plus streaming sufficient statistics keeps the analysis practical
-    for ResNet-18 and MobileNetV2.
+    The analysis reuses the same held-out BDD100k split and inference resize as
+    ``evaluate_performance.py``. Named hooks make every matrix coordinate
+    traceable to an exact module output, while hook-time global average pooling
+    and streaming moments keep the broader encoder/decoder analysis practical.
 
     Steps
     -----
     1. Parse teacher/student checkpoint paths and runtime options.
     2. Load both serialized models on the configured evaluation device.
-    3. Report the exact named encoder outputs selected for teacher and student.
-    4. Recreate the deterministic BDD100k held-out test split and preprocessing.
-    5. Optionally take the first ``max_samples`` rows for a reproducible subset.
-    6. Compute all selected named-layer pair CKA scores in one dataset pass.
-    7. Save the numeric matrix and annotated heatmap and print their locations.
+    3. Normalize and report all selected encoder/decoder/output module paths.
+    4. Recreate the deterministic held-out BDD100k split and preprocessing.
+    5. Optionally take the first ``max_samples`` rows for a reproducible pilot.
+    6. Print both architectures for module-path traceability.
+    7. Compute all selected teacher/student output-pair CKA scores in one pass.
+    8. Save the numeric matrix and annotated heatmap.
 
     Raises
     ------
     ValueError
-        If batch size or maximum sample count is not positive, or if no test
-        samples remain after applying the requested cap.
+        If batch size or maximum sample count is not positive, if no test
+        samples remain after applying the cap, or if CKA module validation fails.
     """
     args = parse_arguments()
 
@@ -977,50 +986,53 @@ def main() -> None:
     print("=" * 68)
     print(f"Target execution device: {Configuration.DEVICE}")
 
-    # Load full nn.Module checkpoints exactly as the performance evaluation does
-    # so no architecture reconstruction or state-dict assumptions are introduced.
+    # Load complete serialized modules exactly as performance evaluation does so
+    # no architecture reconstruction or state-dict assumptions are introduced.
     print(f"Loading teacher checkpoint: {args.teacher}")
     teacher = load_trained_model(args.teacher, Configuration.DEVICE)
     print(f"Loading student checkpoint: {args.student}")
     student = load_trained_model(args.student, Configuration.DEVICE)
 
-    # Normalize now so the log shows the canonical paths that will appear in
-    # the CKA output. The computation validates that these paths actually exist
-    # in each loaded encoder before registering hooks.
-    teacher_layer_names = normalize_encoder_layer_names(args.teacher_layers)
-    student_layer_names = normalize_encoder_layer_names(args.student_layers)
-    print("Teacher encoder outputs selected for CKA:")
+    # Normalize before the expensive dataset pass so the execution log records
+    # the exact paths that will label matrix rows/columns.
+    teacher_layer_names = normalize_layer_names(args.teacher_layers)
+    student_layer_names = normalize_layer_names(args.student_layers)
+    print("Teacher module outputs selected for CKA:")
     for layer_name in teacher_layer_names:
-        print(f"  - encoder.{layer_name}")
-    print("Student encoder outputs selected for CKA:")
+        print(f"  - {layer_name}")
+    print("Student module outputs selected for CKA:")
     for layer_name in student_layer_names:
-        print(f"  - encoder.{layer_name}")
+        print(f"  - {layer_name}")
 
-    # Recreate the identical held-out split used by the template. Restricting
-    # with ``head`` is deterministic and therefore suitable for repeatable pilot
-    # CKA runs before using the complete test partition.
+    # Recreate the identical held-out split used by performance evaluation.
+    # ``head`` makes pilot subsets deterministic before a complete CKA run.
     print("Loading BDD100k test split...")
     _, _, test_df = load_dataset_from_files()
     if args.max_samples is not None:
-        test_df = test_df.head(min(args.max_samples, len(test_df))).reset_index(drop=True)
+        test_df = test_df.head(
+            min(args.max_samples, len(test_df))
+        ).reset_index(drop=True)
     if test_df.empty:
         raise ValueError("The selected BDD100k test split contains no samples.")
     print(f"Using {len(test_df)} test samples for CKA.")
 
     inference_transforms = A.Compose([
-        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
+        A.Resize(
+            height=Configuration.IMAGE_HEIGHT,
+            width=Configuration.IMAGE_WIDTH,
+        ),
         ToTensorV2(),
     ])
     test_ds = BDDSegmentationDataset(test_df, transform=inference_transforms)
     test_loader = DataLoader(
         dataset=test_ds,
         batch_size=args.batch_size,
-        shuffle=False,  # identical row ordering is mandatory for teacher/student CKA
+        shuffle=False,  # teacher/student rows must correspond exactly for CKA
         num_workers=Configuration.NUM_WORKERS,
     )
 
-    # Print the teacher architecture so selected hook paths can be checked
-    # against the model summary in the same execution log.
+    # Print architectures so every selected hook path can be cross-checked in
+    # the same execution log as the CKA result.
     print(
         summary(
             model=unwrap_model(teacher),
@@ -1037,8 +1049,6 @@ def main() -> None:
             verbose=0,
         )
     )
-
-    # Print the student architecture for the same traceability reason.
     print(
         summary(
             model=unwrap_model(student),
@@ -1056,18 +1066,20 @@ def main() -> None:
         )
     )
 
-    print("Computing named-layer linear CKA...")
-    cka_matrix, teacher_labels, student_labels, sample_count = compute_linear_cka_matrix(
-        teacher=teacher,
-        student=student,
-        teacher_layer_names=teacher_layer_names,
-        student_layer_names=student_layer_names,
-        dataloader=test_loader,
-        device=Configuration.DEVICE,
+    print("Computing full-model named-layer linear CKA...")
+    cka_matrix, teacher_labels, student_labels, sample_count = (
+        compute_linear_cka_matrix(
+            teacher=teacher,
+            student=student,
+            teacher_layer_names=teacher_layer_names,
+            student_layer_names=student_layer_names,
+            dataloader=test_loader,
+            device=Configuration.DEVICE,
+        )
     )
 
-    # Print the matrix before exporting so headless/remote runs still expose the
-    # quantitative result directly in their logs.
+    # Print exact values before exporting so remote/headless runs still expose
+    # the complete quantitative result in logs.
     result_df = pd.DataFrame(
         cka_matrix,
         index=[label.replace("\n", " | ") for label in teacher_labels],
