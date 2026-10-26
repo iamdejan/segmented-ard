@@ -1,9 +1,9 @@
-"""Centered Kernel Alignment evaluation for two named U-Net checkpoints.
+"""Centered Kernel Alignment evaluation for teacher and student U-Net checkpoints.
 
 This script mirrors the BDD100k loading and checkpoint conventions used by
 ``evaluate_performance.py`` and compares representative internal outputs across
-the complete first-checkpoint and second-checkpoint segmentation pathways with
-linear Centered Kernel Alignment (CKA).
+the complete teacher and student segmentation pathways with linear Centered
+Kernel Alignment (CKA).
 
 The default comparison includes five encoder endpoints, all five U-Net decoder
 block outputs, and the final segmentation-head output. Each selected
@@ -121,7 +121,7 @@ def parse_checkpoint_spec(specification: str) -> Tuple[str, str]:
     """
     if "=" not in specification:
         raise ValueError(
-            "Every --checkpoint value must use NAME=PATH with an explicit name."
+            "Checkpoint values must use NAME=PATH with an explicit name."
         )
 
     # Split only once so a filesystem path containing '=' remains valid while
@@ -131,7 +131,7 @@ def parse_checkpoint_spec(specification: str) -> Tuple[str, str]:
     checkpoint_path = checkpoint_path.strip()
     if not model_name or not checkpoint_path:
         raise ValueError(
-            "Every --checkpoint value must use NAME=PATH with non-empty values."
+            "Checkpoint values must use NAME=PATH with non-empty values."
         )
     return model_name, checkpoint_path
 
@@ -908,16 +908,15 @@ def save_cka_outputs(
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for full-model two-checkpoint CKA.
+    """Parse command-line arguments for full-model teacher-student CKA.
 
-    Exactly two explicitly named checkpoints are mandatory. The first checkpoint
-    supplies matrix rows (teacher-layer defaults) and the second supplies matrix
-    columns (student-layer defaults). Layer selections remain configurable for
-    architecture-specific experiments.
+    Explicitly named teacher and student checkpoints are mandatory so each model
+    is always paired with the correct architecture-specific layer defaults. Layer
+    selections remain configurable for architecture-specific experiments.
 
     Steps
     -----
-    1. Accept repeated ``--checkpoint NAME=PATH`` options, matching Grad-CAM.
+    1. Accept required ``--teacher NAME=PATH`` and ``--student NAME=PATH`` options.
     2. Add explicit teacher/student module selections with full U-Net defaults.
     3. Add batch-size and maximum-sample controls.
     4. Parse and return the command-line namespace.
@@ -925,8 +924,9 @@ def parse_arguments() -> argparse.Namespace:
     Returns
     -------
     argparse.Namespace
-        Parsed arguments containing two named checkpoint specifications,
-        selected named modules, DataLoader settings, and optional sample cap.
+        Parsed arguments containing named teacher/student checkpoint
+        specifications, selected named modules, DataLoader settings, and optional
+        sample cap.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -935,13 +935,21 @@ def parse_arguments() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "--checkpoint",
-        action="append",
+        "--teacher",
+        type=str,
         required=True,
         help=(
-            "Named checkpoint in NAME=PATH form. Supply this option exactly twice. "
-            "The first uses teacher-layer defaults and becomes CKA matrix rows; "
-            "the second uses student-layer defaults and becomes matrix columns."
+            "Teacher checkpoint in NAME=PATH form. Its selected outputs become "
+            "CKA matrix rows and use teacher-layer defaults unless overridden."
+        ),
+    )
+    parser.add_argument(
+        "--student",
+        type=str,
+        required=True,
+        help=(
+            "Student checkpoint in NAME=PATH form. Its selected outputs become "
+            "CKA matrix columns and use student-layer defaults unless overridden."
         ),
     )
     parser.add_argument(
@@ -990,7 +998,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load two named checkpoints and export CKA across the complete U-Net pathway.
+    """Load named teacher/student checkpoints and export full-pathway CKA.
 
     The analysis reuses the same held-out BDD100k split and inference resize as
     ``evaluate_performance.py``. Named hooks make every matrix coordinate
@@ -999,22 +1007,22 @@ def main() -> None:
 
     Steps
     -----
-    1. Parse exactly two named checkpoint specifications and runtime options.
-    2. Require unique checkpoint names for an unambiguous result directory.
-    3. Load both serialized models on the configured evaluation device.
+    1. Parse named teacher/student checkpoint specifications and runtime options.
+    2. Require distinct checkpoint names for an unambiguous result directory.
+    3. Load the teacher and student models on the configured evaluation device.
     4. Normalize and report all selected encoder/decoder/output module paths.
     5. Recreate the deterministic held-out BDD100k split and preprocessing.
     6. Optionally take the first ``max_samples`` rows for a reproducible pilot.
     7. Print both architectures for module-path traceability.
-    8. Compute all selected checkpoint output-pair CKA scores in one pass.
-    9. Save results under ``./model/cka/{name_1}_with_{name_2}``.
+    8. Compute all selected teacher-student output-pair CKA scores in one pass.
+    9. Save results under ``./model/cka/{teacher_name}_with_{student_name}``.
 
     Raises
     ------
     ValueError
-        If a checkpoint specification is invalid, checkpoint names are repeated,
-        batch size or maximum sample count is not positive, no test samples remain
-        after applying the cap, or CKA module validation fails.
+        If a checkpoint specification is invalid, teacher and student names are
+        identical, batch size or maximum sample count is not positive, no test
+        samples remain after applying the cap, or CKA module validation fails.
     """
     args = parse_arguments()
 
@@ -1023,26 +1031,19 @@ def main() -> None:
     if args.max_samples is not None and args.max_samples <= 0:
         raise ValueError("--max-samples must be greater than zero when provided.")
 
-    # Match explain_gradcam.py's repeated --checkpoint interface while requiring
-    # exactly two entries because CKA compares one ordered pair of models.
-    if len(args.checkpoint) != 2:
-        raise ValueError(
-            "--checkpoint must be supplied exactly twice, each as NAME=PATH."
-        )
-
-    # Parse explicit names before model loading because those names also define
-    # the deterministic destination directory for this checkpoint pair.
-    checkpoint_specs = [parse_checkpoint_spec(spec) for spec in args.checkpoint]
-    checkpoint_names = [name for name, _ in checkpoint_specs]
-    if len(checkpoint_names) != len(set(checkpoint_names)):
-        raise ValueError("Every --checkpoint must use a unique model name.")
-    (first_checkpoint_name, first_checkpoint_path), (second_checkpoint_name, second_checkpoint_path) = checkpoint_specs
+    # Parse each role explicitly before model loading. Keeping teacher and student
+    # separate prevents an argument-order mistake from applying architecture-
+    # specific default layers to the wrong checkpoint.
+    teacher_name, teacher_path = parse_checkpoint_spec(args.teacher)
+    student_name, student_path = parse_checkpoint_spec(args.student)
+    if teacher_name == student_name:
+        raise ValueError("--teacher and --student must use distinct model names.")
 
     # Keep all pairwise CKA artifacts under a name-derived subdirectory so
     # repeated experiments do not require manual result-folder renaming.
     output_dir = os.path.join(
         "./model/cka",
-        f"{first_checkpoint_name}_with_{second_checkpoint_name}",
+        f"{teacher_name}_with_{student_name}",
     )
 
     print("\n" + "=" * 68)
@@ -1052,10 +1053,10 @@ def main() -> None:
 
     # Load complete serialized modules exactly as performance evaluation does so
     # no architecture reconstruction or state-dict assumptions are introduced.
-    print(f"Loading first checkpoint '{first_checkpoint_name}': {first_checkpoint_path}")
-    teacher = load_trained_model(first_checkpoint_path, Configuration.DEVICE)
-    print(f"Loading second checkpoint '{second_checkpoint_name}': {second_checkpoint_path}")
-    student = load_trained_model(second_checkpoint_path, Configuration.DEVICE)
+    print(f"Loading teacher checkpoint '{teacher_name}': {teacher_path}")
+    teacher = load_trained_model(teacher_path, Configuration.DEVICE)
+    print(f"Loading student checkpoint '{student_name}': {student_path}")
+    student = load_trained_model(student_path, Configuration.DEVICE)
     print(f"CKA output directory: {output_dir}")
 
     # Normalize before the expensive dataset pass so the execution log records
