@@ -5,10 +5,9 @@ This module adjusts ``evaluate_performance.py`` so evaluation is driven by
 ``./data/bdd100k_10k_images_with_100k_metadata_intersection.csv``. The original
 BDD100k held-out segmentation split and metric logic are preserved. The
 intersection CSV supplies concrete image IDs and their weather/time-of-day
-labels. The pair CSV defines the condition pairs and records their counts in the
-official BDD100k 10K test metadata split; those source counts are validated
-against the intersection CSV but are not incorrectly imposed on the separate
-held-out segmentation subset used for metric computation.
+labels. ``analyze_100k_10k_intersection.py`` generates the pair CSV from this
+same held-out segmentation population, so every pair count is required to equal
+the number of samples actually evaluated for that condition.
 """
 
 import argparse
@@ -372,27 +371,6 @@ def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> 
     return mask_path
 
 
-def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    """Locate the training mask corresponding to a training image.
-
-    Steps
-    -----
-    1. Delegate to :func:`find_mask_path_from_image` using
-       ``Path.SEGMENTATION_MASK_TRAIN_PATH``.
-
-    Parameters
-    ----------
-    complete_image_path : str
-        Full path to a training image JPEG.
-
-    Returns
-    -------
-    str
-        Full path to the corresponding training mask PNG.
-    """
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
-
-
 def find_val_mask_path_from_image(complete_image_path: str) -> str:
     """Locate the validation mask corresponding to a validation image.
 
@@ -435,31 +413,40 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         DataFrames representing ``(train_df, val_df, test_df)``.
     """
-    # Load train masks, dropping any that do not match the expected resolution.
-    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    # Build the valid training pool without mutating a list during iteration.
+    # Preserving candidate order matters because the seeded train/test split is
+    # deterministic only when it receives the same ordered population.
+    train_mask_candidates = glob.glob(
+        f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png"
+    )
+    train_mask_paths: List[str] = []
     problematic_masks: List[str] = []
-    for complete_mask_path in train_mask_paths:
+    for complete_mask_path in train_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_masks.append(complete_mask_path)
-                train_mask_paths.remove(complete_mask_path)
+                continue
+        train_mask_paths.append(complete_mask_path)
     print(f"Problematic masks: {problematic_masks}")
 
-    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    train_image_paths: List[str] = []
+    validated_train_mask_paths: List[str] = []
     problematic_images: List[str] = []
-    for complete_image_path in train_image_paths:
+    for complete_mask_path in train_mask_paths:
+        complete_image_path = find_train_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
-                train_image_paths.remove(complete_image_path)
-                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+                continue
+        train_image_paths.append(complete_image_path)
+        validated_train_mask_paths.append(complete_mask_path)
     print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
         "image_paths": train_image_paths,
-        "mask_paths": train_mask_paths,
+        "mask_paths": validated_train_mask_paths,
     })
     train_df, test_df = train_test_split(
         train_test_df, test_size=0.2, random_state=Configuration.SEED
@@ -847,9 +834,10 @@ def visualize_predictions(
 def load_pair_specification(pair_csv_path: str) -> pd.DataFrame:
     """Load and validate the requested weather/time-of-day pair specification.
 
-    The ``count`` column is treated as the source count for the official BDD100k
-    10K metadata test split. It is not assumed to equal the number of samples in
-    the evaluator's separately reconstructed held-out segmentation subset.
+    The ``count`` column is the expected number of samples in the evaluator's
+    held-out segmentation subset after joining to the 10K/100K metadata
+    intersection and removing undefined environment labels. It must therefore
+    equal the number of samples actually evaluated for each pair.
 
     Steps
     -----
@@ -1040,80 +1028,6 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
     return intersection_df
 
 
-def validate_pair_counts_against_metadata_test_split(
-    pair_df: pd.DataFrame,
-    intersection_df: pd.DataFrame,
-) -> None:
-    """Validate pair CSV counts against the BDD100k 10K metadata test split.
-
-    The supplied pair CSV describes the environmental distribution of the
-    official 10K ``test`` images that also have matching 100K metadata. These
-    counts are useful for validating that the pair specification and
-    intersection CSV correspond to each other, but they are not counts for the
-    evaluator's independently reconstructed held-out segmentation subset.
-
-    Steps
-    -----
-    1. Select rows whose 10K image and 100K metadata both belong to ``test``.
-    2. Count each requested weather/time-of-day pair in that metadata subset.
-    3. Compare those counts with the pair CSV and reject stale/inconsistent
-       inputs before model evaluation begins.
-
-    Parameters
-    ----------
-    pair_df : pd.DataFrame
-        Validated pair specification containing ``weather``, ``time_of_day``,
-        and source ``count`` values.
-    intersection_df : pd.DataFrame
-        Validated image-level 10K/100K intersection metadata.
-
-    Returns
-    -------
-    None
-        The function returns only after every source count is validated.
-
-    Raises
-    ------
-    ValueError
-        If no same-split metadata test rows exist or any pair count differs
-        from the count recorded in the pair CSV.
-    """
-    # Restrict validation to the official test/test intersection represented by
-    # the pair CSV. Cross-split rows must not influence the source counts.
-    metadata_test_df = intersection_df.loc[
-        (intersection_df["image_split"] == "test")
-        & (intersection_df["label_split"] == "test")
-        & (intersection_df["same_split"] == "True")
-    ]
-    if metadata_test_df.empty:
-        raise ValueError(
-            "Intersection CSV contains no same-split BDD100k 10K/100K test rows."
-        )
-
-    mismatches: List[str] = []
-    for _, pair_row in pair_df.iterrows():
-        weather = str(pair_row["weather"])
-        time_of_day = str(pair_row["time_of_day"])
-        expected_count = int(pair_row["count"])
-
-        pair_mask = (
-            (metadata_test_df["weather"] == weather)
-            & (metadata_test_df["time_of_day"] == time_of_day)
-        )
-        actual_count = int(pair_mask.sum())
-        if actual_count != expected_count:
-            mismatches.append(
-                f"{weather}/{time_of_day}: expected {expected_count}, "
-                f"found {actual_count}"
-            )
-
-    if mismatches:
-        raise ValueError(
-            "Pair CSV counts do not match the BDD100k 10K metadata test split: "
-            + "; ".join(mismatches)
-        )
-
-
 def attach_intersection_metadata(
     test_df: pd.DataFrame,
     intersection_df: pd.DataFrame,
@@ -1200,59 +1114,127 @@ def build_pair_test_frames(
     annotated_test_df: pd.DataFrame,
     pair_df: pd.DataFrame,
 ) -> List[Tuple[str, str, int, int, pd.DataFrame]]:
-    """Build one held-out segmentation DataFrame per requested condition pair.
+    """Build and validate one held-out DataFrame per evaluation condition pair.
 
     Steps
     -----
-    1. Filter the annotated held-out set for every pair in the input CSV.
-    2. Preserve the pair CSV count as source metadata rather than treating it as
-       a held-out segmentation count.
-    3. Return only pairs that have at least one evaluable segmentation sample.
+    1. Remove rows whose weather or time of day is ``undefined`` because the
+       analyzer excludes those rows before writing the pair CSV.
+    2. Count every observed pair in the held-out evaluation population.
+    3. Require the pair CSV to contain exactly the same pairs with exactly the
+       same counts.
+    4. Build one segmentation DataFrame per validated pair.
 
     Parameters
     ----------
     annotated_test_df : pd.DataFrame
         Held-out rows matched to the 10K/100K intersection metadata.
     pair_df : pd.DataFrame
-        Validated pair specification. Its ``count`` column describes the
-        official 10K metadata test split, not ``annotated_test_df``.
+        Validated pair specification generated from this same held-out
+        evaluation population.
 
     Returns
     -------
     List[Tuple[str, str, int, int, pd.DataFrame]]
-        Tuples of weather, time of day, source pair-CSV count, actual held-out
-        evaluation count, and matching segmentation sample rows.
+        Tuples of weather, time of day, pair-CSV count, evaluation count, and
+        matching segmentation sample rows. The two counts are guaranteed equal.
 
     Raises
     ------
     ValueError
-        If no requested pair has an evaluable held-out segmentation sample.
+        If no defined evaluation rows exist, pair sets differ, or any pair CSV
+        count differs from the number of held-out samples actually evaluated.
     """
+    # The analyzer excludes undefined environment labels before counting pairs,
+    # so validation must use the identical population here.
+    evaluable_df = annotated_test_df.loc[
+        (annotated_test_df["weather"] != "undefined")
+        & (annotated_test_df["time_of_day"] != "undefined")
+    ].copy()
+    if evaluable_df.empty:
+        raise ValueError(
+            "No held-out metadata rows have defined weather and time_of_day values."
+        )
+
+    # Build maps for both inputs so missing, extra, and count-mismatched pairs
+    # all fail before any checkpoint or GPU work begins.
+    actual_counts = (
+        evaluable_df.groupby(["weather", "time_of_day"], sort=False)
+        .size()
+        .to_dict()
+    )
+    expected_counts = {
+        (str(row["weather"]), str(row["time_of_day"])): int(row["count"])
+        for _, row in pair_df.iterrows()
+    }
+
+    actual_keys = set(actual_counts)
+    expected_keys = set(expected_counts)
+    missing_pairs = sorted(actual_keys - expected_keys)
+    extra_pairs = sorted(expected_keys - actual_keys)
+    mismatches: List[str] = []
+    for pair_key in sorted(actual_keys & expected_keys):
+        actual_count = int(actual_counts[pair_key])
+        expected_count = expected_counts[pair_key]
+        if actual_count != expected_count:
+            mismatches.append(
+                f"{pair_key[0]}/{pair_key[1]}: pair CSV={expected_count}, "
+                f"evaluation={actual_count}"
+            )
+
+    if missing_pairs or extra_pairs or mismatches:
+        details: List[str] = []
+        if missing_pairs:
+            details.append(
+                "missing from pair CSV: "
+                + ", ".join(f"{weather}/{time_of_day}" for weather, time_of_day in missing_pairs)
+            )
+        if extra_pairs:
+            details.append(
+                "not present in evaluation subset: "
+                + ", ".join(f"{weather}/{time_of_day}" for weather, time_of_day in extra_pairs)
+            )
+        if mismatches:
+            details.append("count mismatches: " + "; ".join(mismatches))
+        raise ValueError(
+            "Pair CSV does not match the held-out evaluation population: "
+            + " | ".join(details)
+            + ". Regenerate ./data/weather_timeofday_pair_data.csv with "
+            "analyze_100k_10k_intersection.py."
+        )
+
     pair_frames: List[Tuple[str, str, int, int, pd.DataFrame]] = []
 
     for _, pair_row in pair_df.iterrows():
         weather = str(pair_row["weather"])
         time_of_day = str(pair_row["time_of_day"])
-        source_count = int(pair_row["count"])
+        pair_csv_count = int(pair_row["count"])
 
         # Exact matching avoids inventing aliases between environmental categories.
         pair_mask = (
-            (annotated_test_df["weather"] == weather)
-            & (annotated_test_df["time_of_day"] == time_of_day)
+            (evaluable_df["weather"] == weather)
+            & (evaluable_df["time_of_day"] == time_of_day)
         )
-        subset_df = annotated_test_df.loc[
+        subset_df = evaluable_df.loc[
             pair_mask, ["image_paths", "mask_paths"]
         ].reset_index(drop=True)
-        actual_count = len(subset_df)
+        evaluation_count = len(subset_df)
 
-        if actual_count > 0:
-            pair_frames.append(
-                (weather, time_of_day, source_count, actual_count, subset_df)
+        # Equality was validated above; keeping both values in the output makes
+        # the data provenance explicit without allowing them to diverge silently.
+        pair_frames.append(
+            (
+                weather,
+                time_of_day,
+                pair_csv_count,
+                evaluation_count,
+                subset_df,
             )
+        )
 
     if not pair_frames:
         raise ValueError(
-            "None of the weather/time_of_day pairs has a held-out segmentation sample."
+            "No weather/time_of_day pairs are available for held-out evaluation."
         )
 
     return pair_frames
@@ -1312,7 +1294,7 @@ def flatten_performance_metrics(
 
     Steps
     -----
-    1. Store the pair labels, source count, evaluation count, and scalar metrics.
+    1. Store the pair labels, pair-CSV count, evaluation count, and scalar metrics.
     2. Expand per-class pixel accuracy and IoU lists into named columns.
 
     Parameters
@@ -1322,9 +1304,10 @@ def flatten_performance_metrics(
     time_of_day : str
         Time-of-day category for the evaluated subset.
     source_count : int
-        Count recorded in the pair CSV for the official 10K metadata test split.
+        Count recorded in the pair CSV for this held-out evaluation pair.
     evaluation_count : int
-        Number of held-out segmentation images actually evaluated for the pair.
+        Number of held-out segmentation images actually evaluated for the pair;
+        guaranteed to equal ``source_count``.
     metrics : Dict[str, float | List[float]]
         Averaged segmentation metrics for the pair.
 
@@ -1433,14 +1416,14 @@ def main() -> None:
     Steps
     -----
     1. Load the pair specification and 10K/100K intersection metadata.
-    2. Validate pair CSV source counts against the official 10K metadata test split.
-    3. Reconstruct the held-out segmentation split used by the base evaluator
+    2. Reconstruct the held-out segmentation split used by the base evaluator
        and keep only rows present in the metadata intersection.
-    4. Build pair subsets using their actual held-out segmentation counts.
-    5. Load the trained checkpoint only after the data mapping is proven valid.
-    6. Evaluate each non-empty pair for the requested number of runs.
-    7. Print and export source counts, evaluation counts, and all metrics.
-    8. Optionally visualize samples from the union of evaluated pairs.
+    3. Validate that every pair CSV count exactly matches the corresponding
+       held-out evaluation count.
+    4. Load the trained checkpoint only after the data mapping is proven valid.
+    5. Evaluate each pair for the requested number of runs.
+    6. Print and export the equal pair/evaluation counts and all metrics.
+    7. Optionally visualize samples from the union of evaluated pairs.
 
     Raises
     ------
@@ -1457,12 +1440,10 @@ def main() -> None:
     print("PERFORMANCE BY WEATHER / TIME OF DAY")
     print("=" * 76)
 
-    # Validate both CSV inputs before loading the model so an inconsistent data
-    # specification fails without wasting checkpoint/GPU resources.
+    # Load both CSV inputs before model work; pair counts are validated only
+    # after reconstructing the exact held-out segmentation population they describe.
     pair_df = load_pair_specification(args.pair_csv)
     intersection_df = load_intersection_metadata(args.intersection_csv)
-    validate_pair_counts_against_metadata_test_split(pair_df, intersection_df)
-    print("Validated pair CSV counts against the BDD100k 10K metadata test split.")
 
     print("Loading BDD100k held-out test split...")
     _, _, test_df = load_dataset_from_files()
@@ -1473,24 +1454,14 @@ def main() -> None:
     )
 
     pair_frames = build_pair_test_frames(annotated_test_df, pair_df)
-    evaluated_pair_keys = {
-        (weather, time_of_day)
-        for weather, time_of_day, _, _, _ in pair_frames
-    }
-    skipped_pairs = [
-        (str(row["weather"]), str(row["time_of_day"]))
-        for _, row in pair_df.iterrows()
-        if (str(row["weather"]), str(row["time_of_day"])) not in evaluated_pair_keys
-    ]
+    print(
+        "Validated pair CSV counts against the held-out evaluation population; "
+        "pair_csv_count == evaluation_count for every pair."
+    )
     print(
         f"Built {len(pair_frames)} evaluable pairs covering "
         f"{sum(pair[3] for pair in pair_frames)} held-out segmentation images."
     )
-    if skipped_pairs:
-        print(
-            "Skipping pairs with no held-out segmentation sample: "
-            + ", ".join(f"{weather}/{time_of_day}" for weather, time_of_day in skipped_pairs)
-        )
 
     print(f"Loading checkpoint from: {args.checkpoint}")
     model = load_trained_model(args.checkpoint, Configuration.DEVICE)
