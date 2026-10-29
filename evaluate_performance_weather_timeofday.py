@@ -1405,6 +1405,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--visualize",
         action="store_true",
+        default=True,
         help="Export sample predictions from the union of positive-count pairs.",
     )
     return parser.parse_args()
