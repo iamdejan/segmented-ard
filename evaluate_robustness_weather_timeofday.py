@@ -3,10 +3,12 @@
 This module adjusts ``evaluate_robustness.py`` so evaluation is driven by
 ``./data/weather_timeofday_pair_data.csv`` and the image-level metadata in
 ``./data/bdd100k_10k_images_with_100k_metadata_intersection.csv``. The original
-BDD100k held-out test split, PGD attack, clean/adversarial metrics, and
+BDD100k held-out segmentation split, PGD attack, clean/adversarial metrics, and
 untargeted ASR calculation are preserved. The intersection CSV supplies concrete
-image IDs and environment labels, while the pair CSV supplies expected counts
-used to validate every reconstructed condition subset.
+image IDs and environment labels. The pair CSV defines the condition pairs and
+records their counts in the official BDD100k 10K test metadata split; those
+source counts are validated against the intersection CSV but are not imposed on
+the separate held-out segmentation subset used for robustness evaluation.
 """
 
 import argparse
@@ -955,6 +957,10 @@ def visualize_adversarial_predictions(
 def load_pair_specification(pair_csv_path: str) -> pd.DataFrame:
     """Load and validate the requested weather/time-of-day pair specification.
 
+    The ``count`` column is treated as the source count for the official BDD100k
+    10K metadata test split. It is not assumed to equal the number of samples in
+    the evaluator's separately reconstructed held-out segmentation subset.
+
     Steps
     -----
     1. Read the CSV and discard any exported unnamed index column.
@@ -1028,8 +1034,8 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
 
     Steps
     -----
-    1. Read the intersection CSV and require the image ID, weather,
-       ``timeofday``, image split, and image path columns.
+    1. Read the intersection CSV and require the image ID, environment labels,
+       label/image split metadata, same-split flag, and image path.
     2. Normalize string fields and reject missing or duplicate image IDs.
     3. Verify every ``image_path`` basename matches its declared ``id``.
     4. Rename ``timeofday`` to ``time_of_day`` for alignment with the pair CSV.
@@ -1042,8 +1048,8 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        Validated table with ``id``, ``weather``, ``time_of_day``,
-        ``image_split``, and ``metadata_image_path`` columns.
+        Validated table with ``id``, ``weather``, ``time_of_day``, split
+        metadata, and ``metadata_image_path`` columns.
 
     Raises
     ------
@@ -1061,7 +1067,15 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
         )
 
     intersection_df = pd.read_csv(intersection_csv_path, dtype=str)
-    required_columns = {"id", "weather", "timeofday", "image_split", "image_path"}
+    required_columns = {
+        "id",
+        "weather",
+        "timeofday",
+        "label_split",
+        "image_split",
+        "same_split",
+        "image_path",
+    }
     missing_columns = required_columns.difference(intersection_df.columns)
     if missing_columns:
         raise ValueError(
@@ -1070,7 +1084,15 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
         )
 
     intersection_df = intersection_df[
-        ["id", "weather", "timeofday", "image_split", "image_path"]
+        [
+            "id",
+            "weather",
+            "timeofday",
+            "label_split",
+            "image_split",
+            "same_split",
+            "image_path",
+        ]
     ].copy()
     if intersection_df.isna().any().any():
         raise ValueError(
@@ -1079,7 +1101,15 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
 
     # Preserve category spelling exactly while removing accidental surrounding
     # whitespace introduced by manual CSV editing.
-    for column in ["id", "weather", "timeofday", "image_split", "image_path"]:
+    for column in [
+        "id",
+        "weather",
+        "timeofday",
+        "label_split",
+        "image_split",
+        "same_split",
+        "image_path",
+    ]:
         intersection_df[column] = intersection_df[column].str.strip()
         if (intersection_df[column] == "").any():
             raise ValueError(
@@ -1118,6 +1148,79 @@ def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
         }
     )
     return intersection_df
+
+
+def validate_pair_counts_against_metadata_test_split(
+    pair_df: pd.DataFrame,
+    intersection_df: pd.DataFrame,
+) -> None:
+    """Validate pair CSV counts against the BDD100k 10K metadata test split.
+
+    The supplied pair CSV describes the environmental distribution of the
+    official 10K ``test`` images that also have matching 100K metadata. These
+    counts validate that the pair specification and intersection CSV correspond
+    to each other; they are not counts for the evaluator's independently
+    reconstructed held-out segmentation subset.
+
+    Steps
+    -----
+    1. Select rows whose 10K image and 100K metadata both belong to ``test``.
+    2. Count each requested weather/time-of-day pair in that metadata subset.
+    3. Compare those counts with the pair CSV before running PGD evaluation.
+
+    Parameters
+    ----------
+    pair_df : pd.DataFrame
+        Validated pair specification containing ``weather``, ``time_of_day``,
+        and source ``count`` values.
+    intersection_df : pd.DataFrame
+        Validated image-level 10K/100K intersection metadata.
+
+    Returns
+    -------
+    None
+        The function returns only after every source count is validated.
+
+    Raises
+    ------
+    ValueError
+        If no same-split metadata test rows exist or any pair count differs
+        from the count recorded in the pair CSV.
+    """
+    # Restrict validation to the official test/test intersection represented by
+    # the pair CSV. Cross-split rows must not influence the source counts.
+    metadata_test_df = intersection_df.loc[
+        (intersection_df["image_split"] == "test")
+        & (intersection_df["label_split"] == "test")
+        & (intersection_df["same_split"] == "True")
+    ]
+    if metadata_test_df.empty:
+        raise ValueError(
+            "Intersection CSV contains no same-split BDD100k 10K/100K test rows."
+        )
+
+    mismatches: List[str] = []
+    for _, pair_row in pair_df.iterrows():
+        weather = str(pair_row["weather"])
+        time_of_day = str(pair_row["time_of_day"])
+        expected_count = int(pair_row["count"])
+
+        pair_mask = (
+            (metadata_test_df["weather"] == weather)
+            & (metadata_test_df["time_of_day"] == time_of_day)
+        )
+        actual_count = int(pair_mask.sum())
+        if actual_count != expected_count:
+            mismatches.append(
+                f"{weather}/{time_of_day}: expected {expected_count}, "
+                f"found {actual_count}"
+            )
+
+    if mismatches:
+        raise ValueError(
+            "Pair CSV counts do not match the BDD100k 10K metadata test split: "
+            + "; ".join(mismatches)
+        )
 
 
 def attach_intersection_metadata(
@@ -1205,39 +1308,41 @@ def attach_intersection_metadata(
 def build_pair_test_frames(
     annotated_test_df: pd.DataFrame,
     pair_df: pd.DataFrame,
-) -> List[Tuple[str, str, int, pd.DataFrame]]:
-    """Build and count-validate one test DataFrame per requested condition pair.
+) -> List[Tuple[str, str, int, int, pd.DataFrame]]:
+    """Build one held-out segmentation DataFrame per requested condition pair.
 
     Steps
     -----
     1. Filter the annotated held-out set for every pair in the input CSV.
-    2. Compare each filtered size with the CSV ``count`` value.
-    3. Return positive-count subsets only after every pair count is validated.
+    2. Preserve the pair CSV count as source metadata rather than treating it as
+       a held-out segmentation count.
+    3. Return only pairs that have at least one evaluable segmentation sample.
 
     Parameters
     ----------
     annotated_test_df : pd.DataFrame
         Held-out rows matched to the 10K/100K intersection metadata.
     pair_df : pd.DataFrame
-        Validated pair specification containing expected counts.
+        Validated pair specification. Its ``count`` column describes the
+        official 10K metadata test split, not ``annotated_test_df``.
 
     Returns
     -------
-    List[Tuple[str, str, int, pd.DataFrame]]
-        Tuples of weather, time of day, expected count, and matching sample rows.
+    List[Tuple[str, str, int, int, pd.DataFrame]]
+        Tuples of weather, time of day, source pair-CSV count, actual held-out
+        evaluation count, and matching segmentation sample rows.
 
     Raises
     ------
     ValueError
-        If any actual pair count differs from the CSV or no positive pair exists.
+        If no requested pair has an evaluable held-out segmentation sample.
     """
-    pair_frames: List[Tuple[str, str, int, pd.DataFrame]] = []
-    mismatches: List[str] = []
+    pair_frames: List[Tuple[str, str, int, int, pd.DataFrame]] = []
 
     for _, pair_row in pair_df.iterrows():
         weather = str(pair_row["weather"])
         time_of_day = str(pair_row["time_of_day"])
-        expected_count = int(pair_row["count"])
+        source_count = int(pair_row["count"])
 
         # Exact matching avoids inventing aliases between environmental categories.
         pair_mask = (
@@ -1249,20 +1354,15 @@ def build_pair_test_frames(
         ].reset_index(drop=True)
         actual_count = len(subset_df)
 
-        if actual_count != expected_count:
-            mismatches.append(
-                f"{weather}/{time_of_day}: expected {expected_count}, found {actual_count}"
+        if actual_count > 0:
+            pair_frames.append(
+                (weather, time_of_day, source_count, actual_count, subset_df)
             )
-        elif expected_count > 0:
-            pair_frames.append((weather, time_of_day, expected_count, subset_df))
 
-    if mismatches:
-        raise ValueError(
-            "Pair counts do not match the held-out 10K/100K intersection subset: "
-            + "; ".join(mismatches)
-        )
     if not pair_frames:
-        raise ValueError("Pair CSV contains no weather/time_of_day pair with count > 0.")
+        raise ValueError(
+            "None of the weather/time_of_day pairs has a held-out segmentation sample."
+        )
 
     return pair_frames
 
@@ -1270,14 +1370,15 @@ def build_pair_test_frames(
 def flatten_robustness_metrics(
     weather: str,
     time_of_day: str,
-    sample_count: int,
+    source_count: int,
+    evaluation_count: int,
     metrics: Dict[str, Union[float, List[float]]],
 ) -> Dict[str, str | int | float]:
     """Flatten one pair's clean/adversarial robustness metrics for CSV export.
 
     Steps
     -----
-    1. Store pair labels, sample count, and all scalar robustness metrics.
+    1. Store pair labels, source count, evaluation count, and scalar robustness metrics.
     2. Expand clean and adversarial per-class IoUs into named columns.
     3. Add per-class relative IoU degradation for direct comparison.
 
@@ -1287,8 +1388,10 @@ def flatten_robustness_metrics(
         Weather category for the evaluated subset.
     time_of_day : str
         Time-of-day category for the evaluated subset.
-    sample_count : int
-        Number of held-out images in the pair subset.
+    source_count : int
+        Count recorded in the pair CSV for the official 10K metadata test split.
+    evaluation_count : int
+        Number of held-out segmentation images actually evaluated for the pair.
     metrics : Dict[str, Union[float, List[float]]]
         Robustness metrics returned by :func:`evaluate_robustness`.
 
@@ -1300,7 +1403,8 @@ def flatten_robustness_metrics(
     row: Dict[str, str | int | float] = {
         "weather": weather,
         "time_of_day": time_of_day,
-        "count": sample_count,
+        "pair_csv_count": source_count,
+        "evaluation_count": evaluation_count,
         "clean_mean_iou": cast(float, metrics["clean_mean_iou"]),
         "adv_mean_iou": cast(float, metrics["adv_mean_iou"]),
         "untargeted_asr": cast(float, metrics["untargeted_asr"]),
@@ -1421,13 +1525,14 @@ def main() -> None:
     Steps
     -----
     1. Load the pair specification and 10K/100K intersection metadata.
-    2. Reconstruct the exact held-out segmentation test split used by the base
-       evaluator and keep only rows present in the metadata intersection.
-    3. Validate every weather/time-of-day count against the pair CSV.
-    4. Load and freeze the trained checkpoint only after data validation succeeds.
-    5. Evaluate clean and PGD-adversarial metrics independently for each pair.
-    6. Print pair summaries and export scalar plus per-class metrics to CSV.
-    7. Optionally visualize clean/adversarial predictions from evaluated pairs.
+    2. Validate pair CSV source counts against the official 10K metadata test split.
+    3. Reconstruct the held-out segmentation split used by the base evaluator
+       and keep only rows present in the metadata intersection.
+    4. Build pair subsets using their actual held-out segmentation counts.
+    5. Load and freeze the trained checkpoint only after data validation succeeds.
+    6. Evaluate clean and PGD-adversarial metrics for each non-empty pair.
+    7. Print and export source counts, evaluation counts, and all metrics.
+    8. Optionally visualize clean/adversarial predictions from evaluated pairs.
 
     Raises
     ------
@@ -1452,6 +1557,8 @@ def main() -> None:
     # specification cannot trigger a costly adversarial evaluation.
     pair_df = load_pair_specification(args.pair_csv)
     intersection_df = load_intersection_metadata(args.intersection_csv)
+    validate_pair_counts_against_metadata_test_split(pair_df, intersection_df)
+    print("Validated pair CSV counts against the BDD100k 10K metadata test split.")
 
     print("Loading BDD100k held-out test split...")
     _, _, test_df = load_dataset_from_files()
@@ -1462,10 +1569,24 @@ def main() -> None:
     )
 
     pair_frames = build_pair_test_frames(annotated_test_df, pair_df)
+    evaluated_pair_keys = {
+        (weather, time_of_day)
+        for weather, time_of_day, _, _, _ in pair_frames
+    }
+    skipped_pairs = [
+        (str(row["weather"]), str(row["time_of_day"]))
+        for _, row in pair_df.iterrows()
+        if (str(row["weather"]), str(row["time_of_day"])) not in evaluated_pair_keys
+    ]
     print(
-        f"Validated {len(pair_frames)} positive-count pairs covering "
-        f"{sum(pair[2] for pair in pair_frames)} images."
+        f"Built {len(pair_frames)} evaluable pairs covering "
+        f"{sum(pair[3] for pair in pair_frames)} held-out segmentation images."
     )
+    if skipped_pairs:
+        print(
+            "Skipping pairs with no held-out segmentation sample: "
+            + ", ".join(f"{weather}/{time_of_day}" for weather, time_of_day in skipped_pairs)
+        )
 
     print(f"Loading checkpoint from: {args.checkpoint}")
     model = load_trained_model(args.checkpoint, Configuration.DEVICE)
@@ -1482,11 +1603,11 @@ def main() -> None:
 
     summary_rows: List[Dict[str, str | int | float]] = []
     evaluated_frames: List[pd.DataFrame] = []
-    for weather, time_of_day, sample_count, pair_test_df in pair_frames:
+    for weather, time_of_day, source_count, sample_count, pair_test_df in pair_frames:
         print("\n" + "-" * 76)
         print(
             f"Pair: weather={weather!r}, time_of_day={time_of_day!r}, "
-            f"count={sample_count}"
+            f"pair_csv_count={source_count}, evaluation_count={sample_count}"
         )
 
         # A dedicated loader keeps both clean and adversarial confusion counts
@@ -1513,6 +1634,7 @@ def main() -> None:
             flatten_robustness_metrics(
                 weather,
                 time_of_day,
+                source_count,
                 sample_count,
                 results,
             )
