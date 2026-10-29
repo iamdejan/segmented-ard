@@ -1338,12 +1338,68 @@ def flatten_performance_metrics(
     return row
 
 
+def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
+    """Parse a ``CHECKPOINT_NAME=CHECKPOINT_PATH`` command-line value.
+
+    The checkpoint name is used as the result-directory name, while the path is
+    passed unchanged to the model loader. Keeping both values in one argument
+    makes the output location deterministic for every evaluated checkpoint.
+
+    Steps
+    -----
+    1. Split the input on the first ``=`` so checkpoint paths may still contain
+       additional ``=`` characters.
+    2. Require both a non-empty checkpoint name and checkpoint path.
+    3. Reject path separators in the checkpoint name because it must represent
+       exactly one directory component under ``./model/weather_timeofday_pair``.
+    4. Return the validated ``(checkpoint_name, checkpoint_path)`` pair.
+
+    Parameters
+    ----------
+    value : str
+        Raw ``--checkpoint`` value in ``CHECKPOINT_NAME=CHECKPOINT_PATH`` form.
+
+    Returns
+    -------
+    Tuple[str, str]
+        Validated checkpoint name and checkpoint path.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        If the value is not in ``NAME=PATH`` form, either side is empty, or the
+        checkpoint name contains a path separator.
+    """
+    checkpoint_name, separator, checkpoint_path = value.partition("=")
+    checkpoint_name = checkpoint_name.strip()
+    checkpoint_path = checkpoint_path.strip()
+
+    if separator == "" or not checkpoint_name or not checkpoint_path:
+        raise argparse.ArgumentTypeError(
+            "--checkpoint must use CHECKPOINT_NAME=CHECKPOINT_PATH, for example "
+            "student_V5=./model/student_V5.pt."
+        )
+
+    # The name becomes one directory directly beneath the shared result root;
+    # rejecting separators prevents it from escaping or nesting that directory.
+    if (
+        checkpoint_name in {".", ".."}
+        or "/" in checkpoint_name
+        or "\\" in checkpoint_name
+    ):
+        raise argparse.ArgumentTypeError(
+            "Checkpoint name must be a single directory name without path separators."
+        )
+
+    return checkpoint_name, checkpoint_path
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for pair-wise performance evaluation.
 
     Steps
     -----
-    1. Require the model checkpoint path.
+    1. Require the model checkpoint name and path in ``NAME=PATH`` form.
     2. Default the pair specification and 10K/100K intersection CSVs to their
        project ``./data`` locations while allowing explicit overrides.
     3. Add batch-size, repetition, output, and visualization controls.
@@ -1362,9 +1418,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint",
-        type=str,
+        type=parse_checkpoint_spec,
         required=True,
-        help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
+        metavar="NAME=PATH",
+        help=(
+            "Checkpoint name and PyTorch checkpoint path, for example "
+            "student_V5=./model/student_V5.pt."
+        ),
     )
     parser.add_argument(
         "--pair-csv",
@@ -1399,8 +1459,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=str,
-        default="./model/performance_weather_timeofday.csv",
-        help="Destination CSV for pair-wise metrics.",
+        default="performance_weather_timeofday.csv",
+        help=(
+            "CSV filename for pair-wise metrics. It is always saved inside the "
+            "checkpoint-specific weather/time-of-day result directory."
+        ),
     )
     parser.add_argument(
         "--visualize",
@@ -1421,10 +1484,11 @@ def main() -> None:
        and keep only rows present in the metadata intersection.
     3. Validate that every pair CSV count exactly matches the corresponding
        held-out evaluation count.
-    4. Load the trained checkpoint only after the data mapping is proven valid.
-    5. Evaluate each pair for the requested number of runs.
-    6. Print and export the equal pair/evaluation counts and all metrics.
-    7. Optionally visualize samples from the union of evaluated pairs.
+    4. Resolve the checkpoint-specific result directory from ``--checkpoint``.
+    5. Load the trained checkpoint only after the data mapping is proven valid.
+    6. Evaluate each pair for the requested number of runs.
+    7. Print and export the equal pair/evaluation counts and all metrics.
+    8. Optionally visualize samples from the union of evaluated pairs.
 
     Raises
     ------
@@ -1464,8 +1528,20 @@ def main() -> None:
         f"{sum(pair[3] for pair in pair_frames)} held-out segmentation images."
     )
 
-    print(f"Loading checkpoint from: {args.checkpoint}")
-    model = load_trained_model(args.checkpoint, Configuration.DEVICE)
+    checkpoint_name, checkpoint_path = args.checkpoint
+
+    # Every artifact for one checkpoint belongs to the same directory so
+    # repeated evaluations cannot mix results from differently named models.
+    output_directory = os.path.join(
+        "./model",
+        "weather_timeofday_pair",
+        checkpoint_name,
+    )
+    os.makedirs(output_directory, exist_ok=True)
+
+    print(f"Checkpoint name: {checkpoint_name}")
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
     inference_transforms = A.Compose([
@@ -1530,17 +1606,19 @@ def main() -> None:
         print(f"  Mean IoU       : {cast(float, averaged_metrics['mean_iou']):.4f}")
         print(f"  Dice (macro)   : {cast(float, averaged_metrics['dice']):.4f}")
 
-    # Export all scalar and class-wise values so downstream comparison is lossless.
-    output_directory = os.path.dirname(args.output_csv)
-    if output_directory:
-        os.makedirs(output_directory, exist_ok=True)
-    pd.DataFrame(summary_rows).to_csv(args.output_csv, index=False)
+    # Export all scalar and class-wise values into the checkpoint-specific
+    # directory so downstream comparisons stay isolated by model name.
+    output_csv_path = os.path.join(output_directory, os.path.basename(args.output_csv))
+    pd.DataFrame(summary_rows).to_csv(output_csv_path, index=False)
     print("\n" + "=" * 76)
-    print(f"Saved pair-wise performance metrics to: {args.output_csv}")
+    print(f"Saved pair-wise performance metrics to: {output_csv_path}")
 
     if args.visualize:
         combined_test_df = pd.concat(evaluated_frames, ignore_index=True)
-        output_path = "./model/predictions_weather_timeofday.png"
+        output_path = os.path.join(
+            output_directory,
+            "predictions_weather_timeofday.png",
+        )
         print(f"Exporting sample predictions to {output_path}...")
         visualize_predictions(
             model=model,
