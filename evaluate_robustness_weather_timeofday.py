@@ -617,37 +617,6 @@ def pgd_attack(
     return x_adv
 
 
-def compute_untargeted_asr(clean_mean_iou: float, adv_mean_iou: float) -> float:
-    """Calculate the untargeted Attack Success Rate (ASR) from mean IoU values.
-
-    The formula measures relative degradation in mean IoU caused by the adversary:
-    ``ASR_untargeted = 1 - (mean_IoU_adversarial / mean_IoU_clean)``.
-    A score of 1.0 represents complete destruction of segmentation utility,
-    while 0.0 indicates absolute robustness.
-
-    Steps
-    -----
-    1. Guard against non-positive clean mean IoU to avoid division by zero.
-    2. Compute and return 1.0 - (adv_mean_iou / clean_mean_iou).
-
-    Parameters
-    ----------
-    clean_mean_iou : float
-        Mean Intersection over Union on clean, unperturbed inputs.
-    adv_mean_iou : float
-        Mean Intersection over Union on adversarial inputs.
-
-    Returns
-    -------
-    float
-        Untargeted ASR value.
-    """
-    # Guard against division by zero if clean model has zero performance
-    if clean_mean_iou <= 0.0:
-        return 0.0
-    return float(1.0 - (adv_mean_iou / clean_mean_iou))
-
-
 def evaluate_robustness(
     model: nn.Module,
     dataloader: DataLoader[Tuple[ImageTensor, MaskTensor]],
@@ -673,7 +642,6 @@ def evaluate_robustness(
     4. Run adversarial forward pass under ``torch.no_grad`` to obtain perturbed logits.
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
     6. Compute dataset-wide macro IoU, pixel accuracy, Dice score, and per-class IoU.
-    7. Calculate untargeted ASR via ``compute_untargeted_asr``.
 
     Parameters
     ----------
@@ -793,9 +761,6 @@ def evaluate_robustness(
     clean_mean_iou = float(smp.metrics.iou_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="macro").item())
     adv_mean_iou = float(smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="macro").item())
 
-    # Calculate untargeted ASR
-    untargeted_asr = compute_untargeted_asr(clean_mean_iou=clean_mean_iou, adv_mean_iou=adv_mean_iou)
-
     # Class-wise IoUs
     clean_class_iou = cast(List[float], smp.metrics.iou_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction=None).tolist())
     adv_class_iou = cast(List[float], smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction=None).tolist())
@@ -810,7 +775,6 @@ def evaluate_robustness(
     return {
         "clean_mean_iou": clean_mean_iou,
         "adv_mean_iou": adv_mean_iou,
-        "untargeted_asr": untargeted_asr,
         "clean_pixel_accuracy": clean_pixel_acc,
         "adv_pixel_accuracy": adv_pixel_acc,
         "clean_dice": clean_dice,
