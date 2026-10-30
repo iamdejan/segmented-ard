@@ -9,6 +9,12 @@ BDD100k test split. Three aligned per-image latency distributions are reported:
   and host-to-device transfer;
 * end-to-end latency: computational overhead plus inference latency.
 
+For segmentation_models_pytorch U-Net checkpoints, a second profiling pass also
+reports encoder-only, decoder-only, segmentation-head, decoder-plus-head, and
+component-sum latency. On CUDA, component timings use CUDA events so the encoder
+and decoder can be measured without inserting a synchronization barrier between
+network stages; on CPU they use perf_counter wall-clock timing.
+
 The latency DataLoader runs synchronously with ``num_workers=0``. This is
 intentional: worker prefetching would overlap data preparation with model
 execution and make per-image preprocessing overhead impossible to attribute
@@ -663,6 +669,211 @@ def _process_cpu_seconds(process: object) -> Optional[float]:
         return None
 
 
+class UnetComponentLatencyRecorder:
+    """Record SMP U-Net encoder/decoder/head latency during a normal forward pass.
+
+    Hooks are attached directly to ``model.encoder``, ``model.decoder``, and
+    ``model.segmentation_head``. This deliberately avoids manually reproducing
+    ``segmentation_models_pytorch``'s forward method, making the profiling pass
+    compatible with checkpoints created by SMP versions whose decoder call
+    signatures differ.
+
+    CUDA timings use events recorded on the current stream. A single device
+    synchronization is performed after the complete forward pass by the caller,
+    so no artificial synchronization barrier is inserted between encoder,
+    decoder, and segmentation head. CPU timings use ``time.perf_counter``.
+    """
+
+    _COMPONENT_NAMES = ("encoder", "decoder", "segmentation_head")
+
+    def __init__(self, model: nn.Module, device: torch.device) -> None:
+        self.model = model
+        self.device = device
+        self.use_cuda = device.type == "cuda"
+        self.handles: List[torch.utils.hooks.RemovableHandle] = []
+        self.cpu_start_times: Dict[str, float] = {}
+        self.cpu_elapsed_ms: Dict[str, float] = {}
+        self.cuda_events: Dict[str, Tuple[torch.cuda.Event, torch.cuda.Event]] = {}
+
+        missing = [name for name in self._COMPONENT_NAMES if not hasattr(model, name)]
+        if missing:
+            raise TypeError(
+                "Component profiling requires an SMP-style U-Net exposing "
+                f"model.encoder, model.decoder, and model.segmentation_head. "
+                f"Missing: {', '.join(missing)}"
+            )
+
+        if self.use_cuda:
+            self.cuda_events = {
+                name: (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                )
+                for name in self._COMPONENT_NAMES
+            }
+
+        for name in self._COMPONENT_NAMES:
+            module = cast(nn.Module, getattr(model, name))
+            self.handles.append(module.register_forward_pre_hook(self._make_pre_hook(name)))
+            self.handles.append(module.register_forward_hook(self._make_post_hook(name)))
+
+    def _make_pre_hook(self, name: str):
+        def pre_hook(_module: nn.Module, _inputs: Tuple[object, ...]) -> None:
+            if self.use_cuda:
+                self.cuda_events[name][0].record()
+            else:
+                self.cpu_start_times[name] = time.perf_counter()
+
+        return pre_hook
+
+    def _make_post_hook(self, name: str):
+        def post_hook(
+            _module: nn.Module,
+            _inputs: Tuple[object, ...],
+            _output: object,
+        ) -> None:
+            if self.use_cuda:
+                self.cuda_events[name][1].record()
+            else:
+                start = self.cpu_start_times.get(name)
+                if start is None:
+                    raise RuntimeError(f"Missing start timestamp for component '{name}'.")
+                self.cpu_elapsed_ms[name] = (time.perf_counter() - start) * 1000.0
+
+        return post_hook
+
+    def reset(self) -> None:
+        """Clear CPU-side timestamps before one measured forward pass."""
+        self.cpu_start_times.clear()
+        self.cpu_elapsed_ms.clear()
+
+    def elapsed_ms(self) -> Dict[str, float]:
+        """Return timings after the caller has synchronized CUDA, if applicable."""
+        if self.use_cuda:
+            values = {
+                name: float(start.elapsed_time(end))
+                for name, (start, end) in self.cuda_events.items()
+            }
+        else:
+            missing = [
+                name for name in self._COMPONENT_NAMES if name not in self.cpu_elapsed_ms
+            ]
+            if missing:
+                raise RuntimeError(
+                    "Forward hooks did not observe all expected U-Net components: "
+                    + ", ".join(missing)
+                )
+            values = dict(self.cpu_elapsed_ms)
+
+        return values
+
+    def close(self) -> None:
+        """Remove all hooks so normal model execution is restored."""
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+
+def measure_unet_component_latency_ms(
+    model: nn.Module,
+    dataloader: DataLoader[ImageTensor],
+    device: torch.device,
+    warmup_iterations: int = Configuration.WARMUP_ITERATIONS,
+) -> Dict[str, List[float]]:
+    """Measure encoder, decoder, and segmentation-head latency separately.
+
+    This is intentionally a *second* profiling pass. The primary benchmark's
+    inference/end-to-end distributions therefore remain directly comparable to
+    results produced by the original script. Each measured sample still executes
+    one ordinary ``model(X)`` call; hooks only delimit the three major SMP U-Net
+    components.
+
+    ``decoder`` means only ``model.decoder``. Because SMP keeps the final output
+    convolution/activation in ``model.segmentation_head``, the additional
+    ``decoder_with_head`` metric is also reported and is usually the more useful
+    quantity when discussing the complete upsampling/output side of U-Net.
+
+    On CUDA, values are device execution times measured with CUDA events. They do
+    not include input transfer, Python dispatch overhead, or synchronization
+    overhead. On CPU, values are wall-clock times measured with perf_counter.
+    """
+    model.eval()
+    use_cuda = device.type == "cuda"
+
+    if warmup_iterations < 0:
+        raise ValueError("warmup_iterations must be non-negative.")
+
+    measurements: Dict[str, List[float]] = {
+        "encoder": [],
+        "decoder": [],
+        "segmentation_head": [],
+        "decoder_with_head": [],
+        "component_sum": [],
+    }
+
+    data_iterator = iter(dataloader)
+
+    with torch.inference_mode():
+        # Warm up without hooks so hook/event setup itself is outside warm-up and
+        # outside the primary latency benchmark.
+        for _warmup_index in range(warmup_iterations):
+            try:
+                X = next(data_iterator)
+            except StopIteration as exc:
+                raise ValueError(
+                    "The dataloader yielded too few samples to complete the "
+                    "requested component-profiling warm-up iterations."
+                ) from exc
+
+            X = X.to(device)
+            _ = forward(model, X)
+            if use_cuda:
+                torch.cuda.synchronize(device)
+
+        recorder = UnetComponentLatencyRecorder(model, device)
+        try:
+            while True:
+                try:
+                    X = next(data_iterator)
+                except StopIteration:
+                    break
+
+                # Data preparation/transfer is deliberately outside component
+                # timings. Synchronize before the forward so a pending transfer
+                # cannot spill into the encoder's CUDA event interval.
+                X = X.to(device)
+                if use_cuda:
+                    torch.cuda.synchronize(device)
+
+                recorder.reset()
+                _ = forward(model, X)
+                if use_cuda:
+                    torch.cuda.synchronize(device)
+
+                component_ms = recorder.elapsed_ms()
+                encoder_ms = component_ms["encoder"]
+                decoder_ms = component_ms["decoder"]
+                head_ms = component_ms["segmentation_head"]
+
+                measurements["encoder"].append(encoder_ms)
+                measurements["decoder"].append(decoder_ms)
+                measurements["segmentation_head"].append(head_ms)
+                measurements["decoder_with_head"].append(decoder_ms + head_ms)
+                measurements["component_sum"].append(
+                    encoder_ms + decoder_ms + head_ms
+                )
+        finally:
+            recorder.close()
+
+    if not measurements["encoder"]:
+        raise ValueError(
+            "The dataloader yielded no measured samples after the component "
+            "profiling warm-up phase."
+        )
+
+    return measurements
+
+
 def measure_latency_ms(
     model: nn.Module,
     dataloader: DataLoader[ImageTensor],
@@ -1019,7 +1230,9 @@ def main() -> None:
        DataLoader so preprocessing overhead is measurable per image.
     3. Measure inference, computational overhead, and their additive end-to-end
        latency while collecting resource peaks.
-    4. Print latency distributions and resource-use summaries.
+    4. Run a second pass that profiles SMP U-Net encoder, decoder, and segmentation
+       head latency without changing the primary end-to-end benchmark.
+    5. Print latency distributions and resource-use summaries.
 
     Returns
     -------
@@ -1093,6 +1306,28 @@ def main() -> None:
     overhead_stats = compute_latency_statistics(latency_measurements["overhead"])
     end_to_end_stats = compute_latency_statistics(latency_measurements["end_to_end"])
 
+    print("Profiling U-Net encoder/decoder components on a second pass...")
+    component_measurements = measure_unet_component_latency_ms(
+        model,
+        test_loader,
+        Configuration.DEVICE,
+    )
+    encoder_stats = compute_latency_statistics(component_measurements["encoder"])
+    decoder_stats = compute_latency_statistics(component_measurements["decoder"])
+    head_stats = compute_latency_statistics(component_measurements["segmentation_head"])
+    decoder_with_head_stats = compute_latency_statistics(
+        component_measurements["decoder_with_head"]
+    )
+    component_sum_stats = compute_latency_statistics(component_measurements["component_sum"])
+
+    mean_component_sum = component_sum_stats["average"]
+    if mean_component_sum > 0.0:
+        encoder_mean_share = encoder_stats["average"] / mean_component_sum * 100.0
+        decoder_mean_share = decoder_stats["average"] / mean_component_sum * 100.0
+        head_mean_share = head_stats["average"] / mean_component_sum * 100.0
+    else:
+        encoder_mean_share = decoder_mean_share = head_mean_share = 0.0
+
     print(
         f"\nMeasured {len(latency_measurements['end_to_end'])} samples (batch size "
         f"{Configuration.LATENCY_BATCH_SIZE}, after "
@@ -1103,6 +1338,37 @@ def main() -> None:
         "Inference latency summary (forward pass only, ms):",
         inference_stats,
     )
+    print("-" * 76)
+    timing_basis = (
+        "CUDA-event device time"
+        if Configuration.DEVICE.type == "cuda"
+        else "CPU wall-clock time"
+    )
+    print(f"U-Net component profiling ({timing_basis}, second pass):")
+    print_latency_statistics("  Encoder-only latency (ms):", encoder_stats)
+    print_latency_statistics("  Decoder-only latency (ms):", decoder_stats)
+    print_latency_statistics("  Segmentation-head latency (ms):", head_stats)
+    print_latency_statistics(
+        "  Decoder + segmentation-head latency (ms):",
+        decoder_with_head_stats,
+    )
+    print_latency_statistics(
+        "  Encoder + decoder + segmentation-head sum (ms):",
+        component_sum_stats,
+    )
+    print(
+        "  Mean component share: "
+        f"encoder={encoder_mean_share:.1f}%, "
+        f"decoder={decoder_mean_share:.1f}%, "
+        f"segmentation_head={head_mean_share:.1f}%"
+    )
+    if Configuration.DEVICE.type == "cuda":
+        print(
+            "  NOTE: CUDA component times are GPU execution intervals. Their sum "
+            "need not exactly equal wall-clock full-forward latency because the "
+            "latter also includes Python/operator-dispatch and final synchronization "
+            "overhead."
+        )
     print("-" * 76)
     print_latency_statistics(
         "Computational overhead summary "
