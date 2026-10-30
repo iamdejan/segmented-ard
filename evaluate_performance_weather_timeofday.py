@@ -1323,8 +1323,8 @@ def flatten_performance_metrics(
         "evaluation_count": evaluation_count,
         "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
         "iou_macro": cast(float, metrics["iou"]),
-        "mean_iou": cast(float, metrics["mean_iou"]),
         "global_iou": cast(float, metrics["global_iou"]),
+        "mean_iou": cast(float, metrics["mean_iou"]),
         "dice_macro": cast(float, metrics["dice"]),
     }
 
