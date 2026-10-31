@@ -1178,12 +1178,100 @@ def print_latency_statistics(title: str, stats: Dict[str, float]) -> None:
     print(f"  Max         : {stats['max']:.3f}")
 
 
+def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
+    """Validate a named checkpoint specification for latency evaluation.
+
+    Steps
+    -----
+    1. Split ``NAME=PATH`` at its first equals sign.
+    2. Require both fields and ensure the name is a single directory component.
+    3. Return the checkpoint name and path for loading and CSV output.
+
+    Parameters
+    ----------
+    value : str
+        Command-line value in ``CHECKPOINT_NAME=CHECKPOINT_PATH`` format.
+
+    Returns
+    -------
+    Tuple[str, str]
+        Validated checkpoint name and filesystem path.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        If the specification is malformed or the name contains path separators.
+    """
+    checkpoint_name, separator, checkpoint_path = value.partition("=")
+    checkpoint_name = checkpoint_name.strip()
+    checkpoint_path = checkpoint_path.strip()
+
+    if not separator or not checkpoint_name or not checkpoint_path:
+        raise argparse.ArgumentTypeError(
+            "--checkpoint must use CHECKPOINT_NAME=CHECKPOINT_PATH, for example "
+            "student_V5=./model/student_V5.pt."
+        )
+
+    # A single directory name prevents the checkpoint label from changing the
+    # output root or creating an unintended hierarchy.
+    if checkpoint_name in {".", ".."} or "/" in checkpoint_name or "\\" in checkpoint_name:
+        raise argparse.ArgumentTypeError(
+            "Checkpoint name must be a single directory name without path separators."
+        )
+
+    return checkpoint_name, checkpoint_path
+
+
+def flatten_latency_metrics(
+    latency_stats: Dict[str, Dict[str, float]],
+    component_shares: Dict[str, float],
+    resources: Dict[str, Optional[float]],
+    measured_samples: int,
+) -> Dict[str, float | int | None]:
+    """Flatten latency and resource summaries into one CSV-compatible row.
+
+    Steps
+    -----
+    1. Prefix each latency statistic with its measured component name.
+    2. Record component shares and available or missing resource measurements.
+    3. Include the number of steady-state samples used for latency statistics.
+
+    Parameters
+    ----------
+    latency_stats : Dict[str, Dict[str, float]]
+        Per-component latency statistics, in milliseconds.
+    component_shares : Dict[str, float]
+        Percentage shares of encoder, decoder, and segmentation head.
+    resources : Dict[str, Optional[float]]
+        Resource peaks; missing optional sensors are represented by ``None``.
+    measured_samples : int
+        Number of timed samples after warm-up.
+
+    Returns
+    -------
+    Dict[str, float | int | None]
+        Flat, numeric result fields for one CSV row.
+    """
+    result: Dict[str, float | int | None] = {"measured_samples": measured_samples}
+
+    # Prefix the common percentile names to distinguish inference, overhead,
+    # end-to-end and U-Net component timings in the saved result.
+    for component, stats in latency_stats.items():
+        for statistic, value in stats.items():
+            result[f"{component}_{statistic}_ms"] = value
+
+    # Include the same component shares and sensor peaks that the console reports.
+    result.update(component_shares)
+    result.update(resources)
+    return result
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line options for latency and resource evaluation.
 
     Steps
     -----
-    1. Require the trained model checkpoint path.
+    1. Require one named checkpoint specification in ``NAME=PATH`` form.
     2. Accept an optional resource-monitor sampling interval in milliseconds.
 
     Returns
@@ -1199,9 +1287,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint",
-        type=str,
+        type=parse_checkpoint_spec,
         required=True,
-        help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
+        metavar="NAME=PATH",
+        help="Named checkpoint, for example student_V5=./model/student_V5.pt.",
     )
     parser.add_argument(
         "--resource-sample-interval-ms",
@@ -1233,11 +1322,12 @@ def main() -> None:
     4. Run a second pass that profiles SMP U-Net encoder, decoder, and segmentation
        head latency without changing the primary end-to-end benchmark.
     5. Print latency distributions and resource-use summaries.
+    6. Save the same statistics and resource peaks to checkpoint-specific CSV.
 
     Returns
     -------
     None
-        Results are written to standard output.
+        Results are printed and saved to ``./model/latency/{name}/result.csv``.
 
     Raises
     ------
@@ -1246,6 +1336,7 @@ def main() -> None:
         measurement constraints are violated.
     """
     args = parse_arguments()
+    checkpoint_name, checkpoint_path = args.checkpoint
 
     if args.resource_sample_interval_ms <= 0:
         raise ValueError("--resource-sample-interval-ms must be greater than zero.")
@@ -1254,8 +1345,9 @@ def main() -> None:
     print("END-TO-END LATENCY + RESOURCE OVERHEAD EVALUATION PIPELINE")
     print("=" * 76)
 
-    print(f"Loading checkpoint from: {args.checkpoint}")
-    model = load_trained_model(args.checkpoint, Configuration.DEVICE)
+    print(f"Checkpoint name: {checkpoint_name}")
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
     if Configuration.DEVICE.type == "cuda":
@@ -1437,6 +1529,35 @@ def main() -> None:
         "NVML device VRAM is whole-device usage."
     )
     print("=" * 76 + "\n")
+
+    # Match evaluate_performance.py: persist one flat row per named checkpoint.
+    # Creating the directory only after successful measurement avoids an empty
+    # result folder when loading or benchmarking fails.
+    output_directory = os.path.join("./model", "latency", checkpoint_name)
+    os.makedirs(output_directory, exist_ok=True)
+    output_csv_path = os.path.join(output_directory, "result.csv")
+
+    result_row = flatten_latency_metrics(
+        latency_stats={
+            "inference": inference_stats,
+            "overhead": overhead_stats,
+            "end_to_end": end_to_end_stats,
+            "encoder": encoder_stats,
+            "decoder": decoder_stats,
+            "segmentation_head": head_stats,
+            "decoder_with_head": decoder_with_head_stats,
+            "component_sum": component_sum_stats,
+        },
+        component_shares={
+            "encoder_mean_share_percent": encoder_mean_share,
+            "decoder_mean_share_percent": decoder_mean_share,
+            "segmentation_head_mean_share_percent": head_mean_share,
+        },
+        resources=resources,
+        measured_samples=len(latency_measurements["end_to_end"]),
+    )
+    pd.DataFrame([result_row]).to_csv(output_csv_path, index=False)
+    print(f"Saved latency metrics to: {output_csv_path}")
 
 
 if __name__ == "__main__":
