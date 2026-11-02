@@ -58,12 +58,15 @@ CLASS_COLORS: Final[np.ndarray] = np.array(
 
 # These aliases mirror the tensor/array shapes documented in
 # evaluate_performance.py and let jaxtyping catch shape mismatches close to the
-# source instead of surfacing a confusing error later in the UI callback.
-NumpyImage = Float[np.ndarray, "h w 3"]
-BatchImage = Float[Tensor, "b 3 h w"]
-Logits = Float[Tensor, "b 20 h w"]
-ClassIndexArray = UInt8[np.ndarray, "h w"]
-ColorMask = UInt8[np.ndarray, "h w 3"]
+# source instead of surfacing a confusing error later in the UI callback. Source
+# image axes deliberately use different symbolic names from model-space axes:
+# preprocessing resizes arbitrary source dimensions to 360x640, so reusing the
+# same ``h``/``w`` symbols would incorrectly require both shapes to be identical.
+NumpyImage = Float[np.ndarray, "source_h source_w 3"]
+BatchImage = Float[Tensor, "b 3 model_h model_w"]
+Logits = Float[Tensor, "b 20 model_h model_w"]
+ClassIndexArray = UInt8[np.ndarray, "mask_h mask_w"]
+ColorMask = UInt8[np.ndarray, "mask_h mask_w 3"]
 
 # Match the evaluation pipeline: every inference input is resized to 360x640,
 # while ToTensorV2 converts the HWC float array to CHW without introducing an
