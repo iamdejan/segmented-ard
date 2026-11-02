@@ -77,21 +77,40 @@ INFERENCE_TRANSFORM: Final[A.Compose] = A.Compose(
 
 APP_CSS: Final[str] = """
 .gradio-container {
-    max-width: 1280px !important;
-    margin: 0 auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 24px 3vw !important;
 }
 #app-title {
     text-align: center;
     margin: 12px 0 6px 0;
 }
 #model-selector {
-    max-width: 360px;
-    margin: 0 auto 24px auto;
+    width: min(440px, 90vw) !important;
+    max-width: 440px !important;
+    margin: 0 auto 28px auto;
 }
 #workspace {
+    width: min(1500px, 94vw) !important;
+    max-width: 1500px !important;
+    margin: 0 auto !important;
     border: 2px solid var(--border-color-primary);
     border-radius: 24px;
     padding: 18px;
+}
+#workspace > div {
+    width: 100% !important;
+}
+#workspace .tab-nav {
+    width: 100% !important;
+}
+#workspace .tab-nav button {
+    flex: 1 1 50% !important;
+    justify-content: center !important;
+}
+#workspace .tabitem {
+    width: 100% !important;
 }
 .panel-box {
     border: 2px solid var(--border-color-primary) !important;
@@ -611,7 +630,7 @@ def _build_upload_panel(
     tuple[gr.File, gr.Button]
         File picker and upload button for wiring to a processing callback.
     """
-    with gr.Column(elem_id=elem_id, elem_classes=["panel-box"]):
+    with gr.Column(scale=1, min_width=420, elem_id=elem_id, elem_classes=["panel-box"]):
         gr.Markdown(f"<div class='panel-heading'>{title}</div>")
         file_input = gr.File(
             label="Select File",
@@ -639,7 +658,7 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
     """
     # Blocks provides enough layout control to reproduce the title/dropdown and
     # side-by-side upload/result panels from the supplied mockup.
-    with gr.Blocks(title="Segmented ARD") as demo:
+    with gr.Blocks(title="Segmented ARD", fill_width=True) as demo:
         gr.Markdown("# Segmented ARD", elem_id="app-title")
         model_dropdown = gr.Dropdown(
             choices=repository.choices,
@@ -658,7 +677,7 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
                         file_types=[".jpg"],
                         elem_id="image-upload-panel",
                     )
-                    with gr.Column(elem_classes=["panel-box"]):
+                    with gr.Column(scale=1, min_width=420, elem_classes=["panel-box"]):
                         gr.Markdown("<div class='panel-heading'>Result</div>")
                         image_result = gr.Image(
                             label="Segmented Image",
@@ -674,7 +693,7 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
                         file_types=[".mp4", ".mov", ".mkv"],
                         elem_id="video-upload-panel",
                     )
-                    with gr.Column(elem_classes=["panel-box"]):
+                    with gr.Column(scale=1, min_width=420, elem_classes=["panel-box"]):
                         gr.Markdown("<div class='panel-heading'>Result</div>")
                         video_result = gr.Video(
                             label="Segmented Video",
