@@ -695,6 +695,11 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
             value=repository.default_choice,
             label="Model checkpoint",
             show_label=False,
+            # Gradio wraps components in a bordered/background container by
+            # default. The design calls for only the dropdown control itself, so
+            # disable that outer container instead of targeting generated Svelte
+            # class names with fragile CSS overrides.
+            container=False,
             interactive=True,
             elem_id="model-selector",
         )
