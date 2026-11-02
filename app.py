@@ -130,6 +130,12 @@ APP_CSS: Final[str] = """
 .result-frame {
     min-height: 300px;
 }
+.checkpoint-used {
+    margin-top: 10px;
+    text-align: center;
+    font-size: 0.95rem;
+    color: var(--body-text-color-subdued);
+}
 """
 
 
@@ -502,7 +508,7 @@ def segment_image(
     file_path: str,
     checkpoint_choice: str,
     segmenter: SemanticSegmenter,
-) -> Image.Image:
+) -> tuple[Image.Image, str]:
     """Validate and segment an uploaded JPG with the selected checkpoint.
 
     Parameters
@@ -516,8 +522,9 @@ def segment_image(
 
     Returns
     -------
-    PIL.Image.Image
-        Original image with its semantic segmentation mask blended on top.
+    tuple[PIL.Image.Image, str]
+        Original image with its semantic segmentation mask blended on top and a
+        short label identifying the checkpoint used for this inference.
 
     Raises
     ------
@@ -530,7 +537,8 @@ def segment_image(
         # Open within the callback so uploaded-file handles are released as soon
         # as the request completes.
         with Image.open(path) as image:
-            return segmenter.segment(image, checkpoint_choice)
+            segmented_image = segmenter.segment(image, checkpoint_choice)
+            return segmented_image, _checkpoint_used_text(checkpoint_choice)
     except gr.Error:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
@@ -541,7 +549,7 @@ def segment_video(
     file_path: str,
     checkpoint_choice: str,
     segmenter: SemanticSegmenter,
-) -> str:
+) -> tuple[str, str]:
     """Segment every frame of an uploaded video with one selected checkpoint.
 
     The video is decoded frame-by-frame with PyAV. Every frame goes through the
@@ -560,8 +568,9 @@ def segment_video(
 
     Returns
     -------
-    str
-        Path to the generated H.264 MP4 displayed by Gradio.
+    tuple[str, str]
+        Path to the generated H.264 MP4 displayed by Gradio and a short label
+        identifying the checkpoint used for every frame.
 
     Raises
     ------
@@ -609,7 +618,25 @@ def segment_video(
         output_path.unlink(missing_ok=True)
         raise gr.Error(f"Could not process the video: {exc}") from exc
 
-    return str(output_path)
+    return str(output_path), _checkpoint_used_text(checkpoint_choice)
+
+
+def _checkpoint_used_text(checkpoint_choice: str) -> str:
+    """Format the checkpoint label displayed beneath an inference result.
+
+    Parameters
+    ----------
+    checkpoint_choice : str
+        Dropdown value identifying the checkpoint used for inference.
+
+    Returns
+    -------
+    str
+        Markdown text showing the exact checkpoint path used for the result.
+    """
+    # Render the path as inline code so it remains readable even when checkpoint
+    # names contain underscores or other Markdown-significant characters.
+    return f"Model checkpoint used: `{checkpoint_choice}`"
 
 
 def _build_upload_panel(
@@ -688,6 +715,10 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
                             interactive=False,
                             elem_classes=["result-frame"],
                         )
+                        image_checkpoint_used = gr.Markdown(
+                            "Model checkpoint used: —",
+                            elem_classes=["checkpoint-used"],
+                        )
 
             with gr.Tab("Video"):
                 with gr.Row(equal_height=True):
@@ -703,18 +734,22 @@ def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.B
                             interactive=False,
                             elem_classes=["result-frame"],
                         )
+                        video_checkpoint_used = gr.Markdown(
+                            "Model checkpoint used: —",
+                            elem_classes=["checkpoint-used"],
+                        )
 
         # Bind the segmenter via partial while leaving the model dropdown as a
         # live input, so each click uses exactly the checkpoint shown in the UI.
         image_button.click(
             fn=partial(segment_image, segmenter=segmenter),
             inputs=[image_file, model_dropdown],
-            outputs=image_result,
+            outputs=[image_result, image_checkpoint_used],
         )
         video_button.click(
             fn=partial(segment_video, segmenter=segmenter),
             inputs=[video_file, model_dropdown],
-            outputs=video_result,
+            outputs=[video_result, video_checkpoint_used],
         )
 
     return demo
