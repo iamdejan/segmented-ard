@@ -8,6 +8,7 @@ Attack Success Rate (ASR).
 
 import argparse
 import glob
+import os
 from typing import Dict, List, Optional, Tuple, Union, cast
 
 import albumentations as A
@@ -943,12 +944,121 @@ def visualize_adversarial_predictions(
     plt.close(fig)
 
 
+def flatten_robustness_metrics(
+    metrics: Dict[str, Union[float, List[float]]],
+) -> Dict[str, float]:
+    """Flatten clean/adversarial robustness metrics for CSV export.
+
+    Steps
+    -----
+    1. Store the scalar robustness metrics in one flat result row.
+    2. Expand clean and adversarial per-class IoUs into named columns.
+    3. Add per-class relative IoU degradation for direct comparison.
+
+    Parameters
+    ----------
+    metrics : Dict[str, Union[float, List[float]]]
+        Robustness metrics returned by :func:`evaluate_robustness`.
+
+    Returns
+    -------
+    Dict[str, float]
+        Flat row ready for DataFrame/CSV export.
+    """
+    row: Dict[str, float] = {
+        "clean_mean_iou": cast(float, metrics["clean_mean_iou"]),
+        "adv_mean_iou": cast(float, metrics["adv_mean_iou"]),
+        "untargeted_asr": cast(float, metrics["untargeted_asr"]),
+        "clean_pixel_accuracy": cast(float, metrics["clean_pixel_accuracy"]),
+        "adv_pixel_accuracy": cast(float, metrics["adv_pixel_accuracy"]),
+        "clean_dice": cast(float, metrics["clean_dice"]),
+        "adv_dice": cast(float, metrics["adv_dice"]),
+        "clean_batch_macro_iou": cast(float, metrics["clean_batch_macro_iou"]),
+        "adv_batch_macro_iou": cast(float, metrics["adv_batch_macro_iou"]),
+    }
+
+    # Preserve class-wise clean/adversarial values and their relative loss so
+    # the CSV contains the same robustness detail printed by the CLI report.
+    clean_class_iou = cast(List[float], metrics["clean_class_iou"])
+    adv_class_iou = cast(List[float], metrics["adv_class_iou"])
+    for class_id in range(Configuration.NUM_VALID_CLASSES):
+        class_slug = CLASS_NAMES[class_id].replace(" ", "_")
+        clean_value = clean_class_iou[class_id]
+        adv_value = adv_class_iou[class_id]
+        degradation = (
+            ((clean_value - adv_value) / clean_value) * 100.0
+            if clean_value > 0.0
+            else 0.0
+        )
+        row[f"clean_class_iou_{class_id}_{class_slug}"] = clean_value
+        row[f"adv_class_iou_{class_id}_{class_slug}"] = adv_value
+        row[f"class_iou_degradation_pct_{class_id}_{class_slug}"] = degradation
+
+    return row
+
+
+def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
+    """Parse a ``CHECKPOINT_NAME=CHECKPOINT_PATH`` command-line value.
+
+    The checkpoint name becomes the result-directory name, while the path is
+    passed unchanged to the model loader. Keeping both values in one named
+    argument makes the output location deterministic for each checkpoint.
+
+    Steps
+    -----
+    1. Split the input on the first ``=`` so checkpoint paths may contain
+       additional ``=`` characters.
+    2. Require both a non-empty checkpoint name and checkpoint path.
+    3. Reject path separators in the checkpoint name because it must represent
+       exactly one directory component under ``./model/robustness``.
+    4. Return the validated ``(checkpoint_name, checkpoint_path)`` pair.
+
+    Parameters
+    ----------
+    value : str
+        Raw ``--checkpoint`` value in ``CHECKPOINT_NAME=CHECKPOINT_PATH`` form.
+
+    Returns
+    -------
+    Tuple[str, str]
+        Validated checkpoint name and checkpoint path.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        If the value is not in ``NAME=PATH`` form, either side is empty, or the
+        checkpoint name contains a path separator.
+    """
+    checkpoint_name, separator, checkpoint_path = value.partition("=")
+    checkpoint_name = checkpoint_name.strip()
+    checkpoint_path = checkpoint_path.strip()
+
+    if separator == "" or not checkpoint_name or not checkpoint_path:
+        raise argparse.ArgumentTypeError(
+            "--checkpoint must use CHECKPOINT_NAME=CHECKPOINT_PATH, for example "
+            "student_V5=./model/student_V5.pt."
+        )
+
+    # The name becomes one directory directly beneath the robustness result
+    # root; rejecting separators prevents escaping or nesting that directory.
+    if (
+        checkpoint_name in {".", ".."}
+        or "/" in checkpoint_name
+        or "\\" in checkpoint_name
+    ):
+        raise argparse.ArgumentTypeError(
+            "Checkpoint name must be a single directory name without path separators."
+        )
+
+    return checkpoint_name, checkpoint_path
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments for the robustness evaluation script.
 
     Steps
     -----
-    1. Configure ArgumentParser with mandatory model checkpoint positional argument.
+    1. Require exactly one named ``--checkpoint`` value in ``NAME=PATH`` form.
     2. Add optional arguments for attack parameters and visualization export.
     3. Parse and return the argument namespace.
 
@@ -960,12 +1070,17 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate adversarial robustness of any trained segmentation model (.pt) using 10-step PGD."
     )
-    # The 1 mandatory argument requested by the user
+    # Keep the checkpoint name and path in one named argument so the name can
+    # deterministically select the checkpoint-specific result directory.
     parser.add_argument(
         "--checkpoint",
-        type=str,
+        type=parse_checkpoint_spec,
         required=True,
-        help="Filename or path of the trained model checkpoint (.pt file).",
+        metavar="NAME=PATH",
+        help=(
+            "Checkpoint name and trained model checkpoint path, for example "
+            "student_V5=./model/student_V5.pt."
+        ),
     )
     parser.add_argument(
         "--epsilon",
@@ -1005,12 +1120,25 @@ def main() -> None:
 
     Steps
     -----
-    1. Parse model path and attack configuration from command-line arguments.
-    2. Load trained model checkpoint and place on target compute device.
-    3. Load test partition and construct evaluation DataLoader.
-    4. Run clean and 10-step PGD adversarial evaluation.
-    5. Log comprehensive metrics and untargeted Attack Success Rate (ASR).
-    6. Optionally export comparison visualizations.
+    1. Parse checkpoint name/path and attack configuration from command-line arguments.
+    2. Create the checkpoint-specific robustness result directory.
+    3. Load trained model checkpoint and place on target compute device.
+    4. Load test partition and construct evaluation DataLoader.
+    5. Run clean and 10-step PGD adversarial evaluation.
+    6. Save scalar and per-class robustness metrics to ``result.csv``.
+    7. Log comprehensive metrics and untargeted Attack Success Rate (ASR).
+    8. Optionally export comparison visualizations.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the requested checkpoint file does not exist.
+    TypeError
+        If the loaded checkpoint is not a ``torch.nn.Module``.
+    ValueError
+        If the evaluation dataloader yields zero batches.
+    OSError
+        If the checkpoint-specific result directory or CSV cannot be written.
     """
     args = parse_arguments()
 
@@ -1018,9 +1146,18 @@ def main() -> None:
     print("ROBUSTNESS EVALUATION PIPELINE (10-Step PGD Attack)")
     print("=" * 68)
 
-    # Resolve and load model checkpoint
-    print(f"Loading checkpoint from: {args.checkpoint}")
-    model = load_trained_model(args.checkpoint, Configuration.DEVICE)
+    checkpoint_name, checkpoint_path = args.checkpoint
+
+    # Keep the CSV for each checkpoint isolated under the requested robustness
+    # result root so repeated evaluations cannot overwrite another model's result.
+    output_directory = os.path.join("./model", "robustness", checkpoint_name)
+    os.makedirs(output_directory, exist_ok=True)
+
+    # Resolve and load the checkpoint path only after the output location is
+    # deterministically derived from its user-provided checkpoint name.
+    print(f"Checkpoint name: {checkpoint_name}")
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
     # Load dataset test partition
@@ -1065,6 +1202,14 @@ def main() -> None:
     clean_class_iou = cast(List[float], results["clean_class_iou"])
     adv_class_iou = cast(List[float], results["adv_class_iou"])
 
+    # Mirror the weather/time-of-day evaluator's flat CSV layout so all scalar
+    # and class-wise robustness values remain machine-readable after evaluation.
+    output_csv_path = os.path.join(output_directory, "result.csv")
+    pd.DataFrame([flatten_robustness_metrics(results)]).to_csv(
+        output_csv_path,
+        index=False,
+    )
+
     # Print summary report
     print("\n" + "=" * 68)
     print("EVALUATION RESULTS & ATTACK SUCCESS RATE")
@@ -1077,6 +1222,7 @@ def main() -> None:
     print(f"  Adv Pixel Accuracy:     {adv_acc:.4f}")
     print(f"  Clean Macro Dice:       {clean_dice:.4f}")
     print(f"  Adv Macro Dice:         {adv_dice:.4f}")
+    print(f"  CSV Result:             {output_csv_path}")
     print("-" * 68)
     print("Per-Class IoU Breakdown:")
     print(f"  {'ID':>2}  {'Class Name':<15} {'Clean IoU':>10} {'Adv IoU':>10} {'Degradation':>12}")

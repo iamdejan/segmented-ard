@@ -834,12 +834,111 @@ def visualize_predictions(
     plt.close(fig)
 
 
+def flatten_performance_metrics(
+    metrics: Dict[str, float | List[float]],
+) -> Dict[str, float]:
+    """Flatten averaged performance metrics into one CSV-friendly row.
+
+    Steps
+    -----
+    1. Copy the scalar evaluation metrics into explicitly named CSV columns.
+    2. Expand per-class pixel accuracy and IoU lists into one column per class.
+
+    Parameters
+    ----------
+    metrics : Dict[str, float | List[float]]
+        Averaged segmentation metrics for the evaluated checkpoint.
+
+    Returns
+    -------
+    Dict[str, float]
+        Flat metric row ready to be written to ``result.csv``.
+    """
+    # Keep the scalar names aligned with the weather/time-of-day evaluator so
+    # result files from both scripts are straightforward to compare downstream.
+    row: Dict[str, float] = {
+        "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
+        "iou_macro": cast(float, metrics["iou"]),
+        "global_iou": cast(float, metrics["global_iou"]),
+        "mean_iou": cast(float, metrics["mean_iou"]),
+        "dice_macro": cast(float, metrics["dice"]),
+    }
+
+    # Expand list-valued metrics because storing Python list strings in a CSV
+    # would make class-wise values harder to filter and compare programmatically.
+    class_accuracy = cast(List[float], metrics["class_pixel_accuracy"])
+    class_iou = cast(List[float], metrics["class_iou"])
+    for class_id in range(19):
+        class_slug = CLASS_NAMES[class_id].replace(" ", "_")
+        row[f"class_pixel_accuracy_{class_id}_{class_slug}"] = class_accuracy[class_id]
+        row[f"class_iou_{class_id}_{class_slug}"] = class_iou[class_id]
+
+    return row
+
+
+def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
+    """Parse a ``CHECKPOINT_NAME=CHECKPOINT_PATH`` command-line value.
+
+    The checkpoint name becomes the directory name below ``./model/performance``,
+    while the checkpoint path is passed unchanged to the model loader. Keeping
+    both values in one ``--checkpoint`` argument guarantees that exactly one
+    named checkpoint specification determines both evaluation input and output.
+
+    Steps
+    -----
+    1. Split the value on the first ``=`` so checkpoint paths may contain
+       additional ``=`` characters.
+    2. Require both a non-empty checkpoint name and checkpoint path.
+    3. Reject path separators in the checkpoint name so it represents exactly
+       one directory below ``./model/performance``.
+    4. Return the validated checkpoint name and path.
+
+    Parameters
+    ----------
+    value : str
+        Raw ``--checkpoint`` value in ``CHECKPOINT_NAME=CHECKPOINT_PATH`` form.
+
+    Returns
+    -------
+    Tuple[str, str]
+        Validated checkpoint name and checkpoint path.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        If the value is not in ``NAME=PATH`` form, either side is empty, or the
+        checkpoint name contains a path separator.
+    """
+    checkpoint_name, separator, checkpoint_path = value.partition("=")
+    checkpoint_name = checkpoint_name.strip()
+    checkpoint_path = checkpoint_path.strip()
+
+    if separator == "" or not checkpoint_name or not checkpoint_path:
+        raise argparse.ArgumentTypeError(
+            "--checkpoint must use CHECKPOINT_NAME=CHECKPOINT_PATH, for example "
+            "student_V5=./model/student_V5.pt."
+        )
+
+    # The checkpoint name is one output-directory component; rejecting path
+    # separators prevents accidental nesting or escape from the result root.
+    if (
+        checkpoint_name in {".", ".."}
+        or "/" in checkpoint_name
+        or "\\" in checkpoint_name
+    ):
+        raise argparse.ArgumentTypeError(
+            "Checkpoint name must be a single directory name without path separators."
+        )
+
+    return checkpoint_name, checkpoint_path
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments for the performance evaluation script.
 
     Steps
     -----
-    1. Configure an ArgumentParser with an optional checkpoint path argument.
+    1. Require exactly one named checkpoint specification in ``NAME=PATH`` form.
     2. Add an optional batch-size argument to override the configuration.
     3. Add an optional number-of-runs argument controlling how many times
        evaluation is repeated before averaging.
@@ -855,9 +954,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint",
-        type=str,
+        type=parse_checkpoint_spec,
         required=True,
-        help="Path to the PyTorch checkpoint file (.pt) to evaluate.",
+        metavar="NAME=PATH",
+        help=(
+            "Checkpoint name and PyTorch checkpoint path, for example "
+            "student_V5=./model/student_V5.pt."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -875,27 +978,39 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load a checkpoint and report full segmentation metrics on the test split.
+    """Load a checkpoint, report metrics, and save them to checkpoint-specific CSV.
 
     Steps
     -----
-    1. Parse the checkpoint, batch-size, and number-of-runs arguments.
-    2. Load the trained model onto the target device.
-    3. Load the BDD100k test partition with the training-compatible transforms.
-    4. Build the evaluation DataLoader.
-    5. Run :func:`evaluate_segmentation_metrics` ``N`` times and average every
+    1. Parse the named checkpoint, batch-size, and number-of-runs arguments.
+    2. Create ``./model/performance/{checkpoint_name}`` for CSV output.
+    3. Load the trained model onto the target device.
+    4. Load the BDD100k test partition with the training-compatible transforms.
+    5. Build the evaluation DataLoader.
+    6. Run :func:`evaluate_segmentation_metrics` ``N`` times and average every
        reported metric (scalars and per-class lists alike) so the logged numbers
        are robust to single-run variance.
+    7. Flatten the averaged metrics and save them to ``result.csv``.
+    8. Export the existing sample-prediction visualization.
     """
     args = parse_arguments()
+
+    checkpoint_name, checkpoint_path = args.checkpoint
+
+    # Group each checkpoint's persisted metrics beneath its own directory so a
+    # new evaluation cannot overwrite the result of a differently named model.
+    output_directory = os.path.join("./model", "performance", checkpoint_name)
+    os.makedirs(output_directory, exist_ok=True)
+    output_csv_path = os.path.join(output_directory, "result.csv")
 
     print("\n" + "=" * 68)
     print("PERFORMANCE EVALUATION PIPELINE")
     print("=" * 68)
 
     # Load the checkpoint with the whole nn.Module serialized by the trainers.
-    print(f"Loading checkpoint from: {args.checkpoint}")
-    model = load_trained_model(args.checkpoint, Configuration.DEVICE)
+    print(f"Checkpoint name: {checkpoint_name}")
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
     print(f"Target execution device: {Configuration.DEVICE}")
 
     # Recreate the same train/val/test partitioning used during training so the
@@ -954,6 +1069,12 @@ def main() -> None:
     print('  Class-wise IoU:')
     for class_id, class_iou in enumerate(cast(List[float], averaged_metrics["class_iou"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
+
+    # Persist the same averaged scalar and class-wise metrics that are printed
+    # above, using one column per value for straightforward downstream analysis.
+    result_row = flatten_performance_metrics(averaged_metrics)
+    pd.DataFrame([result_row]).to_csv(output_csv_path, index=False)
+    print(f"\nSaved performance metrics to: {output_csv_path}")
 
     # Render the first ``num_samples`` test samples to ``./model/predictions.png``
     # so the predictions can be inspected visually alongside the metrics.
