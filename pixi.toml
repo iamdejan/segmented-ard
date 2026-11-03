@@ -64,7 +64,7 @@ pytorch-cpu = "=2.10.0"
 
 [pypi-dependencies]
 streamlit = ">=1.66.1, <2"
-av = ">=14, <16"
+av = ">=14.1, <16"
 mcp-pypi = ">=3.0.0, <4"
 pyqt6 = ">=6.9.1, <7"
 tqdm = ">=4.70.0, <5"
