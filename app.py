@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import tempfile
 from fractions import Fraction
-from functools import partial
 from pathlib import Path
 from typing import Final, cast
 
 import albumentations as A
 import av  # type: ignore[import-untyped]
-import gradio as gr
 import numpy as np
+import streamlit as st
 import torch
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
 from jaxtyping import Float, UInt8, jaxtyped
 from PIL import Image
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 from torch import Tensor, nn
 
 IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset({".jpg"})
@@ -25,10 +25,12 @@ MASK_ALPHA: Final[float] = 0.5
 DEFAULT_VIDEO_RATE: Final[Fraction] = Fraction(30, 1)
 IMAGE_HEIGHT: Final[int] = 360
 IMAGE_WIDTH: Final[int] = 640
-NUM_CLASSES: Final[int] = 20
+# Streamlit defaults uploads to 200 MB, while the previous Gradio launch had no
+# configured cap. A 1-TiB practical ceiling avoids introducing a normal-use limit.
+STREAMLIT_MAX_UPLOAD_SIZE_MB: Final[int] = 1024 * 1024
 
 # Keep the palette identical to evaluate_performance.py so predictions shown in
-# the Gradio app use the same semantic colours as the project's evaluation
+# the Streamlit app use the same semantic colours as the project's evaluation
 # visualisations.
 CLASS_COLORS: Final[np.ndarray] = np.array(
     [
@@ -79,47 +81,19 @@ INFERENCE_TRANSFORM: Final[A.Compose] = A.Compose(
 )
 
 APP_CSS: Final[str] = """
-.gradio-container {
-    width: 100% !important;
-    max-width: none !important;
-    margin: 0 !important;
-    padding: 24px 3vw !important;
+<style>
+.block-container {
+    max-width: 1500px;
+    padding: 24px 3vw 48px 3vw;
 }
 #app-title {
     text-align: center;
-    margin: 12px 0 6px 0;
+    margin: 12px 0 10px 0;
 }
-#model-selector {
-    width: min(440px, 90vw) !important;
-    max-width: 440px !important;
-    margin: 0 auto 28px auto;
-}
-#workspace {
-    width: min(1500px, 94vw) !important;
-    max-width: 1500px !important;
-    margin: 0 auto !important;
-    border: 2px solid var(--border-color-primary);
-    border-radius: 24px;
-    padding: 18px;
-}
-#workspace > div {
-    width: 100% !important;
-}
-#workspace .tab-nav {
-    width: 100% !important;
-}
-#workspace .tab-nav button {
-    flex: 1 1 50% !important;
-    justify-content: center !important;
-}
-#workspace .tabitem {
-    width: 100% !important;
-}
-.panel-box {
-    border: 2px solid var(--border-color-primary) !important;
-    border-radius: 24px !important;
-    padding: 16px !important;
-    min-height: 390px;
+.model-selector-label {
+    text-align: center;
+    color: rgba(49, 51, 63, 0.65);
+    margin-bottom: 4px;
 }
 .panel-heading {
     text-align: center;
@@ -127,16 +101,34 @@ APP_CSS: Final[str] = """
     font-weight: 600;
     margin-bottom: 12px;
 }
-.result-frame {
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 24px;
+}
+div[data-testid="stImage"], div[data-testid="stVideo"] {
     min-height: 300px;
 }
 .checkpoint-used {
     margin-top: 10px;
     text-align: center;
     font-size: 0.95rem;
-    color: var(--body-text-color-subdued);
+    color: rgba(49, 51, 63, 0.65);
 }
+</style>
 """
+
+
+class ApplicationError(RuntimeError):
+    """Represent a user-facing application error that Streamlit can display safely.
+
+    The exception keeps validation, model-loading, inference, and encoding failures
+    separate from Streamlit rendering. UI functions catch it and show only the
+    actionable message instead of exposing an internal traceback to the user.
+
+    Parameters
+    ----------
+    message : str
+        Human-readable explanation of the failure.
+    """
 
 
 def discover_model_checkpoints(model_dir: Path) -> list[Path]:
@@ -182,7 +174,7 @@ def discover_model_checkpoints(model_dir: Path) -> list[Path]:
 class ModelRepository:
     """Discover and cache the trained segmentation models under ``./model``.
 
-    The repository exposes all top-level ``.pt`` files to the Gradio dropdown.
+    The repository exposes all top-level ``.pt`` files to the Streamlit dropdown.
     A selected checkpoint is deserialized exactly like ``evaluate_performance.py``:
     ``torch.load(..., weights_only=False)``, followed by an ``nn.Module`` type
     check, device transfer, and ``eval()``. Models are loaded lazily and cached
@@ -260,13 +252,13 @@ class ModelRepository:
 
         Raises
         ------
-        gradio.Error
+        ApplicationError
             If the selection is invalid, the checkpoint cannot be read, or the
             deserialized object is not an ``nn.Module``.
         """
         path = self._choice_to_path.get(checkpoint_choice)
         if path is None:
-            raise gr.Error("Select a valid model checkpoint from the dropdown.")
+            raise ApplicationError("Select a valid model checkpoint from the dropdown.")
 
         cached_model = self._cache.get(checkpoint_choice)
         if cached_model is not None:
@@ -282,10 +274,10 @@ class ModelRepository:
                 weights_only=False,
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            raise gr.Error(f"Could not load checkpoint {path.name}: {exc}") from exc
+            raise ApplicationError(f"Could not load checkpoint {path.name}: {exc}") from exc
 
         if not isinstance(checkpoint, nn.Module):
-            raise gr.Error(
+            raise ApplicationError(
                 f"Checkpoint {path.name} loaded an object of type "
                 f"{type(checkpoint).__name__}, but an nn.Module was expected."
             )
@@ -432,7 +424,7 @@ class SemanticSegmenter:
 
         Raises
         ------
-        gradio.Error
+        ApplicationError
             If model loading or inference fails, including incompatible output
             shapes or class indices.
         """
@@ -457,10 +449,10 @@ class SemanticSegmenter:
                 .numpy()
             )
             pred_color = colorize_mask(cast(ClassIndexArray, pred_class))
-        except gr.Error:
+        except ApplicationError:
             raise
         except (IndexError, RuntimeError, TypeError, ValueError) as exc:
-            raise gr.Error(f"Segmentation inference failed: {exc}") from exc
+            raise ApplicationError(f"Segmentation inference failed: {exc}") from exc
 
         # Evaluation visualizations blend the predicted color mask at alpha=0.5.
         # Resize with nearest-neighbor so semantic class colours are not mixed at
@@ -478,7 +470,7 @@ def _validate_suffix(file_path: str, allowed_suffixes: frozenset[str]) -> Path:
     Parameters
     ----------
     file_path : str
-        Filesystem path returned by the Gradio file component.
+        Filesystem path returned by the Streamlit file component.
     allowed_suffixes : frozenset[str]
         Lowercase file suffixes accepted for the active tab.
 
@@ -489,7 +481,7 @@ def _validate_suffix(file_path: str, allowed_suffixes: frozenset[str]) -> Path:
 
     Raises
     ------
-    gradio.Error
+    ApplicationError
         If the file extension is not allowed or the uploaded path is missing.
     """
     path = Path(file_path)
@@ -498,9 +490,9 @@ def _validate_suffix(file_path: str, allowed_suffixes: frozenset[str]) -> Path:
     # enforce the extension again on the server before decoding user content.
     if path.suffix.lower() not in allowed_suffixes:
         allowed = ", ".join(sorted(allowed_suffixes))
-        raise gr.Error(f"Unsupported file type. Allowed extensions: {allowed}")
+        raise ApplicationError(f"Unsupported file type. Allowed extensions: {allowed}")
     if not path.is_file():
-        raise gr.Error("The uploaded file is no longer available on the server.")
+        raise ApplicationError("The uploaded file is no longer available on the server.")
     return path
 
 
@@ -514,7 +506,7 @@ def segment_image(
     Parameters
     ----------
     file_path : str
-        Path to the uploaded JPG supplied by Gradio.
+        Path to the uploaded JPG supplied by Streamlit.
     checkpoint_choice : str
         Dropdown value identifying the model used for inference.
     segmenter : SemanticSegmenter
@@ -528,7 +520,7 @@ def segment_image(
 
     Raises
     ------
-    gradio.Error
+    ApplicationError
         If the extension is invalid, Pillow cannot decode the image, or model
         inference fails.
     """
@@ -539,10 +531,10 @@ def segment_image(
         with Image.open(path) as image:
             segmented_image = segmenter.segment(image, checkpoint_choice)
             return segmented_image, _checkpoint_used_text(checkpoint_choice)
-    except gr.Error:
+    except ApplicationError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
-        raise gr.Error(f"Could not process the JPG image: {exc}") from exc
+        raise ApplicationError(f"Could not process the JPG image: {exc}") from exc
 
 
 def segment_video(
@@ -560,7 +552,7 @@ def segment_video(
     Parameters
     ----------
     file_path : str
-        Path to an uploaded MP4, MOV, or MKV video supplied by Gradio.
+        Path to an uploaded MP4, MOV, or MKV video supplied by Streamlit.
     checkpoint_choice : str
         Dropdown value identifying the model used for every video frame.
     segmenter : SemanticSegmenter
@@ -569,12 +561,12 @@ def segment_video(
     Returns
     -------
     tuple[str, str]
-        Path to the generated H.264 MP4 displayed by Gradio and a short label
+        Path to the generated H.264 MP4 displayed by Streamlit and a short label
         identifying the checkpoint used for every frame.
 
     Raises
     ------
-    gradio.Error
+    ApplicationError
         If validation, decoding, segmentation inference, or encoding fails.
     """
     path = _validate_suffix(file_path, VIDEO_SUFFIXES)
@@ -587,13 +579,13 @@ def segment_video(
     try:
         with av.open(str(path), mode="r") as input_container:
             if not input_container.streams.video:
-                raise gr.Error("The uploaded file does not contain a video stream.")
+                raise ApplicationError("The uploaded file does not contain a video stream.")
 
             input_stream = input_container.streams.video[0]
             frame_rate = input_stream.average_rate or DEFAULT_VIDEO_RATE
 
             with av.open(str(output_path), mode="w") as output_container:
-                # H.264/yuv420p is broadly supported by web browsers and Gradio.
+                # H.264/yuv420p is broadly supported by web browsers and Streamlit.
                 output_stream = output_container.add_stream("libx264", rate=frame_rate)
                 output_stream.width = input_stream.codec_context.width
                 output_stream.height = input_stream.codec_context.height
@@ -608,15 +600,15 @@ def segment_video(
                         output_container.mux(packet)
 
                 # Flush delayed encoder packets so the final MP4 is complete and
-                # seekable before Gradio serves it to the browser.
+                # seekable before Streamlit serves it to the browser.
                 for packet in output_stream.encode():
                     output_container.mux(packet)
-    except gr.Error:
+    except ApplicationError:
         output_path.unlink(missing_ok=True)
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         output_path.unlink(missing_ok=True)
-        raise gr.Error(f"Could not process the video: {exc}") from exc
+        raise ApplicationError(f"Could not process the video: {exc}") from exc
 
     return str(output_path), _checkpoint_used_text(checkpoint_choice)
 
@@ -639,154 +631,342 @@ def _checkpoint_used_text(checkpoint_choice: str) -> str:
     return f"Model checkpoint used: `{checkpoint_choice}`"
 
 
-def _build_upload_panel(
-    title: str,
-    file_types: list[str],
-    elem_id: str,
-) -> tuple[gr.File, gr.Button]:
-    """Create a styled upload panel shared by both application tabs.
+def _materialize_uploaded_file(
+    uploaded_file: UploadedFile,
+    allowed_suffixes: frozenset[str],
+) -> Path:
+    """Write one Streamlit upload to a validated temporary filesystem path.
+
+    Streamlit keeps uploaded content in memory while the existing image/video
+    processing functions intentionally operate on paths. This adapter validates
+    the client filename first, writes the bytes to a unique temporary file with
+    the same suffix, and returns that path for the unchanged processing pipeline.
 
     Parameters
     ----------
-    title : str
-        Heading displayed above the file picker.
-    file_types : list[str]
-        Extension filters passed to Gradio's file picker.
-    elem_id : str
-        Stable HTML element id used for styling and test targeting.
+    uploaded_file : streamlit.runtime.uploaded_file_manager.UploadedFile
+        Uploaded file supplied by Streamlit's file uploader.
+    allowed_suffixes : frozenset[str]
+        Lowercase file suffixes accepted for the active application tab.
 
     Returns
     -------
-    tuple[gr.File, gr.Button]
-        File picker and upload button for wiring to a processing callback.
+    pathlib.Path
+        Temporary path containing the uploaded bytes.
+
+    Raises
+    ------
+    ApplicationError
+        If the filename suffix is unsupported or the temporary file cannot be
+        written.
     """
-    with gr.Column(scale=1, min_width=420, elem_id=elem_id, elem_classes=["panel-box"]):
-        gr.Markdown(f"<div class='panel-heading'>{title}</div>")
-        file_input = gr.File(
-            label="Select File",
-            file_types=file_types,
-            type="filepath",
-        )
-        upload_button = gr.Button("Upload", variant="primary")
-    return file_input, upload_button
+    suffix = Path(uploaded_file.name).suffix.lower()
+
+    # Streamlit's picker filter is a convenience rather than a security boundary,
+    # so reject a mismatched filename before any bytes are written to disk.
+    if suffix not in allowed_suffixes:
+        allowed = ", ".join(sorted(allowed_suffixes))
+        raise ApplicationError(f"Unsupported file type. Allowed extensions: {allowed}")
+
+    temporary_path: Path | None = None
+    try:
+        # Preserve the suffix because the downstream validation intentionally
+        # checks the materialized path again before decoding user-controlled data.
+        with tempfile.NamedTemporaryFile(
+            prefix="uploaded_",
+            suffix=suffix,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(uploaded_file.getbuffer())
+    except OSError as exc:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise ApplicationError(f"Could not store the uploaded file: {exc}") from exc
+
+    if temporary_path is None:
+        # A successful NamedTemporaryFile context always assigns this path; this
+        # defensive branch also keeps the return type explicit for static checking.
+        raise ApplicationError("Could not create a temporary upload file.")
+    return temporary_path
 
 
-def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> gr.Blocks:
-    """Construct the Gradio interface for model-selectable segmentation.
+@st.cache_resource(show_spinner=False)
+def get_services() -> tuple[ModelRepository, SemanticSegmenter]:
+    """Create and cache the model repository and segmentation service.
 
-    Parameters
-    ----------
-    repository : ModelRepository
-        Checkpoint repository supplying dropdown choices and the default value.
-    segmenter : SemanticSegmenter
-        Shared segmentation service used by both tab callbacks.
-
-    Returns
-    -------
-    gradio.Blocks
-        Fully wired Gradio application ready to launch.
-    """
-    # Blocks provides enough layout control to reproduce the title/dropdown and
-    # side-by-side upload/result panels from the supplied mockup.
-    with gr.Blocks(title="Segmented ARD", fill_width=True) as demo:
-        gr.Markdown("# Segmented ARD", elem_id="app-title")
-        model_dropdown = gr.Dropdown(
-            choices=repository.choices,
-            value=repository.default_choice,
-            label="Model checkpoint",
-            show_label=False,
-            # Gradio wraps components in a bordered/background container by
-            # default. The design calls for only the dropdown control itself, so
-            # disable that outer container instead of targeting generated Svelte
-            # class names with fragile CSS overrides.
-            container=False,
-            interactive=True,
-            elem_id="model-selector",
-        )
-
-        with gr.Tabs(elem_id="workspace"):
-            with gr.Tab("Image"):
-                with gr.Row(equal_height=True):
-                    image_file, image_button = _build_upload_panel(
-                        title="Upload",
-                        file_types=[".jpg"],
-                        elem_id="image-upload-panel",
-                    )
-                    with gr.Column(scale=1, min_width=420, elem_classes=["panel-box"]):
-                        gr.Markdown("<div class='panel-heading'>Result</div>")
-                        image_result = gr.Image(
-                            label="Segmented Image",
-                            type="pil",
-                            interactive=False,
-                            elem_classes=["result-frame"],
-                        )
-                        image_checkpoint_used = gr.Markdown(
-                            "Model checkpoint used: —",
-                            elem_classes=["checkpoint-used"],
-                        )
-
-            with gr.Tab("Video"):
-                with gr.Row(equal_height=True):
-                    video_file, video_button = _build_upload_panel(
-                        title="Upload",
-                        file_types=[".mp4", ".mov", ".mkv"],
-                        elem_id="video-upload-panel",
-                    )
-                    with gr.Column(scale=1, min_width=420, elem_classes=["panel-box"]):
-                        gr.Markdown("<div class='panel-heading'>Result</div>")
-                        video_result = gr.Video(
-                            label="Segmented Video",
-                            interactive=False,
-                            elem_classes=["result-frame"],
-                        )
-                        video_checkpoint_used = gr.Markdown(
-                            "Model checkpoint used: —",
-                            elem_classes=["checkpoint-used"],
-                        )
-
-        # Bind the segmenter via partial while leaving the model dropdown as a
-        # live input, so each click uses exactly the checkpoint shown in the UI.
-        image_button.click(
-            fn=partial(segment_image, segmenter=segmenter),
-            inputs=[image_file, model_dropdown],
-            outputs=[image_result, image_checkpoint_used],
-        )
-        video_button.click(
-            fn=partial(segment_video, segmenter=segmenter),
-            inputs=[video_file, model_dropdown],
-            outputs=[video_result, video_checkpoint_used],
-        )
-
-    return demo
-
-
-def main() -> None:
-    """Discover checkpoints and launch the Segmented ARD Gradio application.
-
-    Steps
-    -----
-    1. Select CUDA when available, otherwise CPU.
-    2. Discover all top-level ``./model/*.pt`` checkpoints for the dropdown.
-    3. Build the shared checkpoint repository and segmentation service.
-    4. Launch the queued Gradio application.
+    Streamlit reruns the script whenever a widget changes. Caching these services
+    preserves the original lazy checkpoint cache across reruns instead of
+    repeatedly rebuilding the repository and reloading already-used models.
 
     Returns
     -------
-    None
-        The function launches Gradio and blocks while the server is running.
+    tuple[ModelRepository, SemanticSegmenter]
+        Shared checkpoint repository and segmentation service for this process.
 
     Raises
     ------
     RuntimeError
         If ``./model`` is missing or contains no selectable checkpoints.
     """
-    # This matches evaluate_performance.py's device selection while allowing the
-    # UI to run on CPU-only systems as a fallback.
+    # Match the evaluation pipeline's CUDA preference while retaining the
+    # original CPU fallback for environments without an available GPU.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     repository = ModelRepository(model_dir=MODEL_DIR, device=device)
     segmenter = SemanticSegmenter(repository=repository, device=device)
-    demo = build_app(repository=repository, segmenter=segmenter)
-    demo.queue().launch(css=APP_CSS)
+    return repository, segmenter
+
+
+def _render_checkpoint_used(checkpoint_text: str) -> None:
+    """Render the checkpoint label beneath a completed inference result.
+
+    Parameters
+    ----------
+    checkpoint_text : str
+        Markdown label returned by the image or video processing function.
+
+    Returns
+    -------
+    None
+        The function writes the label directly to the active Streamlit container.
+    """
+    # Caption supports Markdown, so the checkpoint path keeps its inline-code
+    # formatting without relying on fragile cross-call HTML wrappers.
+    st.caption(checkpoint_text)
+
+
+def _render_image_tab(
+    checkpoint_choice: str,
+    segmenter: SemanticSegmenter,
+) -> None:
+    """Render and process the still-image segmentation workflow.
+
+    The tab keeps the original explicit Upload action: the selected file is only
+    segmented when the user clicks the button. Successful results and their model
+    labels are stored in session state so unrelated Streamlit reruns do not erase
+    the last completed inference.
+
+    Parameters
+    ----------
+    checkpoint_choice : str
+        Dropdown value identifying the model checkpoint for the next inference.
+    segmenter : SemanticSegmenter
+        Shared segmentation service used to process uploaded JPG files.
+
+    Returns
+    -------
+    None
+        The function renders controls and results directly into the current tab.
+    """
+    upload_column, result_column = st.columns(2, gap="large")
+
+    with upload_column:
+        with st.container(border=True):
+            st.markdown("<div class='panel-heading'>Upload</div>", unsafe_allow_html=True)
+            uploaded_file = st.file_uploader(
+                "Select File",
+                type=["jpg"],
+                key="image-file-uploader",
+                max_upload_size=STREAMLIT_MAX_UPLOAD_SIZE_MB,
+            )
+            process_clicked = st.button(
+                "Upload",
+                key="image-upload-button",
+                type="primary",
+                width="stretch",
+                disabled=uploaded_file is None,
+            )
+
+            if process_clicked and uploaded_file is not None:
+                temporary_path: Path | None = None
+                try:
+                    # Materialize only for the duration of processing so uploaded
+                    # data does not accumulate on the server across reruns.
+                    temporary_path = _materialize_uploaded_file(
+                        uploaded_file,
+                        IMAGE_SUFFIXES,
+                    )
+                    with st.spinner("Segmenting image..."):
+                        image_result, checkpoint_text = segment_image(
+                            str(temporary_path),
+                            checkpoint_choice,
+                            segmenter,
+                        )
+                    st.session_state["image-result"] = image_result
+                    st.session_state["image-checkpoint"] = checkpoint_text
+                except ApplicationError as exc:
+                    st.error(str(exc))
+                finally:
+                    if temporary_path is not None:
+                        temporary_path.unlink(missing_ok=True)
+
+    with result_column:
+        with st.container(border=True):
+            st.markdown("<div class='panel-heading'>Result</div>", unsafe_allow_html=True)
+            image_result = st.session_state.get("image-result")
+            if isinstance(image_result, Image.Image):
+                st.image(image_result, caption="Segmented Image", width="stretch")
+                checkpoint_text = st.session_state.get("image-checkpoint")
+                if isinstance(checkpoint_text, str):
+                    _render_checkpoint_used(checkpoint_text)
+            else:
+                st.info("Upload a JPG image and click Upload to view the result.")
+
+
+def _render_video_tab(
+    checkpoint_choice: str,
+    segmenter: SemanticSegmenter,
+) -> None:
+    """Render and process the video segmentation workflow.
+
+    The tab preserves the original MP4/MOV/MKV inputs and H.264 MP4 output. The
+    generated video is read into session state and its temporary output file is
+    removed immediately, allowing the last successful result to survive normal
+    Streamlit reruns without leaking output files.
+
+    Parameters
+    ----------
+    checkpoint_choice : str
+        Dropdown value identifying the model checkpoint for every video frame.
+    segmenter : SemanticSegmenter
+        Shared segmentation service used to process uploaded videos.
+
+    Returns
+    -------
+    None
+        The function renders controls and results directly into the current tab.
+    """
+    upload_column, result_column = st.columns(2, gap="large")
+
+    with upload_column:
+        with st.container(border=True):
+            st.markdown("<div class='panel-heading'>Upload</div>", unsafe_allow_html=True)
+            uploaded_file = st.file_uploader(
+                "Select File",
+                type=["mp4", "mov", "mkv"],
+                key="video-file-uploader",
+                max_upload_size=STREAMLIT_MAX_UPLOAD_SIZE_MB,
+            )
+            process_clicked = st.button(
+                "Upload",
+                key="video-upload-button",
+                type="primary",
+                width="stretch",
+                disabled=uploaded_file is None,
+            )
+
+            if process_clicked and uploaded_file is not None:
+                temporary_path: Path | None = None
+                output_path: Path | None = None
+                try:
+                    # PyAV requires a real path for the existing decoding pipeline,
+                    # so bridge Streamlit's in-memory upload only for this request.
+                    temporary_path = _materialize_uploaded_file(
+                        uploaded_file,
+                        VIDEO_SUFFIXES,
+                    )
+                    with st.spinner("Segmenting video..."):
+                        output_path_text, checkpoint_text = segment_video(
+                            str(temporary_path),
+                            checkpoint_choice,
+                            segmenter,
+                        )
+                        output_path = Path(output_path_text)
+                        video_bytes = output_path.read_bytes()
+                    st.session_state["video-result"] = video_bytes
+                    st.session_state["video-checkpoint"] = checkpoint_text
+                except ApplicationError as exc:
+                    st.error(str(exc))
+                except OSError as exc:
+                    st.error(f"Could not read the segmented video: {exc}")
+                finally:
+                    if temporary_path is not None:
+                        temporary_path.unlink(missing_ok=True)
+                    if output_path is not None:
+                        output_path.unlink(missing_ok=True)
+
+    with result_column:
+        with st.container(border=True):
+            st.markdown("<div class='panel-heading'>Result</div>", unsafe_allow_html=True)
+            video_result = st.session_state.get("video-result")
+            if isinstance(video_result, bytes):
+                st.video(video_result, format="video/mp4")
+                checkpoint_text = st.session_state.get("video-checkpoint")
+                if isinstance(checkpoint_text, str):
+                    _render_checkpoint_used(checkpoint_text)
+            else:
+                st.info("Upload an MP4, MOV, or MKV video and click Upload to view the result.")
+
+
+def build_app(repository: ModelRepository, segmenter: SemanticSegmenter) -> None:
+    """Construct the Streamlit interface for model-selectable segmentation.
+
+    Parameters
+    ----------
+    repository : ModelRepository
+        Checkpoint repository supplying dropdown choices and the default value.
+    segmenter : SemanticSegmenter
+        Shared segmentation service used by the image and video tabs.
+
+    Returns
+    -------
+    None
+        The function renders the complete Streamlit page for the current rerun.
+    """
+    # Inject only stable page-level styling and keep all behavior in native
+    # Streamlit widgets so the migration does not depend on browser-side scripts.
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.markdown("<h1 id='app-title'>Segmented ARD</h1>", unsafe_allow_html=True)
+
+    # Center the model selector similarly to the previous UI while leaving its
+    # value live so each Upload click uses exactly the checkpoint shown here.
+    _, selector_column, _ = st.columns([1, 1.4, 1])
+    with selector_column:
+        st.markdown(
+            "<div class='model-selector-label'>Model checkpoint</div>",
+            unsafe_allow_html=True,
+        )
+        checkpoint_choice = st.selectbox(
+            "Model checkpoint",
+            options=repository.choices,
+            index=repository.choices.index(repository.default_choice),
+            label_visibility="collapsed",
+            key="model-checkpoint-selector",
+        )
+
+    image_tab, video_tab = st.tabs(["Image", "Video"])
+    with image_tab:
+        _render_image_tab(checkpoint_choice, segmenter)
+    with video_tab:
+        _render_video_tab(checkpoint_choice, segmenter)
+
+
+def main() -> None:
+    """Configure and render the Segmented ARD Streamlit application.
+
+    Steps
+    -----
+    1. Configure the page for a wide two-panel layout.
+    2. Create or reuse the cached checkpoint repository and segmentation service.
+    3. Render the model selector plus image and video processing tabs.
+
+    Returns
+    -------
+    None
+        The function renders one Streamlit application rerun.
+    """
+    # Page configuration must be the first Streamlit command executed on each run.
+    st.set_page_config(page_title="Segmented ARD", layout="wide")
+
+    try:
+        repository, segmenter = get_services()
+    except RuntimeError as exc:
+        # A missing model directory makes inference impossible, so show a concise
+        # startup error instead of allowing Streamlit to expose a stack trace.
+        st.error(str(exc))
+        return
+
+    build_app(repository=repository, segmenter=segmenter)
 
 
 if __name__ == "__main__":

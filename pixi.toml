@@ -10,6 +10,9 @@ lint-ci = "ruff check ."
 lint-fix = "ruff check . --fix"
 type-check = "mypy ."
 
+[tasks.app]
+cmd = "streamlit run app.py"
+
 [tasks.train]
 args = [
     {"arg" = "type", "choices" = ["teacher", "student"]},
@@ -60,7 +63,7 @@ pytorch-gpu = "=2.10.0"
 pytorch-cpu = "=2.10.0"
 
 [pypi-dependencies]
-gradio = ">=6.31, <7"
+streamlit = ">=1.66.1, <2"
 av = ">=14, <16"
 mcp-pypi = ">=3.0.0, <4"
 pyqt6 = ">=6.9.1, <7"
