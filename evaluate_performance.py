@@ -629,9 +629,9 @@ def evaluate_segmentation_metrics(
     # is the accuracy of class ``i``.
     class_pixel_accuracy = tp_total / (tp_total + fn_total).clamp_min(1)
 
-    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
-    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    # IoU (Jaccard index)
+    macro_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    micro_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
 
     # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
     # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
@@ -641,15 +641,15 @@ def evaluate_segmentation_metrics(
     # Mean IoU: average of the class-wise IoU values (macro-averaging).
     mean_iou = np.mean(class_iou)
 
-    # Dataset-level global (micro) IoU
-    global_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+    # Dice (F1) macro-averaged over classes.
+    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
 
     return {
         "pixel_accuracy": float(pixel_accuracy),
         "class_pixel_accuracy": list(class_pixel_accuracy),
-        "iou": float(iou),
+        "macro_iou": float(macro_iou),
+        "micro_iou": float(micro_iou),
         "mean_iou": float(mean_iou),
-        "global_iou": float(global_iou),
         "class_iou": list(class_iou),
         "dice": float(dice),
     }
@@ -858,8 +858,8 @@ def flatten_performance_metrics(
     # result files from both scripts are straightforward to compare downstream.
     row: Dict[str, float] = {
         "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
-        "iou_macro": cast(float, metrics["iou"]),
-        "global_iou": cast(float, metrics["global_iou"]),
+        "macro_iou": cast(float, metrics["macro_iou"]),
+        "micro_iou": cast(float, metrics["micro_iou"]),
         "mean_iou": cast(float, metrics["mean_iou"]),
         "dice_macro": cast(float, metrics["dice"]),
     }
@@ -1059,8 +1059,8 @@ def main() -> None:
 
     print('\nFinal test-set metrics (averaged over %d runs):' % num_runs)
     print(f'  Pixel Accuracy : {averaged_metrics["pixel_accuracy"]:.4f}')
-    print(f'  IoU (macro)    : {averaged_metrics["iou"]:.4f}')
-    print(f'  Global IoU     : {averaged_metrics["global_iou"]:.4f}')
+    print(f'  Macro IoU      : {averaged_metrics["macro_iou"]:.4f}')
+    print(f'  Micro IoU      : {averaged_metrics["micro_iou"]:.4f}')
     print(f'  Mean IoU       : {averaged_metrics["mean_iou"]:.4f}')
     print(f'  Dice (macro)   : {averaged_metrics["dice"]:.4f}')
     print('  Class-wise Pixel Accuracy:')

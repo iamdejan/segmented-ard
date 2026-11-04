@@ -850,6 +850,22 @@ The deployment of such prototype will be done in HuggingFace Space, allowing use
 
 #pagebreak()
 #align(center)[
+  #heading(level: 1)[
+    #text(size: 12pt)[RESULTS]
+  ]
+]
+#v(2 * line_spacing)
+
+In this chapter, the results that correspond with each research question will be presented. The full results can be seen in Google Drive#footnote[https://docs.google.com/spreadsheets/d/1NVqQEmkcvf-QyhmNNaQxTpI42V0nx__ODbnWGZBqSAY/edit?usp=sharing].
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Semantic Segmentation Performance]
+]
+#v(2 * line_spacing)
+
+#pagebreak()
+#align(center)[
   #heading(level: 1, numbering: none)[
     #text(size: 12pt)[REFERENCES]
   ]
