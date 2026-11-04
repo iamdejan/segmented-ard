@@ -1,7 +1,7 @@
 import gc
 import glob
 import os
-from typing import Dict, List, cast
+from typing import Dict, List, Tuple, cast
 
 import albumentations as A
 import matplotlib.pyplot as plt
@@ -338,6 +338,25 @@ class BDDSegmentationDataset(Dataset[tuple[ImageTensor, IndexMaskTensor]]):
 
 
 def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> str:
+    """Derive the corresponding JPEG image path from a mask PNG path.
+
+    Steps
+    -----
+    1. Extract the image ID by stripping the mask-specific suffix.
+    2. Construct and return the full path in the target image folder.
+
+    Parameters
+    ----------
+    complete_mask_path : str
+        Full filesystem path to a segmentation mask PNG.
+    base_image_path : str
+        Directory containing the corresponding JPEG images.
+
+    Returns
+    -------
+    str
+        Full filesystem path to the matching image file.
+    """
     file_path_split = complete_mask_path.split("/")
     mask_file_name = file_path_split[-1].split("_")[0]
 
@@ -346,98 +365,137 @@ def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> 
 
 
 def find_train_image_path_from_mask(complete_mask_path: str) -> str:
+    """Locate the training image corresponding to a training mask.
+
+    Steps
+    -----
+    1. Delegate to :func:`find_image_path_from_mask` using
+       ``Path.IMAGE_TRAIN_PATH``.
+
+    Parameters
+    ----------
+    complete_mask_path : str
+        Full path to a training mask PNG.
+
+    Returns
+    -------
+    str
+        Full path to the corresponding training image JPEG.
+    """
     return find_image_path_from_mask(complete_mask_path, Path.IMAGE_TRAIN_PATH)
 
 
 def find_val_image_path_from_mask(complete_mask_path: str) -> str:
+    """Locate the validation image corresponding to a validation mask.
+
+    Steps
+    -----
+    1. Delegate to :func:`find_image_path_from_mask` using
+       ``Path.IMAGE_VAL_PATH``.
+
+    Parameters
+    ----------
+    complete_mask_path : str
+        Full path to a validation mask PNG.
+
+    Returns
+    -------
+    str
+        Full path to the corresponding validation image JPEG.
+    """
     return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
 
 
-def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
-    file_path_split = complete_image_path.split("/")
-    mask_file_name = file_path_split[-1].split(".")[0]
+def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Scan disk and load the BDD100k train, validation, and test splits.
 
-    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
-    return mask_path
+    This function duplicates the exact partitioning logic from the training
+    scripts so the model is evaluated on the identical test split that was held
+    out during training.
 
+    Steps
+    -----
+    1. Collect train masks and filter non-standard resolutions without modifying
+       candidate lists during iteration.
+    2. Map to corresponding train images and filter non-matching pairs.
+    3. Partition the train-test pool using 80/20 ``train_test_split`` with the
+       fixed ``Configuration.SEED``.
+    4. Collect and validate validation masks and images without in-place mutation.
+    5. Return DataFrames for train, validation, and test splits.
 
-def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(
-        complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH
-    )
-
-
-def find_val_mask_path_from_image(complete_image_path: str) -> str:
-    return find_mask_path_from_image(
-        complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH
-    )
-
-
-def load_dataset_from_files() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # load train, then split into train-test
-    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
-    problematic_masks = []
-    for complete_mask_path in train_mask_paths:
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        DataFrames representing ``(train_df, val_df, test_df)``.
+    """
+    # Build the valid training pool without mutating a list during iteration.
+    # In-place deletion during iteration skips adjacent candidate elements.
+    train_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    train_mask_paths: List[str] = []
+    problematic_masks: List[str] = []
+    for complete_mask_path in train_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_masks.append(complete_mask_path)
-                train_mask_paths.remove(complete_mask_path)
+                continue
+        train_mask_paths.append(complete_mask_path)
     print(f"Problematic masks: {problematic_masks}")
 
-    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
-    problematic_images = []
-    for complete_image_path in train_image_paths:
+    train_image_paths: List[str] = []
+    validated_train_mask_paths: List[str] = []
+    problematic_images: List[str] = []
+    for complete_mask_path in train_mask_paths:
+        complete_image_path = find_train_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
-                train_image_paths.remove(complete_image_path)
-                train_mask_paths.remove(
-                    find_train_mask_path_from_image(complete_image_path)
-                )
+                continue
+        train_image_paths.append(complete_image_path)
+        validated_train_mask_paths.append(complete_mask_path)
     print(f"Problematic images: {problematic_images}")
 
-    train_test_df = pd.DataFrame(
-        {
-            "image_paths": train_image_paths,
-            "mask_paths": train_mask_paths,
-        }
-    )
+    train_test_df = pd.DataFrame({
+        "image_paths": train_image_paths,
+        "mask_paths": validated_train_mask_paths,
+    })
     train_df, test_df = train_test_split(
         train_test_df, test_size=0.2, random_state=Configuration.SEED
     )
 
-    # load val
-    val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
-    problematic_val_masks = []
-    for complete_mask_path in val_mask_paths:
+    # Load the BDD100k validation split, again filtering non-standard samples
+    # without mutating candidate lists during iteration.
+    val_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    val_mask_paths: List[str] = []
+    problematic_val_masks: List[str] = []
+    for complete_mask_path in val_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_val_masks.append(complete_mask_path)
-                val_mask_paths.remove(complete_mask_path)
+                continue
+        val_mask_paths.append(complete_mask_path)
     print(f"Problematic val masks: {problematic_val_masks}")
 
-    val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
-    problematic_val_images = []
-    for complete_image_path in val_image_paths:
+    val_image_paths: List[str] = []
+    validated_val_mask_paths: List[str] = []
+    problematic_val_images: List[str] = []
+    for complete_mask_path in val_mask_paths:
+        complete_image_path = find_val_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_val_images.append(complete_image_path)
-                val_image_paths.remove(complete_image_path)
-                val_mask_paths.remove(
-                    find_val_mask_path_from_image(complete_image_path)
-                )
+                continue
+        val_image_paths.append(complete_image_path)
+        validated_val_mask_paths.append(complete_mask_path)
     print(f"Problematic val images: {problematic_val_images}")
 
-    val_df = pd.DataFrame(
-        {
-            "image_paths": val_image_paths,
-            "mask_paths": val_mask_paths,
-        }
-    )
+    val_df = pd.DataFrame({
+        "image_paths": val_image_paths,
+        "mask_paths": validated_val_mask_paths,
+    })
 
     return train_df, val_df, test_df
 
