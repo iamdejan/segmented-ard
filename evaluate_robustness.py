@@ -1238,7 +1238,10 @@ def main() -> None:
     print("=" * 68 + "\n")
 
     if args.visualize:
-        print("Exporting visual sample predictions...")
+        # Group each checkpoint's persisted metrics beneath its own directory so a
+        # new evaluation cannot overwrite the result of a differently named model.
+        output_predictions_path = os.path.join(output_directory, "adversarial_predictions.png")
+        print(f"Exporting visual sample predictions to {output_predictions_path}...")
         visualize_adversarial_predictions(
             model=model,
             test_df=test_df,
@@ -1246,7 +1249,7 @@ def main() -> None:
             epsilon=args.epsilon,
             alpha=args.alpha,
             num_steps=args.steps,
-            output_path="./model/adversarial_predictions.png",
+            output_path=output_predictions_path,
         )
         print("Visualization saved successfully.")
 

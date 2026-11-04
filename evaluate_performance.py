@@ -1076,12 +1076,13 @@ def main() -> None:
 
     # Render the first ``num_samples`` test samples to ``./model/predictions.png``
     # so the predictions can be inspected visually alongside the metrics.
-    print('\nExporting sample predictions to ./model/predictions.png...')
+    output_predictions_path = os.path.join(output_directory, "predictions.png")
+    print(f'\nExporting sample predictions to {output_predictions_path}...')
     visualize_predictions(
         model=model,
         test_df=test_df,
         device=Configuration.DEVICE,
-        output_path="./model/predictions.png",
+        output_path=output_predictions_path,
     )
 
 
