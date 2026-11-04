@@ -3,13 +3,11 @@
 This module adjusts ``evaluate_performance.py`` so evaluation is driven by
 ``./data/weather_timeofday_pair_data.csv`` and the image-level metadata in
 ``./data/bdd100k_10k_images_with_100k_metadata_intersection.csv``. The original
-BDD100k held-out segmentation split and confusion-count logic are preserved,
-while SMP reductions keep the required class axis explicit so macro metrics are
-not accidentally reduced as global micro metrics. The intersection CSV supplies
-concrete image IDs and their weather/time-of-day labels.
-``analyze_100k_10k_intersection.py`` generates the pair CSV from this same
-held-out segmentation population, so every pair count is required to equal the
-number of samples actually evaluated for that condition.
+BDD100k held-out segmentation split and metric logic are preserved. The
+intersection CSV supplies concrete image IDs and their weather/time-of-day
+labels. ``analyze_100k_10k_intersection.py`` generates the pair CSV from this
+same held-out segmentation population, so every pair count is required to equal
+the number of samples actually evaluated for that condition.
 """
 
 import argparse
@@ -355,9 +353,9 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
     Steps
     -----
-    1. Collect train masks and filter non-standard resolutions without modifying
-       candidate lists during iteration.
-    2. Map to corresponding train images and filter non-matching pairs.
+    1. Collect train masks and filter out non-standard resolutions without
+       modifying candidate lists during iteration.
+    2. Map to corresponding train images and filter any missing pairs.
     3. Partition the train-test pool using 80/20 ``train_test_split`` with the
        fixed ``Configuration.SEED``.
     4. Collect and validate validation masks and images without in-place mutation.
@@ -368,9 +366,9 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         DataFrames representing ``(train_df, val_df, test_df)``.
     """
-    # Build the valid training pool without mutating a list during iteration.
-    # In-place deletion during iteration skips adjacent candidate elements.
-    train_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    train_mask_candidates = glob.glob(
+        f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png"
+    )
     train_mask_paths: List[str] = []
     problematic_masks: List[str] = []
     for complete_mask_path in train_mask_candidates:
@@ -472,27 +470,25 @@ def evaluate_segmentation_metrics(
     ignore_index: int = -1,
     ignored_class: int = 19,
 ) -> Dict[str, float | List[float]]:
-    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
+    """Compute pixel accuracy, per-class accuracy, IoU, and Dice over a dataset.
 
     The metrics are derived from per-class true/false positive/negative pixel
     counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
     then reduced once at the end. Accumulating the raw counts rather than
     averaging per-batch values guarantees the metrics stay correct even when
-    batches are class-imbalanced. The ``smp`` implementations are reused
-    wherever possible:
+    batches are class-imbalanced.
 
-    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
-      yields a single scalar.
-    * Class-wise pixel accuracy scores each class independently, so it uses no
-      reduction and returns one accuracy value per class.
-    * Class-wise IoU (Jaccard) similarly uses no reduction and returns one IoU
-      value per class; the mean IoU is then the average of those per-class
-      values, matching macro-averaging.
-    * Macro IoU is computed by restoring a singleton sample axis before calling
-      SMP because SMP reductions expect confusion-count tensors shaped ``(N, C)``.
-      The running totals are already dataset-aggregated and therefore have shape
-      ``(C,)`` before that axis is restored.
-    * Dice (F1) is macro-averaged over classes into a single scalar.
+    Reduction details:
+    * Pixel accuracy averages every pixel globally.
+    * Class-wise pixel accuracy scores each class independently without reduction.
+    * Class-wise IoU (Jaccard) computes IoU per class without reduction.
+    * Macro IoU (mean IoU / mIoU) computes the arithmetic mean over class-wise
+      IoUs. Evaluating the mean on the per-class IoU tensor prevents SMP's
+      ``reduction="macro"`` from collapsing the class axis into a scalar sum
+      along dimension 0.
+    * Global (micro) IoU pools total intersection and union pixel counts globally.
+    * Dice (F1 macro) computes the unweighted arithmetic mean of per-class F1
+      scores across all classes.
 
     The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
     ``ignore_index`` so those pixels never influence any metric. This mirrors
@@ -506,9 +502,8 @@ def evaluate_segmentation_metrics(
     2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
        remap ``ignored_class`` to ``ignore_index`` on both.
     3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
-    4. Restore SMP's expected ``(N, C)`` metric shape with ``N=1`` because the
-       counts have already been aggregated over the complete dataset.
-    5. Reduce the accumulated counts into class-wise, macro, and micro metrics.
+    4. Reduce the accumulated counts into the requested metrics without collapsing
+       the class dimension prematurely.
 
     Parameters
     ----------
@@ -529,16 +524,21 @@ def evaluate_segmentation_metrics(
     Returns
     -------
     Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` (macro
-        IoU), ``mean_iou``, ``global_iou`` (micro IoU) and ``dice`` are scalars,
-        while ``class_pixel_accuracy`` and ``class_iou`` are lists whose index
-        ``i`` holds the value of class ``i`` (classes ``0..18``).
+        Mapping of metric name to value. ``pixel_accuracy``, ``iou``,
+        ``mean_iou``, ``global_iou``, and ``dice`` are scalars, while
+        ``class_pixel_accuracy`` and ``class_iou`` are lists whose index ``i``
+        holds the value of class ``i`` (classes ``0..18``).
+
+    Raises
+    ------
+    ValueError
+        If the evaluation dataloader yields no batches.
     """
     model.eval()
 
     # Per-class confusion counts summed over the whole dataset. ``get_stats``
     # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
-    # one count per class.
+    # one count per class of shape ``(num_classes,)``.
     tp_total: Tensor | None = None
     fp_total: Tensor | None = None
     fn_total: Tensor | None = None
@@ -580,53 +580,43 @@ def evaluate_segmentation_metrics(
     if tp_total is None:
         raise ValueError("The evaluation dataloader yielded no batches.")
 
-    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
+    # Pixel accuracy: ratio of correctly classified pixels over all evaluated pixels.
     pixel_accuracy = tp_total.sum() / (tp_total + fn_total).sum()
 
-    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
-    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
-    # is the accuracy of class ``i``.
+    # Class-wise pixel accuracy: accuracy computed independently for each class.
     class_pixel_accuracy = tp_total / (tp_total + fn_total).clamp_min(1)
 
-    # SMP reductions expect confusion-count tensors with shape ``(N, C)``. The
-    # running totals are already summed over every image and therefore have
-    # shape ``(C,)``. Restoring a singleton sample axis prevents ``macro`` from
-    # summing the class axis itself and degenerating into the same value as
-    # ``micro``.
-    tp_metric = tp_total.unsqueeze(0)
-    fp_metric = fp_total.unsqueeze(0)
-    fn_metric = fn_total.unsqueeze(0)
-    tn_metric = tn_total.unsqueeze(0)
+    # Class-wise IoU: calculate IoU per class using reduction=None.
+    class_iou_tensor = smp.metrics.iou_score(
+        tp_total, fp_total, fn_total, tn_total, reduction=None
+    )
+    class_iou = class_iou_tensor.tolist()
 
-    # IoU (Jaccard index) and Dice (F1) macro-average class-wise scores. Both
-    # therefore need the explicit class axis retained for SMP's reduction logic.
-    iou = smp.metrics.iou_score(
-        tp_metric, fp_metric, fn_metric, tn_metric, reduction="macro"
-    ).item()
-    dice = smp.metrics.f1_score(
-        tp_metric, fp_metric, fn_metric, tn_metric, reduction="macro"
-    ).item()
+    # Macro IoU (mean IoU / mIoU): unweighted arithmetic mean across all classes.
+    # We compute the mean directly over the per-class IoU tensor. Calling SMP's
+    # reduction="macro" directly on a 1D (C,) tensor would cause SMP to execute
+    # tp.sum(dim=0), inadvertently collapsing the class axis into a scalar micro sum.
+    iou = class_iou_tensor.mean().item()
+    mean_iou = iou
 
-    # With the singleton sample axis restored, ``reduction=None`` returns
-    # ``(1, num_classes)``. Remove only that synthetic axis so callers still get
-    # one flat Python list containing a score for each class.
-    class_iou = smp.metrics.iou_score(
-        tp_metric, fp_metric, fn_metric, tn_metric, reduction=None
-    ).squeeze(0).tolist()
-
-    # Mean IoU: average of the class-wise IoU values (macro-averaging).
-    mean_iou = np.mean(class_iou)
-
-    # Dataset-level global (micro) IoU pools all class counts before computing
-    # one score; the singleton sample axis does not change that global total.
+    # Dataset-level global (micro) IoU.
     global_iou = smp.metrics.iou_score(
-        tp_metric, fp_metric, fn_metric, tn_metric, reduction="micro"
+        tp_total, fp_total, fn_total, tn_total, reduction="micro"
     ).item()
+
+    # Class-wise Dice (F1): calculate Dice score per class using reduction=None.
+    class_dice_tensor = smp.metrics.f1_score(
+        tp_total, fp_total, fn_total, tn_total, reduction=None
+    )
+
+    # Macro Dice (F1 macro): unweighted arithmetic mean across all classes.
+    # Computed directly over the per-class Dice tensor to avoid SMP dim=0 collapse.
+    dice = class_dice_tensor.mean().item()
 
     return {
         "pixel_accuracy": float(pixel_accuracy),
-        # Convert the per-class tensor to host Python floats here so callers can
-        # safely average repeated runs even when evaluation executes on CUDA.
+        # Convert tensor to host Python floats so callers can safely serialize
+        # and average repeated runs without retaining GPU references.
         "class_pixel_accuracy": class_pixel_accuracy.tolist(),
         "iou": float(iou),
         "mean_iou": float(mean_iou),
@@ -818,11 +808,6 @@ def visualize_predictions(
 def load_pair_specification(pair_csv_path: str) -> pd.DataFrame:
     """Load and validate the requested weather/time-of-day pair specification.
 
-    The ``count`` column is the expected number of samples in the evaluator's
-    held-out segmentation subset after joining to the 10K/100K metadata
-    intersection and removing undefined environment labels. It must therefore
-    equal the number of samples actually evaluated for each pair.
-
     Steps
     -----
     1. Read the CSV and discard any exported unnamed index column.
@@ -890,17 +875,13 @@ def load_pair_specification(pair_csv_path: str) -> pd.DataFrame:
 def load_intersection_metadata(intersection_csv_path: str) -> pd.DataFrame:
     """Load and validate the 10K/100K image-metadata intersection CSV.
 
-    The CSV is expected to use the schema emitted by
-    ``find_100k_10k_intersection.py``. Only fields needed for pair-wise
-    evaluation are retained after validation.
-
     Steps
     -----
-    1. Read the intersection CSV and require the image ID, environment labels,
-       label/image split metadata, same-split flag, and image path.
+    1. Read the intersection CSV and require image ID, environment labels,
+       split metadata, same-split flag, and image path.
     2. Normalize string fields and reject missing or duplicate image IDs.
     3. Verify every ``image_path`` basename matches its declared ``id``.
-    4. Rename ``timeofday`` to ``time_of_day`` for alignment with the pair CSV.
+    4. Rename ``timeofday`` to ``time_of_day`` for pair CSV alignment.
 
     Parameters
     ----------
@@ -1018,17 +999,12 @@ def attach_intersection_metadata(
 ) -> pd.DataFrame:
     """Attach intersection weather/time-of-day metadata to held-out test rows.
 
-    The original evaluators derive their test set from the BDD100k 10K training
-    images. The intersection CSV covers only the subset of 10K images that also
-    has matching 100K metadata, so an inner join is intentional here.
-
     Steps
     -----
     1. Derive the BDD image ID from each held-out JPEG filename.
-    2. Inner-join the held-out test set with the validated intersection metadata.
-    3. Verify every matched row is a 10K training image and that both image
-       basenames agree.
-    4. Return only the matched rows needed for pair-wise evaluation.
+    2. Inner-join held-out test set with validated intersection metadata.
+    3. Verify every matched row is a 10K training image and basenames agree.
+    4. Return only matched rows needed for pair-wise evaluation.
 
     Parameters
     ----------
@@ -1102,35 +1078,30 @@ def build_pair_test_frames(
 
     Steps
     -----
-    1. Remove rows whose weather or time of day is ``undefined`` because the
-       analyzer excludes those rows before writing the pair CSV.
+    1. Remove rows whose weather or time of day is ``undefined``.
     2. Count every observed pair in the held-out evaluation population.
-    3. Require the pair CSV to contain exactly the same pairs with exactly the
-       same counts.
+    3. Require pair CSV to contain exactly identical pairs with identical counts.
     4. Build one segmentation DataFrame per validated pair.
 
     Parameters
     ----------
     annotated_test_df : pd.DataFrame
-        Held-out rows matched to the 10K/100K intersection metadata.
+        Held-out rows matched to 10K/100K intersection metadata.
     pair_df : pd.DataFrame
-        Validated pair specification generated from this same held-out
-        evaluation population.
+        Validated pair specification generated from this population.
 
     Returns
     -------
     List[Tuple[str, str, int, int, pd.DataFrame]]
         Tuples of weather, time of day, pair-CSV count, evaluation count, and
-        matching segmentation sample rows. The two counts are guaranteed equal.
+        matching segmentation sample rows.
 
     Raises
     ------
     ValueError
-        If no defined evaluation rows exist, pair sets differ, or any pair CSV
-        count differs from the number of held-out samples actually evaluated.
+        If no defined evaluation rows exist, pair sets differ, or any pair count
+        mismatches the actual population.
     """
-    # The analyzer excludes undefined environment labels before counting pairs,
-    # so validation must use the identical population here.
     evaluable_df = annotated_test_df.loc[
         (annotated_test_df["weather"] != "undefined")
         & (annotated_test_df["time_of_day"] != "undefined")
@@ -1231,7 +1202,7 @@ def average_performance_metrics(
 
     Steps
     -----
-    1. Iterate through the metric keys produced by the first run.
+    1. Iterate through metric keys produced by the first run.
     2. Average scalar metrics directly and list metrics element-wise.
     3. Preserve the original metric dictionary structure.
 
@@ -1278,7 +1249,7 @@ def flatten_performance_metrics(
 
     Steps
     -----
-    1. Store the pair labels, pair-CSV count, evaluation count, and scalar metrics.
+    1. Store pair labels, pair-CSV count, evaluation count, and scalar metrics.
     2. Expand per-class pixel accuracy and IoU lists into named columns.
 
     Parameters
@@ -1290,8 +1261,7 @@ def flatten_performance_metrics(
     source_count : int
         Count recorded in the pair CSV for this held-out evaluation pair.
     evaluation_count : int
-        Number of held-out segmentation images actually evaluated for the pair;
-        guaranteed to equal ``source_count``.
+        Number of held-out segmentation images actually evaluated for the pair.
     metrics : Dict[str, float | List[float]]
         Averaged segmentation metrics for the pair.
 
@@ -1325,18 +1295,12 @@ def flatten_performance_metrics(
 def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
     """Parse a ``CHECKPOINT_NAME=CHECKPOINT_PATH`` command-line value.
 
-    The checkpoint name is used as the result-directory name, while the path is
-    passed unchanged to the model loader. Keeping both values in one argument
-    makes the output location deterministic for every evaluated checkpoint.
-
     Steps
     -----
-    1. Split the input on the first ``=`` so checkpoint paths may still contain
-       additional ``=`` characters.
-    2. Require both a non-empty checkpoint name and checkpoint path.
-    3. Reject path separators in the checkpoint name because it must represent
-       exactly one directory component under ``./model/weather_timeofday_pair``.
-    4. Return the validated ``(checkpoint_name, checkpoint_path)`` pair.
+    1. Split input on the first ``=`` character.
+    2. Require both non-empty checkpoint name and checkpoint path.
+    3. Reject path separators in the checkpoint name.
+    4. Return validated ``(checkpoint_name, checkpoint_path)`` pair.
 
     Parameters
     ----------
@@ -1383,9 +1347,8 @@ def parse_arguments() -> argparse.Namespace:
 
     Steps
     -----
-    1. Require the model checkpoint name and path in ``NAME=PATH`` form.
-    2. Default the pair specification and 10K/100K intersection CSVs to their
-       project ``./data`` locations while allowing explicit overrides.
+    1. Require model checkpoint name and path in ``NAME=PATH`` form.
+    2. Default pair specification and intersection CSVs to project locations.
     3. Add batch-size, repetition, output, and visualization controls.
     4. Parse and return the argument namespace.
 
@@ -1414,10 +1377,7 @@ def parse_arguments() -> argparse.Namespace:
         "--pair-csv",
         type=str,
         default=Path.WEATHER_TIMEOFDAY_PAIR_CSV,
-        help=(
-            "Pair/count CSV. Defaults to "
-            "./data/weather_timeofday_pair_data.csv."
-        ),
+        help="Pair/count CSV. Defaults to ./data/weather_timeofday_pair_data.csv.",
     )
     parser.add_argument(
         "--intersection-csv",
@@ -1445,7 +1405,7 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default="performance_weather_timeofday.csv",
         help=(
-            "CSV filename for pair-wise metrics. It is always saved inside the "
+            "CSV filename for pair-wise metrics saved inside the "
             "checkpoint-specific weather/time-of-day result directory."
         ),
     )
@@ -1463,21 +1423,19 @@ def main() -> None:
 
     Steps
     -----
-    1. Load the pair specification and 10K/100K intersection metadata.
-    2. Reconstruct the held-out segmentation split used by the base evaluator
-       and keep only rows present in the metadata intersection.
-    3. Validate that every pair CSV count exactly matches the corresponding
-       held-out evaluation count.
-    4. Resolve the checkpoint-specific result directory from ``--checkpoint``.
-    5. Load the trained checkpoint only after the data mapping is proven valid.
-    6. Evaluate each pair for the requested number of runs.
-    7. Print and export the equal pair/evaluation counts and all metrics.
-    8. Optionally visualize samples from the union of evaluated pairs.
+    1. Load pair specification and 10K/100K intersection metadata.
+    2. Reconstruct held-out segmentation split and keep matched rows.
+    3. Validate that every pair CSV count exactly matches evaluation count.
+    4. Resolve checkpoint-specific result directory from ``--checkpoint``.
+    5. Load trained checkpoint after data mapping is verified.
+    6. Evaluate each pair across requested runs.
+    7. Export equal pair/evaluation counts and all metrics to CSV.
+    8. Optionally visualize sample predictions.
 
     Raises
     ------
     ValueError
-        If batch size or number of runs is not positive, or input mapping fails.
+        If batch size or number of runs is not positive, or data mapping fails.
     """
     args = parse_arguments()
     if args.batch_size <= 0:
