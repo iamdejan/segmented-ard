@@ -2,10 +2,10 @@
 
 This module loads a trained PyTorch segmentation model checkpoint (a full
 ``nn.Module`` serialized by the training scripts) and evaluates it on the BDD100k
-test split. It reuses the exact segmentation metrics logic from the training
-scripts (``evaluate_segmentation_metrics`` from ``train_teacher_normal.py``) so
-that the numbers reported here are directly comparable to the ones logged at the
-end of training.
+test split. It reuses the same prediction, target, and confusion-count logic as
+the training scripts while keeping the class axis explicit when calling SMP
+reductions. This is required so macro metrics average class-wise scores instead
+of accidentally collapsing all classes into a global micro score.
 """
 
 import argparse
@@ -535,6 +535,10 @@ def evaluate_segmentation_metrics(
     * Class-wise IoU (Jaccard) similarly uses no reduction and returns one IoU
       value per class; the mean IoU is then the average of those per-class
       values, matching macro-averaging.
+    * Macro IoU is computed by restoring a singleton sample axis before calling
+      SMP because SMP reductions expect confusion-count tensors shaped ``(N, C)``.
+      The running totals are already dataset-aggregated and therefore have shape
+      ``(C,)`` before that axis is restored.
     * Dice (F1) is macro-averaged over classes into a single scalar.
 
     The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
@@ -549,7 +553,9 @@ def evaluate_segmentation_metrics(
     2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
        remap ``ignored_class`` to ``ignore_index`` on both.
     3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
-    4. Reduce the accumulated counts into the requested metrics.
+    4. Restore SMP's expected ``(N, C)`` metric shape with ``N=1`` because the
+       counts have already been aggregated over the complete dataset.
+    5. Reduce the accumulated counts into class-wise, macro, and micro metrics.
 
     Parameters
     ----------
@@ -570,10 +576,10 @@ def evaluate_segmentation_metrics(
     Returns
     -------
     Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
-        ``dice`` are scalars, while ``class_pixel_accuracy`` and ``class_iou``
-        are lists whose index ``i`` holds the value of class ``i`` (classes
-        ``0..18``).
+        Mapping of metric name to value. ``pixel_accuracy``, ``macro_iou``,
+        ``micro_iou``, ``mean_iou`` and ``dice`` are scalars, while
+        ``class_pixel_accuracy`` and ``class_iou`` are lists whose index ``i``
+        holds the value of class ``i`` (classes ``0..18``).
     """
     model.eval()
 
@@ -629,24 +635,46 @@ def evaluate_segmentation_metrics(
     # is the accuracy of class ``i``.
     class_pixel_accuracy = tp_total / (tp_total + fn_total).clamp_min(1)
 
-    # IoU (Jaccard index)
-    macro_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-    micro_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+    # SMP reductions expect confusion-count tensors with shape ``(N, C)``. The
+    # running totals are already summed over every image and therefore have
+    # shape ``(C,)``. Restoring a singleton sample axis prevents ``macro`` from
+    # summing the class axis itself and degenerating into the same value as
+    # ``micro``.
+    tp_metric = tp_total.unsqueeze(0)
+    fp_metric = fp_total.unsqueeze(0)
+    fn_metric = fn_total.unsqueeze(0)
+    tn_metric = tn_total.unsqueeze(0)
 
-    # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
-    # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
-    # class ``i``.
-    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction=None).tolist()
+    # Macro IoU scores each class independently before averaging, while micro
+    # IoU pools all class counts before computing one dataset-level score.
+    macro_iou = smp.metrics.iou_score(
+        tp_metric, fp_metric, fn_metric, tn_metric, reduction="macro"
+    ).item()
+    micro_iou = smp.metrics.iou_score(
+        tp_metric, fp_metric, fn_metric, tn_metric, reduction="micro"
+    ).item()
+
+    # With the singleton sample axis restored, ``reduction=None`` returns
+    # ``(1, num_classes)``. Remove only that synthetic axis so callers still get
+    # one flat Python list containing a score for each class.
+    class_iou = smp.metrics.iou_score(
+        tp_metric, fp_metric, fn_metric, tn_metric, reduction=None
+    ).squeeze(0).tolist()
 
     # Mean IoU: average of the class-wise IoU values (macro-averaging).
     mean_iou = np.mean(class_iou)
 
-    # Dice (F1) macro-averaged over classes.
-    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    # Dice uses the same SMP reduction contract, so the restored sample axis is
+    # also required for this value to be a true class-macro F1 score.
+    dice = smp.metrics.f1_score(
+        tp_metric, fp_metric, fn_metric, tn_metric, reduction="macro"
+    ).item()
 
     return {
         "pixel_accuracy": float(pixel_accuracy),
-        "class_pixel_accuracy": list(class_pixel_accuracy),
+        # ``tolist`` transfers CUDA values to host Python numbers, which keeps
+        # the declared ``List[float]`` return type and CSV serialization stable.
+        "class_pixel_accuracy": class_pixel_accuracy.tolist(),
         "macro_iou": float(macro_iou),
         "micro_iou": float(micro_iou),
         "mean_iou": float(mean_iou),
