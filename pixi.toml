@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Giovanni Dejan <giovanni.dejan@binus.ac.id>"]
 channels = ["conda-forge"]
-name = "python-pixi-template"
+name = "segmented-ard"
 platforms = [{ name = "default", platform = "linux-64", cuda = "12.8" }, { name = "cicd", platform = "linux-64" }]
 version = "0.1.0"
 
