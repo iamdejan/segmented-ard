@@ -486,7 +486,10 @@ def evaluate_segmentation_metrics(
       IoUs. Evaluating the mean on the per-class IoU tensor prevents SMP's
       ``reduction="macro"`` from collapsing the class axis into a scalar sum
       along dimension 0.
-    * Global (micro) IoU pools total intersection and union pixel counts globally.
+    * Micro IoU aggregates counts globally across all classes before computing
+      IoU, weighting pixels uniformly regardless of class frequency.
+    * Class-wise Dice (F1) computes one Dice score per evaluated class without
+      reduction.
     * Dice (F1 macro) computes the unweighted arithmetic mean of per-class F1
       scores across all classes.
 
@@ -524,10 +527,10 @@ def evaluate_segmentation_metrics(
     Returns
     -------
     Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou``,
-        ``mean_iou``, ``global_iou``, and ``dice`` are scalars, while
-        ``class_pixel_accuracy`` and ``class_iou`` are lists whose index ``i``
-        holds the value of class ``i`` (classes ``0..18``).
+        Mapping of metric name to value. ``pixel_accuracy``, ``macro_iou``,
+        ``micro_iou``, ``mean_iou``, and ``dice`` are scalars, while
+        ``class_pixel_accuracy``, ``class_iou``, and ``class_dice`` are lists
+        whose index ``i`` holds the value of class ``i`` (classes ``0..18``).
 
     Raises
     ------
@@ -596,11 +599,10 @@ def evaluate_segmentation_metrics(
     # We compute the mean directly over the per-class IoU tensor. Calling SMP's
     # reduction="macro" directly on a 1D (C,) tensor would cause SMP to execute
     # tp.sum(dim=0), inadvertently collapsing the class axis into a scalar micro sum.
-    iou = class_iou_tensor.mean().item()
-    mean_iou = iou
+    mean_iou = class_iou_tensor.mean().item()
 
-    # Dataset-level global (micro) IoU.
-    global_iou = smp.metrics.iou_score(
+    # Micro IoU: global pixel-level intersection over union across all classes pooled.
+    micro_iou = smp.metrics.iou_score(
         tp_total, fp_total, fn_total, tn_total, reduction="micro"
     ).item()
 
@@ -608,6 +610,7 @@ def evaluate_segmentation_metrics(
     class_dice_tensor = smp.metrics.f1_score(
         tp_total, fp_total, fn_total, tn_total, reduction=None
     )
+    class_dice = class_dice_tensor.tolist()
 
     # Macro Dice (F1 macro): unweighted arithmetic mean across all classes.
     # Computed directly over the per-class Dice tensor to avoid SMP dim=0 collapse.
@@ -618,10 +621,10 @@ def evaluate_segmentation_metrics(
         # Convert tensor to host Python floats so callers can safely serialize
         # and average repeated runs without retaining GPU references.
         "class_pixel_accuracy": class_pixel_accuracy.tolist(),
-        "iou": float(iou),
+        "micro_iou": float(micro_iou),
         "mean_iou": float(mean_iou),
-        "global_iou": float(global_iou),
         "class_iou": list(class_iou),
+        "class_dice": list(class_dice),
         "dice": float(dice),
     }
 
@@ -1249,8 +1252,9 @@ def flatten_performance_metrics(
 
     Steps
     -----
-    1. Store pair labels, pair-CSV count, evaluation count, and scalar metrics.
-    2. Expand per-class pixel accuracy and IoU lists into named columns.
+    1. Store pair labels, pair-CSV count, evaluation count, and scalar metrics
+       using the same metric column names as ``evaluate_performance.py``.
+    2. Expand per-class pixel accuracy, IoU, and Dice lists into named columns.
 
     Parameters
     ----------
@@ -1275,19 +1279,24 @@ def flatten_performance_metrics(
         "time_of_day": time_of_day,
         "pair_csv_count": source_count,
         "evaluation_count": evaluation_count,
+        # Match the general evaluator's scalar metric names so the two result
+        # files can be compared or concatenated without metric-name remapping.
         "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
-        "iou_macro": cast(float, metrics["iou"]),
-        "global_iou": cast(float, metrics["global_iou"]),
+        "micro_iou": cast(float, metrics["micro_iou"]),
         "mean_iou": cast(float, metrics["mean_iou"]),
         "dice_macro": cast(float, metrics["dice"]),
     }
 
+    # Expand list-valued metrics exactly like the general evaluator because
+    # dedicated columns make per-class comparisons straightforward downstream.
     class_accuracy = cast(List[float], metrics["class_pixel_accuracy"])
     class_iou = cast(List[float], metrics["class_iou"])
+    class_dice = cast(List[float], metrics["class_dice"])
     for class_id in range(19):
         class_slug = CLASS_NAMES[class_id].replace(" ", "_")
         row[f"class_pixel_accuracy_{class_id}_{class_slug}"] = class_accuracy[class_id]
         row[f"class_iou_{class_id}_{class_slug}"] = class_iou[class_id]
+        row[f"class_dice_{class_id}_{class_slug}"] = class_dice[class_id]
 
     return row
 
@@ -1536,17 +1545,30 @@ def main() -> None:
         )
         evaluated_frames.append(pair_test_df)
 
+        # Mirror the general evaluator's console metric order and labels so a
+        # pair-wise run can be read and compared without translating terminology.
         print(
             f"  Pixel Accuracy : "
             f"{cast(float, averaged_metrics['pixel_accuracy']):.4f}"
         )
-        print(f"  IoU (macro)    : {cast(float, averaged_metrics['iou']):.4f}")
-        print(
-            f"  Global IoU     : "
-            f"{cast(float, averaged_metrics['global_iou']):.4f}"
-        )
+        print(f"  Micro IoU      : {cast(float, averaged_metrics['micro_iou']):.4f}")
         print(f"  Mean IoU       : {cast(float, averaged_metrics['mean_iou']):.4f}")
         print(f"  Dice (macro)   : {cast(float, averaged_metrics['dice']):.4f}")
+        print("  Class-wise Pixel Accuracy:")
+        for class_id, accuracy in enumerate(
+            cast(List[float], averaged_metrics["class_pixel_accuracy"])
+        ):
+            print(f"    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {accuracy:.4f}")
+        print("  Class-wise IoU:")
+        for class_id, class_iou in enumerate(
+            cast(List[float], averaged_metrics["class_iou"])
+        ):
+            print(f"    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}")
+        print("  Class-wise Dice:")
+        for class_id, class_dice in enumerate(
+            cast(List[float], averaged_metrics["class_dice"])
+        ):
+            print(f"    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_dice:.4f}")
 
     # Export all scalar and class-wise values into the checkpoint-specific
     # directory so downstream comparisons stay isolated by model name.
