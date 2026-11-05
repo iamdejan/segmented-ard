@@ -856,11 +856,104 @@ The deployment of such prototype will be done in HuggingFace Space, allowing use
 ]
 #v(2 * line_spacing)
 
-In this chapter, the results that correspond with each research question will be presented. The full results can be seen in Google Drive#footnote[https://docs.google.com/spreadsheets/d/1NVqQEmkcvf-QyhmNNaQxTpI42V0nx__ODbnWGZBqSAY/edit?usp=sharing].
+In this chapter, the results that correspond with each research question will be presented. The full results can be seen in Google Sheet#footnote[https://docs.google.com/spreadsheets/d/1NVqQEmkcvf-QyhmNNaQxTpI42V0nx__ODbnWGZBqSAY/edit?usp=sharing].
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Semantic Segmentation Performance]
+  #text(size: 12pt)[Class Proportion]
+]
+#v(2 * line_spacing)
+
+In this section, the proportion of each class on all images is calculated. The calculation method is to count the number of pixels associated on the class, then divide by total number of pixels.
+
+#figure(
+  table(
+    columns: 3,
+    table.header(
+      [*Class*], [*Proportion*], [*Oversampled?*]
+    ),
+    [road], [21.45725%], [No],
+    [sidewalk], [2.04426%], [Yes],
+    [building], [13.32433%], [No],
+    [wall], [0.47225%], [Yes],
+    [fence], [1.03318%], [Yes],
+    [pole], [0.93634%], [Yes],
+    [traffic light], [0.18544%], [Yes],
+    [traffic sign], [0.34084%], [Yes],
+    [vegetation], [13.20344%], [No],
+    [terrain], [0.99906%], [Yes],
+    [sky], [17.39244%], [No],
+    [person], [0.26724%], [Yes],
+    [rider], [0.01817%], [Yes],
+    [car], [8.06737%], [No],
+    [truck], [0.99028%], [Yes],
+    [bus], [0.54955%], [Yes],
+    [train], [0.01332%], [Yes],
+    [motorcycle], [0.02321%], [Yes],
+    [bicycle], [0.04879%], [Yes],
+    [unknown], [18.63326%], [No],
+  ),
+  caption: [Class proportion and oversampling decision.]
+)
+#v(2 * line_spacing)
+
+The class proportion will be used for oversampling process during training process. The training process is conducted by randomly sampling the images based on the given class portions, so not all images were used in one epoch. Images that contain many underrepresented class will occur more often in the training process. This mechanism is provided by PyTorch.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Segmentation Performance]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Accumulated Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Class-wise Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Results Based on Weather and Time of Day]
+]
+#v(2 * line_spacing)
+
+// TODO dejan: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Adversarial Robustness]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Accumulated Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Class-wise Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Results Based on Weather and Time of Day]
+]
+#v(2 * line_spacing)
+
+// TODO dejan: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Latency and Hardware Utilization]
 ]
 #v(2 * line_spacing)
 
