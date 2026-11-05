@@ -596,7 +596,6 @@ def evaluate_segmentation_metrics(
     # reduction="macro" directly on a 1D (C,) tensor would cause SMP to execute
     # tp.sum(dim=0), inadvertently collapsing the class axis into a scalar micro sum.
     macro_iou = class_iou_tensor.mean().item()
-    mean_iou = macro_iou
 
     # Micro IoU: global pixel-level intersection over union across all classes pooled.
     micro_iou = smp.metrics.iou_score(
@@ -619,7 +618,6 @@ def evaluate_segmentation_metrics(
         "class_pixel_accuracy": class_pixel_accuracy.tolist(),
         "macro_iou": float(macro_iou),
         "micro_iou": float(micro_iou),
-        "mean_iou": float(mean_iou),
         "class_iou": list(class_iou),
         "dice": float(dice),
     }
@@ -828,9 +826,8 @@ def flatten_performance_metrics(
     # result files from both scripts are straightforward to compare downstream.
     row: Dict[str, float] = {
         "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
-        "macro_iou": cast(float, metrics["macro_iou"]),
         "micro_iou": cast(float, metrics["micro_iou"]),
-        "mean_iou": cast(float, metrics["mean_iou"]),
+        "macro_iou": cast(float, metrics["macro_iou"]),
         "dice_macro": cast(float, metrics["dice"]),
     }
 
