@@ -877,6 +877,8 @@ As previously mentioned in Section 3.1 Research Design, the results presented in
 
 In addition, the results of two teachers (one non-robust teacher, which will be called "T-NR-V5", and one robust teacher which will be called "T-R-V5") will be presented as well. This is important to compare the performance, robustness, and latency between the teachers and the students.
 
+// TODO: add training curve?
+
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Class Proportion]
@@ -980,6 +982,151 @@ The results of the semantic segmentation will be divided into two parts: the acc
     [bicycle], [0], [0], [],
   ),
   caption: [Per-class results for T-NR-V5.]
+)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9741], [0.9305], [],
+    [sidewalk], [0.7553], [0.6359], [],
+    [building], [0.9148], [0.8155], [],
+    [wall], [0.6749], [0.5637], [],
+    [fence], [0.6811], [0.5774], [],
+    [pole], [0.4066], [0.3144], [],
+    [traffic light], [0.3823], [0.3085], [],
+    [traffic sign], [0.5004], [0.4304], [],
+    [vegetation], [0.9176], [0.8328], [],
+    [terrain], [0.7511], [0.6356], [],
+    [sky], [0.9611], [0.9384], [],
+    [person], [0.6637], [0.4965], [],
+    [rider], [0], [0], [],
+    [car], [0.9354], [0.8678], [],
+    [truck], [0.7969], [0.6997], [],
+    [bus], [0.8515], [0.7675], [],
+    [train], [0], [0], [],
+    [motorcycle], [0], [0], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for S-NR-V5.]
+)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9554], [0.8360], [],
+    [sidewalk], [0.3881], [0.2781], [],
+    [building], [0.8166], [0.6202], [],
+    [wall], [0], [0], [],
+    [fence], [0.0644], [0.0598], [],
+    [pole], [0.0789], [0.0722], [],
+    [traffic light], [0], [0], [],
+    [traffic sign], [0], [0], [],
+    [vegetation], [0.8164], [0.6457], [],
+    [terrain], [0.1711], [0.1466], [],
+    [sky], [0.9428], [0.9031], [],
+    [person], [0], [0], [],
+    [rider], [0], [0], [],
+    [car], [0.8299], [0.6906], [],
+    [truck], [0.2496], [0.1732], [],
+    [bus], [0], [0], [],
+    [train], [0], [0], [],
+    [motorcycle], [0], [0], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for T-R-V5.]
+)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9666], [0.8608], [],
+    [sidewalk], [0.3402], [0.2904], [],
+    [building], [0.9159], [0.6362], [],
+    [wall], [0.0210], [0.0209], [],
+    [fence], [0.2616], [0.2118], [],
+    [pole], [0.1926], [0.1594], [],
+    [traffic light], [0.0120], [0.0119], [],
+    [traffic sign], [0.2587], [0.2003], [],
+    [vegetation], [0.7113], [0.6556], [],
+    [terrain], [0.2132], [0.1956], [],
+    [sky], [0.9585], [0.9081], [],
+    [person], [0.2482], [0.1879], [],
+    [rider], [0], [0], [],
+    [car], [0.8757], [0.7534], [],
+    [truck], [0.3035], [0.2415], [],
+    [bus], [0.4200], [0.3436], [],
+    [train], [0], [0], [],
+    [motorcycle], [0], [0], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for S-R-V1.]
+)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9716], [0.7550], [],
+    [sidewalk], [0.0075], [0.0075], [],
+    [building], [0.6109], [0.4808], [],
+    [wall], [0], [0], [],
+    [fence], [0.0004], [0.0004], [],
+    [pole], [0.0095], [0.0095], [],
+    [traffic light], [0], [0], [],
+    [traffic sign], [0.0018], [0.0018], [],
+    [vegetation], [0.8383], [0.5743], [],
+    [terrain], [0.0127], [0.0126], [],
+    [sky], [0.9538], [0.8730], [],
+    [person], [0], [0], [],
+    [rider], [0], [0], [],
+    [car], [0.6447], [0.5227], [],
+    [truck], [0], [0], [],
+    [bus], [0], [0], [],
+    [train], [0], [0], [],
+    [motorcycle], [0], [0], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for S-R-V2.]
+)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9757], [0.9287], [],
+    [sidewalk], [0.7149], [0.6097], [],
+    [building], [0.9105], [0.8205], [],
+    [wall], [0.6706], [0.5651], [],
+    [fence], [0.6409], [0.5248], [],
+    [pole], [0.3456], [0.2792], [],
+    [traffic light], [0], [0], [],
+    [traffic sign], [0.4054], [0.3412], [],
+    [vegetation], [0.9237], [0.8275], [],
+    [terrain], [0.7354], [0.5980], [],
+    [sky], [0.9679], [0.9389], [],
+    [person], [0.5058], [0.4002], [],
+    [rider], [0], [0], [],
+    [car], [0.9345], [0.8704], [],
+    [truck], [0.7596], [0.6103], [],
+    [bus], [0.7081], [0.6321], [],
+    [train], [0], [0], [],
+    [motorcycle], [0], [0], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for S-NR-V6.]
 )
 
 #v(2 * line_spacing)
