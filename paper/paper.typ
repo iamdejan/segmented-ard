@@ -628,9 +628,14 @@ To improve the feature extraction, data augmentation such as light noise, photom
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[Models Used and Knowledge Distillation Procedure]
+  #text(size: 12pt)[[WIP] Models Used and Knowledge Distillation Procedure]
 ]
 #v(2 * line_spacing)
+
+// TODO: state:
+// - loss functions.
+// - the random weight sampling.
+// - hyperparameters used during training.
 
 Since this study puts an emphasis on the distilled model, therefore both teacher and student models need to be defined as part of the study.
 
@@ -858,6 +863,20 @@ The deployment of such prototype will be done in HuggingFace Space, allowing use
 
 In this chapter, the results that correspond with each research question will be presented. The full results can be seen in Google Sheet#footnote[https://docs.google.com/spreadsheets/d/1NVqQEmkcvf-QyhmNNaQxTpI42V0nx__ODbnWGZBqSAY/edit?usp=sharing].
 
+As previously mentioned in Section 3.1 Research Design, the results presented in this chapter belong to four types of students:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - A non-robust student distilled from a non-robust teacher. Moving forward, this student will be named as "S-NR-V5."
+  - A student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
+  - A robust student distilled from a non-robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this student will be named as "S-R-V1."
+  - A robust student distilled from a robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this will be named "S-R-V2."
+]
+
+In addition, the results of two teachers (one non-robust teacher, which will be called "T-NR-V5", and one robust teacher which will be called "T-R-V5") will be presented as well. This is important to compare the performance, robustness, and latency between the teachers and the students.
+
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Class Proportion]
@@ -901,21 +920,67 @@ The class proportion will be used for oversampling process during training proce
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Segmentation Performance]
+  #text(size: 12pt)[Segmentation Performance]
 ]
 #v(2 * line_spacing)
 
-#v(2 * line_spacing)
-#heading(level: 3)[
-  #text(size: 12pt)[[WIP] Accumulated Results]
-]
-#v(2 * line_spacing)
+The results of the semantic segmentation will be divided into two parts: the accumulated results, and per-class results.
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Class-wise Results]
+  #text(size: 12pt)[Accumulated Results]
 ]
 #v(2 * line_spacing)
+
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Pixel Accuracy*], [0.9266], [0.9202], [0.8190], [0.8373], [0.7612], [0.9169],
+    [*IoU (Micro)*], [0.8633], [0.8521], [0.6934], [0.7201], [0.6145], [0.8465],
+    [*Mean IoU*], [0.5291], [0.5166], [0.2329], [0.2988], [0.1704], [0.4709],
+    [*Dice*], [0.6205], [0.6096], [0.2874], [0.3854], [0.2064], [0.5597]
+  ),
+  caption: [Results, accumulated over all classes.]
+)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[Per-Class Results]
+]
+#v(2 * line_spacing)
+
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Pixel Accuracy*], [*IoU*], [*[WIP] Dice*]
+    ),
+    [road], [0.9757], [0.9363], [],
+    [sidewalk], [0.7662], [0.6579], [],
+    [building], [0.9223], [0.8365], [],
+    [wall], [0.7364], [0.6666], [],
+    [fence], [0.7098], [0.6242], [],
+    [pole], [0.5037], [0.3614], [],
+    [traffic light], [0.4543], [0.3367], [],
+    [traffic sign], [0.5543], [0.4556], [],
+    [vegetation], [0.9162], [0.8464], [],
+    [terrain], [0.8073], [0.6725], [],
+    [sky], [0.9679], [0.9441], [],
+    [person], [0.7272], [0.4588], [],
+    [rider], [0], [0], [],
+    [car], [0.8763], [0.9354], [],
+    [truck], [0.6955], [0.7969], [],
+    [bus], [0.6835], [0.8515], [],
+    [train], [0], [0], [],
+    [motorcycle], [0.002], [0.002], [],
+    [bicycle], [0], [0], [],
+  ),
+  caption: [Per-class results for T-NR-V5.]
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -939,7 +1004,7 @@ The class proportion will be used for oversampling process during training proce
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Class-wise Results]
+  #text(size: 12pt)[[WIP] Per-Class Results]
 ]
 #v(2 * line_spacing)
 
