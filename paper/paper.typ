@@ -1131,11 +1131,34 @@ The results of the semantic segmentation will be divided into two parts: the acc
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Results Based on Weather and Time of Day]
+  #text(size: 12pt)[Results Based on Weather and Time of Day]
 ]
 #v(2 * line_spacing)
 
-// TODO dejan: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
+Due to the limitation of the dataset, not all images have weather and time of day metadata. The dataset used for this study belongs to the 10K subset, as previously stated. However, some images and masks in the 10K subset are not present in the 100K dataset, so it is not completely a subset, rather it forms an intersection. Moreover, some images have weather and/or time of day metadata, but the value is "unknown", and hence these images need to be filtered out. Due to this reason, only 545 images have valid weather and time of day metadata.
+
+#figure(
+  table(
+    columns: 3,
+    table.header(
+      [*Weather*], [*Time of day*], [*Count*],
+      [clear], [daytime], [176],
+      [overcast], [daytime], [112],
+      [partly cloudy], [daytime], [68],
+      [rainy], [daytime], [47],
+      [snowy], [daytime], [46],
+      [clear], [night], [29],
+      [clear], [dawn/dusk], [26],
+      [overcast], [dawn/dusk], [16],
+      [partly cloudy], [dawn/dusk], [8],
+      [snowy], [dawn/dusk], [8],
+      [rainy], [dawn/dusk], [6],
+      [snowy], [night], [2],
+      [rainy], [night], [1],
+    )
+  ),
+  caption: [Distribution of weather and time of day pairs.]
+)
 
 #v(2 * line_spacing)
 #heading(level: 2)[
