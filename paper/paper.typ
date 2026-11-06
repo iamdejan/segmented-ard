@@ -804,9 +804,9 @@ where:
 
 #set par(first-line-indent: (amount: tab_length))
 
-Since this study focuses on semantic segmentation, there should be an adjustment to the formula. The adjusted formula is:
+Because this study focuses on semantic segmentation, there should be an adjustment to the formula. Instead of one formula for tracking the degradation of accuracy, now there are 3 formulas focused on each metric. The first formula is to calculate the degradation of mean IoU:
 $
-  text("ASR")_(text("untargeted")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
+  text("Degradation")_(text("mIoU")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
 $
 
 where:
@@ -817,6 +817,36 @@ where:
 )[
   - $text("mIoU")_(text("adversarial"))$ is defined as the mean intersection of union (mIoU) for the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
   - $text("mIoU")_(text("clean"))$ is defined as the mean intersection of union (mIoU) of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
+]
+
+The second formula is to calculate the degradation of pixel accuracy:
+$
+  text("Degradation")_(text("PA")) = 1 - (text("PA")_(text("adversarial"))) / (text("PA")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("PA")_(text("adversarial"))$ is defined as the pixel accuracy for the perturbed inputs.
+  - $text("PA")_(text("clean"))$ is defined as the pixel accuracy of the clean inputs.
+]
+
+The third formula focuses on Dice.
+$
+  text("Degradation")_(text("Dice")) = 1 - (text("Dice")_(text("adversarial"))) / (text("Dice")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("Dice")_(text("adversarial"))$ is defined as the Dice score for the perturbed inputs.
+  - $text("Dice")_(text("clean"))$ is defined as the Dice score of the clean inputs.
 ]
 
 Lower ASR is preferrable, signaling high robustnesss that the model possesses.
