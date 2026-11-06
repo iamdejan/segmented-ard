@@ -1141,23 +1141,161 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 3,
     table.header(
-      [*Weather*], [*Time of day*], [*Count*],
-      [clear], [daytime], [176],
-      [overcast], [daytime], [112],
-      [partly cloudy], [daytime], [68],
-      [rainy], [daytime], [47],
-      [snowy], [daytime], [46],
-      [clear], [night], [29],
-      [clear], [dawn/dusk], [26],
-      [overcast], [dawn/dusk], [16],
-      [partly cloudy], [dawn/dusk], [8],
-      [snowy], [dawn/dusk], [8],
-      [rainy], [dawn/dusk], [6],
-      [snowy], [night], [2],
-      [rainy], [night], [1],
-    )
+      [*Weather*], [*Time of day*], [*Count*]
+    ),
+    [clear], [daytime], [176],
+    [overcast], [daytime], [112],
+    [partly cloudy], [daytime], [68],
+    [rainy], [daytime], [47],
+    [snowy], [daytime], [46],
+    [clear], [night], [29],
+    [clear], [dawn/dusk], [26],
+    [overcast], [dawn/dusk], [16],
+    [partly cloudy], [dawn/dusk], [8],
+    [snowy], [dawn/dusk], [8],
+    [rainy], [dawn/dusk], [6],
+    [snowy], [night], [2],
+    [rainy], [night], [1],
   ),
   caption: [Distribution of weather and time of day pairs.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.9132], [0.8403], [0.5167], [0.6102],
+    [overcast], [daytime], [0.9152], [0.8437], [0.4850], [0.5782],
+    [partly cloudy], [daytime], [0.9064], [0.8288], [0.5257], [0.6101],
+    [rainy], [daytime], [0.9080], [0.8315], [0.6172], [0.7109],
+    [snowy], [daytime], [0.9063], [0.8287], [0.5576], [0.6529],
+    [clear], [night], [0.8705], [0.7707], [0.4682], [0.5617],
+    [clear], [dawn/dusk], [0.9295], [0.8682], [0.4954], [0.5870],
+    [overcast], [dawn/dusk], [0.9482], [0.9015], [0.6400], [0.7237],
+    [partly cloudy], [dawn/dusk], [0.8445], [0.7308], [0.5285], [0.6208],
+    [snowy], [dawn/dusk], [0.9363], [0.8803], [0.5401], [0.6020],
+    [rainy], [dawn/dusk], [0.8311], [0.7111], [0.4913], [0.5615],
+    [snowy], [night], [0.8293], [0.7083], [0.5341], [0.5837],
+    [rainy], [night], [0.9547], [0.9133], [0.6832], [0.7006],
+  ),
+  caption: [Weather-time of day pair results for T-NR-V5.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.9077], [0.8310], [0.5078], [0.6027],
+    [overcast], [daytime], [0.9113], [0.8370], [0.4895], [0.5821],
+    [partly cloudy], [daytime], [0.8977], [0.8144], [0.5129], [0.5954],
+    [rainy], [daytime], [0.9102], [0.8353], [0.6270], [0.7189],
+    [snowy], [daytime], [0.8840], [0.7922], [0.5132], [0.6123],
+    [clear], [night], [0.8116], [0.6830], [0.4144], [0.5087],
+    [clear], [dawn/dusk], [0.9249], [0.8604], [0.5029], [0.5958],
+    [overcast], [dawn/dusk], [0.9408], [0.8882], [0.6541], [0.7379],
+    [partly cloudy], [dawn/dusk], [0.8495], [0.7384], [0.5586], [0.6493],
+    [snowy], [dawn/dusk], [0.9330], [0.8743], [0.5083], [0.5698],
+    [rainy], [dawn/dusk], [0.8400], [0.7242], [0.4401], [0.5142],
+    [snowy], [night], [0.8376], [0.7206], [0.5404], [0.5806],
+    [rainy], [night], [0.9716], [0.9447], [0.6895], [0.7060],
+  ),
+  caption: [Weather-time of day pair results for S-NR-V5.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.8051], [0.6738], [0.2355], [0.2937],
+    [overcast], [daytime], [0.8338], [0.7149], [0.2476], [0.3008],
+    [partly cloudy], [daytime], [0.7889], [0.6513], [0.2802], [0.3349],
+    [rainy], [daytime], [0.8042], [0.6725], [0.3389], [0.3948],
+    [snowy], [daytime], [0.7607], [0.6138], [0.2490], [0.2966],
+    [clear], [night], [0.6646], [0.4977], [0.2231], [0.2658],
+    [clear], [dawn/dusk], [0.8262], [0.7038], [0.2634], [0.3091],
+    [overcast], [dawn/dusk], [0.8415], [0.7264], [0.4038], [0.4585],
+    [partly cloudy], [dawn/dusk], [0.7199], [0.5624], [0.2761], [0.3250],
+    [snowy], [dawn/dusk], [0.8365], [0.7190], [0.4178], [0.4565],
+    [rainy], [dawn/dusk], [0.5891], [0.4176], [0.3383], [0.3852],
+    [snowy], [night], [0.7501], [0.6001], [0.5264], [0.5473],
+    [rainy], [night], [0.5688], [0.3974], [0.6208], [0.6393],
+  ),
+  caption: [Weather-time of day pair results for T-R-V5.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.8238], [0.7003], [0.2875], [0.3713],
+    [overcast], [daytime], [0.8400], [0.7241], [0.2941], [0.3752],
+    [partly cloudy], [daytime], [0.8124], [0.6841], [0.3282], [0.4033],
+    [rainy], [daytime], [0.8284], [0.7071], [0.4087], [0.4887],
+    [snowy], [daytime], [0.7824], [0.6426], [0.2985], [0.3754],
+    [clear], [night], [0.6825], [0.5180], [0.2475], [0.3020],
+    [clear], [dawn/dusk], [0.8509], [0.7405], [0.3004], [0.3579],
+    [overcast], [dawn/dusk], [0.8769], [0.7808], [0.4547], [0.5289],
+    [partly cloudy], [dawn/dusk], [0.7605], [0.6135], [0.3321], [0.4020],
+    [snowy], [dawn/dusk], [0.8456], [0.7324], [0.3698], [0.4107],
+    [rainy], [dawn/dusk], [0.7122], [0.5530], [0.3894], [0.4360],
+    [snowy], [night], [0.7506], [0.6008], [0.5260], [0.5493],
+    [rainy], [night], [0.6996], [0.5380], [0.6565], [0.6816],
+  ),
+  caption: [Weather-time of day pair results for S-R-V1.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.7477], [0.5971], [0.1670], [0.2040],
+    [overcast], [daytime], [0.7732], [0.6302], [0.1790], [0.2154],
+    [partly cloudy], [daytime], [0.7213], [0.5641], [0.2153], [0.2526],
+    [rainy], [daytime], [0.7496], [0.5995], [0.2778], [0.3128],
+    [snowy], [daytime], [0.7066], [0.5463], [0.2072], [0.2456],
+    [clear], [night], [0.5578], [0.3868], [0.1983], [0.2356],
+    [clear], [dawn/dusk], [0.8003], [0.6671], [0.2301], [0.2633],
+    [overcast], [dawn/dusk], [0.8223], [0.6983], [0.3376], [0.3701],
+    [partly cloudy], [dawn/dusk], [0.7246], [0.5681], [0.2594], [0.2988],
+    [snowy], [dawn/dusk], [0.7401], [0.5875], [0.4720], [0.5058],
+    [rainy], [dawn/dusk], [0.5339], [0.3641], [0.3735], [0.4113],
+    [snowy], [night], [0.6161], [0.4452], [0.4006], [0.4255],
+    [rainy], [night], [0.4315], [0.2751], [0.6122], [0.6235],
+  ),
+  caption: [Weather-time of day pair results for S-R-V2.]
+)
+
+#figure(
+  table(
+    columns: 6,
+    table.header(
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+    ),
+    [clear], [daytime], [0.9038], [0.8245], [0.4530], [0.5436],
+    [overcast], [daytime], [0.9052], [0.8267], [0.4497], [0.5414],
+    [partly cloudy], [daytime], [0.8900], [0.8018], [0.4819], [0.5631],
+    [rainy], [daytime], [0.9060], [0.8282], [0.5693], [0.6532],
+    [snowy], [daytime], [0.8751], [0.7780], [0.4557], [0.5434],
+    [clear], [night], [0.8413], [0.7260], [0.3891], [0.4687],
+    [clear], [dawn/dusk], [0.9265], [0.8630], [0.4684], [0.5397],
+    [overcast], [dawn/dusk], [0.9463], [0.8980], [0.6359], [0.7084],
+    [partly cloudy], [dawn/dusk], [0.8568], [0.7495], [0.4573], [0.5299],
+    [snowy], [dawn/dusk], [0.9467], [0.8987], [0.6297], [0.6824],
+    [rainy], [dawn/dusk], [0.7993], [0.6657], [0.4513], [0.5067],
+    [snowy], [night], [0.7947], [0.6594], [0.4981], [0.5216],
+    [rainy], [night], [0.9646], [0.9317], [0.7951], [0.8100],
+  ),
+  caption: [Weather-time of day pair results for S-NR-V6.]
 )
 
 #v(2 * line_spacing)
