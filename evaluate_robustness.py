@@ -675,7 +675,8 @@ def evaluate_robustness(
     3. Generate 10-step PGD adversarial images using ``pgd_attack``.
     4. Run adversarial forward pass under ``torch.no_grad`` to obtain perturbed logits.
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
-    6. Compute dataset-wide macro IoU, pixel accuracy, Dice score, and per-class IoU.
+    6. Compute dataset-wide macro IoU, pixel accuracy, per-class Dice scores,
+       macro Dice as their arithmetic mean, and per-class IoU.
     7. Calculate untargeted ASR via ``compute_untargeted_asr``.
 
     Parameters
@@ -803,11 +804,32 @@ def evaluate_robustness(
     clean_class_iou = cast(List[float], smp.metrics.iou_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction=None).tolist())
     adv_class_iou = cast(List[float], smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction=None).tolist())
 
-    # Pixel accuracy and Dice (F1) scores
+    # Pixel accuracy is pooled globally across all valid classes.
     clean_pixel_acc = float(smp.metrics.recall(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="micro").item())
     adv_pixel_acc = float(smp.metrics.recall(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="micro").item())
-    clean_dice = float(smp.metrics.f1_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="macro").item())
-    adv_dice = float(smp.metrics.f1_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="macro").item())
+
+    # Calculate class-wise Dice first so the class axis is preserved. Calling
+    # SMP with reduction="macro" on these 1-D per-class totals would sum along
+    # dim=0 before scoring, which does not produce the intended macro average.
+    clean_class_dice_tensor = smp.metrics.f1_score(
+        clean_tp_total,
+        clean_fp_total,
+        clean_fn_total,
+        clean_tn_total,
+        reduction=None,
+    )
+    adv_class_dice_tensor = smp.metrics.f1_score(
+        adv_tp_total,
+        adv_fp_total,
+        adv_fn_total,
+        adv_tn_total,
+        reduction=None,
+    )
+
+    # Match evaluate_performance.py: macro Dice is the unweighted arithmetic
+    # mean of the per-class Dice scores across all evaluated classes.
+    clean_dice = float(clean_class_dice_tensor.mean().item())
+    adv_dice = float(adv_class_dice_tensor.mean().item())
 
     num_batches = len(dataloader)
     return {
