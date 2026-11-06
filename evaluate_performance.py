@@ -337,75 +337,6 @@ def find_val_image_path_from_mask(complete_mask_path: str) -> str:
     return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
 
 
-def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
-    """Derive the corresponding PNG mask path from a JPEG image path.
-
-    Steps
-    -----
-    1. Extract the sample stem by stripping the ``.jpg`` extension.
-    2. Append the ``_train_color.png`` suffix used by BDD100k masks.
-
-    Parameters
-    ----------
-    complete_image_path : str
-        Full filesystem path to an image JPEG.
-    base_mask_path : str
-        Directory containing the corresponding mask PNGs.
-
-    Returns
-    -------
-    str
-        Full filesystem path to the matching mask file.
-    """
-    file_path_split = complete_image_path.split("/")
-    mask_file_name = file_path_split[-1].split(".")[0]
-
-    mask_path = base_mask_path + "/" + mask_file_name + "_train_color.png"
-    return mask_path
-
-
-def find_train_mask_path_from_image(complete_image_path: str) -> str:
-    """Locate the training mask corresponding to a training image.
-
-    Steps
-    -----
-    1. Delegate to :func:`find_mask_path_from_image` using
-       ``Path.SEGMENTATION_MASK_TRAIN_PATH``.
-
-    Parameters
-    ----------
-    complete_image_path : str
-        Full path to a training image JPEG.
-
-    Returns
-    -------
-    str
-        Full path to the corresponding training mask PNG.
-    """
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_TRAIN_PATH)
-
-
-def find_val_mask_path_from_image(complete_image_path: str) -> str:
-    """Locate the validation mask corresponding to a validation image.
-
-    Steps
-    -----
-    1. Delegate to :func:`find_mask_path_from_image` using
-       ``Path.SEGMENTATION_MASK_VAL_PATH``.
-
-    Parameters
-    ----------
-    complete_image_path : str
-        Full path to a validation image JPEG.
-
-    Returns
-    -------
-    str
-        Full path to the corresponding validation mask PNG.
-    """
-    return find_mask_path_from_image(complete_image_path, Path.SEGMENTATION_MASK_VAL_PATH)
-
-
 def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Scan disk and load the BDD100k train, validation, and test splits.
 
@@ -415,11 +346,12 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
     Steps
     -----
-    1. Collect train masks and filter out corrupted or non-standard resolutions.
-    2. Map to corresponding train images and filter any missing or malformed pairs.
+    1. Collect train masks and filter non-standard resolutions without modifying
+       candidate lists during iteration.
+    2. Map to corresponding train images and filter non-matching pairs.
     3. Partition the train-test pool using 80/20 ``train_test_split`` with the
        fixed ``Configuration.SEED``.
-    4. Collect and validate validation masks and images.
+    4. Collect and validate validation masks and images without in-place mutation.
     5. Return DataFrames for train, validation, and test splits.
 
     Returns
@@ -427,61 +359,73 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         DataFrames representing ``(train_df, val_df, test_df)``.
     """
-    # Load train masks, dropping any that do not match the expected resolution.
-    train_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    # Build the valid training pool without mutating a list during iteration.
+    # In-place deletion during iteration skips adjacent candidate elements.
+    train_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
+    train_mask_paths: List[str] = []
     problematic_masks: List[str] = []
-    for complete_mask_path in train_mask_paths:
+    for complete_mask_path in train_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_masks.append(complete_mask_path)
-                train_mask_paths.remove(complete_mask_path)
+                continue
+        train_mask_paths.append(complete_mask_path)
     print(f"Problematic masks: {problematic_masks}")
 
-    train_image_paths = list(map(find_train_image_path_from_mask, train_mask_paths))
+    train_image_paths: List[str] = []
+    validated_train_mask_paths: List[str] = []
     problematic_images: List[str] = []
-    for complete_image_path in train_image_paths:
+    for complete_mask_path in train_mask_paths:
+        complete_image_path = find_train_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_images.append(complete_image_path)
-                train_image_paths.remove(complete_image_path)
-                train_mask_paths.remove(find_train_mask_path_from_image(complete_image_path))
+                continue
+        train_image_paths.append(complete_image_path)
+        validated_train_mask_paths.append(complete_mask_path)
     print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
         "image_paths": train_image_paths,
-        "mask_paths": train_mask_paths,
+        "mask_paths": validated_train_mask_paths,
     })
     train_df, test_df = train_test_split(
         train_test_df, test_size=0.2, random_state=Configuration.SEED
     )
 
-    # Load the BDD100k validation split, again filtering non-standard samples.
-    val_mask_paths = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    # Load the BDD100k validation split, again filtering non-standard samples
+    # without mutating candidate lists during iteration.
+    val_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    val_mask_paths: List[str] = []
     problematic_val_masks: List[str] = []
-    for complete_mask_path in val_mask_paths:
+    for complete_mask_path in val_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_val_masks.append(complete_mask_path)
-                val_mask_paths.remove(complete_mask_path)
+                continue
+        val_mask_paths.append(complete_mask_path)
     print(f"Problematic val masks: {problematic_val_masks}")
 
-    val_image_paths = list(map(find_val_image_path_from_mask, val_mask_paths))
+    val_image_paths: List[str] = []
+    validated_val_mask_paths: List[str] = []
     problematic_val_images: List[str] = []
-    for complete_image_path in val_image_paths:
+    for complete_mask_path in val_mask_paths:
+        complete_image_path = find_val_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
                 problematic_val_images.append(complete_image_path)
-                val_image_paths.remove(complete_image_path)
-                val_mask_paths.remove(find_val_mask_path_from_image(complete_image_path))
+                continue
+        val_image_paths.append(complete_image_path)
+        validated_val_mask_paths.append(complete_mask_path)
     print(f"Problematic val images: {problematic_val_images}")
 
     val_df = pd.DataFrame({
         "image_paths": val_image_paths,
-        "mask_paths": val_mask_paths,
+        "mask_paths": validated_val_mask_paths,
     })
 
     return train_df, val_df, test_df
@@ -519,23 +463,30 @@ def evaluate_segmentation_metrics(
     ignore_index: int = -1,
     ignored_class: int = 19,
 ) -> Dict[str, float | List[float]]:
-    """Compute pixel accuracy, per-class accuracy, IoU and Dice over a dataset.
+    """Compute pixel accuracy, per-class accuracy, IoU, and Dice over a dataset.
 
     The metrics are derived from per-class true/false positive/negative pixel
     counts accumulated across *every* batch via :func:`smp.metrics.get_stats`,
     then reduced once at the end. Accumulating the raw counts rather than
     averaging per-batch values guarantees the metrics stay correct even when
-    batches are class-imbalanced. The ``smp`` implementations are reused
-    wherever possible:
+    batches are class-imbalanced.
 
-    * Pixel accuracy averages every pixel, so it uses ``reduction="micro"`` and
-      yields a single scalar.
-    * Class-wise pixel accuracy scores each class independently, so it uses no
-      reduction and returns one accuracy value per class.
-    * Class-wise IoU (Jaccard) similarly uses no reduction and returns one IoU
-      value per class; the mean IoU is then the average of those per-class
-      values, matching macro-averaging.
-    * Dice (F1) is macro-averaged over classes into a single scalar.
+    Reduction details:
+    * Pixel accuracy computes global correctly classified pixels over total
+      evaluated pixels across all classes.
+    * Class-wise pixel accuracy scores each class independently without reduction.
+    * Class-wise IoU (Jaccard) computes IoU per class without reduction.
+    * Macro IoU (mean IoU / mIoU) computes the unweighted arithmetic mean across
+      all evaluated classes. When computing Macro IoU from 1-D per-class totals,
+      averaging the unreduced class-wise IoU tensor prevents SMP's
+      ``reduction="macro"`` from collapsing the class axis into a scalar sum
+      along dimension 0.
+    * Micro IoU aggregates counts globally across all classes before computing
+      IoU, weighting pixels uniformly regardless of class frequency.
+    * Class-wise Dice (F1) computes one Dice score per evaluated class without
+      reduction.
+    * Dice (F1 macro) computes the unweighted arithmetic mean of per-class F1
+      scores across all classes.
 
     The ``Unknown`` class (id ``ignored_class``) is remapped to the sentinel
     ``ignore_index`` so those pixels never influence any metric. This mirrors
@@ -549,7 +500,8 @@ def evaluate_segmentation_metrics(
     2. Collapse logits and one-hot targets to ``(B, H, W)`` class-index maps and
        remap ``ignored_class`` to ``ignore_index`` on both.
     3. Accumulate per-class ``(tp, fp, fn, tn)`` pixel counts across batches.
-    4. Reduce the accumulated counts into the requested metrics.
+    4. Reduce the accumulated counts into the requested metrics without collapsing
+       the class dimension prematurely.
 
     Parameters
     ----------
@@ -570,16 +522,21 @@ def evaluate_segmentation_metrics(
     Returns
     -------
     Dict[str, float | List[float]]
-        Mapping of metric name to value. ``pixel_accuracy``, ``iou`` and
-        ``dice`` are scalars, while ``class_pixel_accuracy`` and ``class_iou``
-        are lists whose index ``i`` holds the value of class ``i`` (classes
-        ``0..18``).
+        Mapping of metric name to value. ``pixel_accuracy``,
+        ``micro_iou``, ``mean_iou``, and ``dice`` are scalars, while
+        ``class_pixel_accuracy``, ``class_iou``, and ``class_dice`` are lists
+        whose index ``i`` holds the value of class ``i`` (classes ``0..18``).
+
+    Raises
+    ------
+    ValueError
+        If the evaluation dataloader yields no batches.
     """
     model.eval()
 
     # Per-class confusion counts summed over the whole dataset. ``get_stats``
     # returns ``(N, C)`` tensors, so summing over the batch axis (dim 0) yields
-    # one count per class.
+    # one count per class of shape ``(num_classes,)``.
     tp_total: Tensor | None = None
     fp_total: Tensor | None = None
     fn_total: Tensor | None = None
@@ -611,7 +568,8 @@ def evaluate_segmentation_metrics(
                 num_classes=num_classes,
             )
 
-            # Accumulate the ``(N, C)`` counts into per-class running sums.
+            # Accumulate the ``(N, C)`` counts into per-class running sums of
+            # shape ``(num_classes,)`` by summing only over the batch dimension.
             tp_total = tp.sum(dim=0) if tp_total is None else tp_total + tp.sum(dim=0)
             fp_total = fp.sum(dim=0) if fp_total is None else fp_total + fp.sum(dim=0)
             fn_total = fn.sum(dim=0) if fn_total is None else fn_total + fn.sum(dim=0)
@@ -621,36 +579,50 @@ def evaluate_segmentation_metrics(
     if tp_total is None:
         raise ValueError("The evaluation dataloader yielded no batches.")
 
-    # Pixel accuracy: ratio of correctly classified pixels over all pixels.
+    # Pixel accuracy: ratio of correctly classified pixels over all evaluated pixels.
     pixel_accuracy = tp_total.sum() / (tp_total + fn_total).sum()
 
-    # Class-wise pixel accuracy: one accuracy value per class (no reduction).
-    # ``reduction=None`` returns a ``(num_classes,)`` tensor whose element ``i``
-    # is the accuracy of class ``i``.
+    # Class-wise pixel accuracy: accuracy computed independently for each class.
+    # Clamp denominator to 1 to avoid division by zero on unrepresented classes.
     class_pixel_accuracy = tp_total / (tp_total + fn_total).clamp_min(1)
 
-    # IoU (Jaccard index) and Dice (F1) macro-averaged over classes.
-    iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
-    dice = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    # Class-wise IoU: calculate IoU per class using reduction=None.
+    # This preserves the (num_classes,) shape so class metrics are inspected individually.
+    class_iou_tensor = smp.metrics.iou_score(
+        tp_total, fp_total, fn_total, tn_total, reduction=None
+    )
+    class_iou = class_iou_tensor.tolist()
 
-    # Class-wise IoU: one IoU value per class (no reduction). ``reduction=None``
-    # returns a ``(num_classes,)`` tensor whose element ``i`` is the IoU of
-    # class ``i``.
-    class_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction=None).tolist()
+    # Macro IoU (mean IoU / mIoU): unweighted arithmetic mean across all classes.
+    # We compute the mean directly over the per-class IoU tensor. Calling SMP's
+    # reduction="macro" directly on a 1D (C,) tensor would cause SMP to execute
+    # tp.sum(dim=0), inadvertently collapsing the class axis into a scalar micro sum.
+    mean_iou = class_iou_tensor.mean().item()
 
-    # Mean IoU: average of the class-wise IoU values (macro-averaging).
-    mean_iou = np.mean(class_iou)
+    # Micro IoU: global pixel-level intersection over union across all classes pooled.
+    micro_iou = smp.metrics.iou_score(
+        tp_total, fp_total, fn_total, tn_total, reduction="micro"
+    ).item()
 
-    # Dataset-level global (micro) IoU
-    global_iou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+    # Class-wise Dice (F1): calculate Dice score per class using reduction=None.
+    class_dice_tensor = smp.metrics.f1_score(
+        tp_total, fp_total, fn_total, tn_total, reduction=None
+    )
+    class_dice = class_dice_tensor.tolist()
+
+    # Macro Dice (F1 macro): unweighted arithmetic mean across all classes.
+    # Computed directly over the per-class Dice tensor to avoid SMP dim=0 collapse.
+    dice = class_dice_tensor.mean().item()
 
     return {
         "pixel_accuracy": float(pixel_accuracy),
-        "class_pixel_accuracy": list(class_pixel_accuracy),
-        "iou": float(iou),
+        # Convert tensor to host Python floats so callers can safely serialize
+        # and average repeated runs without retaining GPU references.
+        "class_pixel_accuracy": class_pixel_accuracy.tolist(),
+        "micro_iou": float(micro_iou),
         "mean_iou": float(mean_iou),
-        "global_iou": float(global_iou),
         "class_iou": list(class_iou),
+        "class_dice": list(class_dice),
         "dice": float(dice),
     }
 
@@ -841,8 +813,9 @@ def flatten_performance_metrics(
 
     Steps
     -----
-    1. Copy the scalar evaluation metrics into explicitly named CSV columns.
-    2. Expand per-class pixel accuracy and IoU lists into one column per class.
+    1. Copy scalar evaluation metrics into explicitly named CSV columns.
+    2. Expand per-class pixel accuracy, IoU, and Dice lists into one column per
+       class.
 
     Parameters
     ----------
@@ -858,8 +831,7 @@ def flatten_performance_metrics(
     # result files from both scripts are straightforward to compare downstream.
     row: Dict[str, float] = {
         "pixel_accuracy": cast(float, metrics["pixel_accuracy"]),
-        "iou_macro": cast(float, metrics["iou"]),
-        "global_iou": cast(float, metrics["global_iou"]),
+        "micro_iou": cast(float, metrics["micro_iou"]),
         "mean_iou": cast(float, metrics["mean_iou"]),
         "dice_macro": cast(float, metrics["dice"]),
     }
@@ -868,10 +840,12 @@ def flatten_performance_metrics(
     # would make class-wise values harder to filter and compare programmatically.
     class_accuracy = cast(List[float], metrics["class_pixel_accuracy"])
     class_iou = cast(List[float], metrics["class_iou"])
+    class_dice = cast(List[float], metrics["class_dice"])
     for class_id in range(19):
         class_slug = CLASS_NAMES[class_id].replace(" ", "_")
         row[f"class_pixel_accuracy_{class_id}_{class_slug}"] = class_accuracy[class_id]
         row[f"class_iou_{class_id}_{class_slug}"] = class_iou[class_id]
+        row[f"class_dice_{class_id}_{class_slug}"] = class_dice[class_id]
 
     return row
 
@@ -886,11 +860,9 @@ def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
 
     Steps
     -----
-    1. Split the value on the first ``=`` so checkpoint paths may contain
-       additional ``=`` characters.
+    1. Split the value on the first ``=`` so paths may contain ``=`` characters.
     2. Require both a non-empty checkpoint name and checkpoint path.
-    3. Reject path separators in the checkpoint name so it represents exactly
-       one directory below ``./model/performance``.
+    3. Reject path separators in the checkpoint name.
     4. Return the validated checkpoint name and path.
 
     Parameters
@@ -939,9 +911,8 @@ def parse_arguments() -> argparse.Namespace:
     Steps
     -----
     1. Require exactly one named checkpoint specification in ``NAME=PATH`` form.
-    2. Add an optional batch-size argument to override the configuration.
-    3. Add an optional number-of-runs argument controlling how many times
-       evaluation is repeated before averaging.
+    2. Add an optional batch-size argument to override configuration.
+    3. Add an optional number-of-runs argument controlling averaging repetitions.
     4. Parse and return the argument namespace.
 
     Returns
@@ -977,6 +948,49 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def average_performance_metrics(
+    run_metrics: List[Dict[str, float | List[float]]],
+) -> Dict[str, float | List[float]]:
+    """Average scalar and per-class performance metrics across repeated runs.
+
+    Steps
+    -----
+    1. Iterate through metric keys from the first evaluation run.
+    2. Average scalar metrics directly and list metrics element-wise.
+    3. Return the averaged metric dictionary using standard Python primitives.
+
+    Parameters
+    ----------
+    run_metrics : List[Dict[str, float | List[float]]]
+        Performance dictionaries produced by repeated evaluations.
+
+    Returns
+    -------
+    Dict[str, float | List[float]]
+        Averaged performance metric dictionary.
+
+    Raises
+    ------
+    ValueError
+        If no completed evaluation runs were provided.
+    """
+    if not run_metrics:
+        raise ValueError("At least one completed run is required for averaging.")
+
+    averaged_metrics: Dict[str, float | List[float]] = {}
+    for key in run_metrics[0]:
+        values = [run[key] for run in run_metrics]
+        if all(isinstance(value, float) for value in values):
+            averaged_metrics[key] = float(np.mean(values))
+        elif all(isinstance(value, list) for value in values):
+            # Element-wise average per class, converted back to standard Python floats
+            averaged_metrics[key] = np.mean(np.asarray(values, dtype=float), axis=0).tolist()
+        else:
+            raise ValueError(f"Metric '{key}' changed type across evaluation runs.")
+
+    return averaged_metrics
+
+
 def main() -> None:
     """Load a checkpoint, report metrics, and save them to checkpoint-specific CSV.
 
@@ -985,13 +999,11 @@ def main() -> None:
     1. Parse the named checkpoint, batch-size, and number-of-runs arguments.
     2. Create ``./model/performance/{checkpoint_name}`` for CSV output.
     3. Load the trained model onto the target device.
-    4. Load the BDD100k test partition with the training-compatible transforms.
+    4. Load the BDD100k test partition with training-compatible transforms.
     5. Build the evaluation DataLoader.
-    6. Run :func:`evaluate_segmentation_metrics` ``N`` times and average every
-       reported metric (scalars and per-class lists alike) so the logged numbers
-       are robust to single-run variance.
-    7. Flatten the averaged metrics and save them to ``result.csv``.
-    8. Export the existing sample-prediction visualization.
+    6. Run :func:`evaluate_segmentation_metrics` ``N`` times and average metrics.
+    7. Flatten averaged metrics and save to ``result.csv``.
+    8. Export sample-prediction visualization.
     """
     args = parse_arguments()
 
@@ -1027,7 +1039,7 @@ def main() -> None:
     test_loader = DataLoader(
         dataset=test_ds,
         batch_size=args.batch_size,
-        shuffle=False,  # deterministic ordering for reproducible evaluation
+        shuffle=False,
         num_workers=Configuration.NUM_WORKERS,
     )
 
@@ -1045,30 +1057,22 @@ def main() -> None:
         run_metrics.append(metrics)
         print(f"  Run {run_idx + 1}/{num_runs} complete.")
 
-    # Reduce the per-run results into a single averaged metric dictionary. Scalar
-    # metrics (e.g. pixel accuracy, IoU, Dice) are averaged directly, while the
-    # per-class lists are averaged element-wise so class ``i`` still reports the
-    # mean of class ``i`` across runs.
-    averaged_metrics: Dict[str, float | List[float]] = {}
-    for key in run_metrics[0]:
-        values = [run[key] for run in run_metrics]
-        if all(isinstance(value, float) for value in values):
-            averaged_metrics[key] = float(np.mean(values))
-        else:
-            averaged_metrics[key] = list(np.mean(np.array(values), axis=0))
+    averaged_metrics = average_performance_metrics(run_metrics)
 
     print('\nFinal test-set metrics (averaged over %d runs):' % num_runs)
-    print(f'  Pixel Accuracy : {averaged_metrics["pixel_accuracy"]:.4f}')
-    print(f'  IoU (macro)    : {averaged_metrics["iou"]:.4f}')
-    print(f'  Global IoU     : {averaged_metrics["global_iou"]:.4f}')
-    print(f'  Mean IoU       : {averaged_metrics["mean_iou"]:.4f}')
-    print(f'  Dice (macro)   : {averaged_metrics["dice"]:.4f}')
+    print(f'  Pixel Accuracy        : {averaged_metrics["pixel_accuracy"]:.4f}')
+    print(f'  IoU (Micro)           : {averaged_metrics["micro_iou"]:.4f}')
+    print(f'  IoU (Macro) / Mean IoU: {averaged_metrics["mean_iou"]:.4f}')
+    print(f'  Dice                  : {averaged_metrics["dice"]:.4f}')
     print('  Class-wise Pixel Accuracy:')
     for class_id, acc in enumerate(cast(List[float], averaged_metrics["class_pixel_accuracy"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {acc:.4f}')
     print('  Class-wise IoU:')
     for class_id, class_iou in enumerate(cast(List[float], averaged_metrics["class_iou"])):
         print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_iou:.4f}')
+    print('  Class-wise Dice:')
+    for class_id, class_dice in enumerate(cast(List[float], averaged_metrics["class_dice"])):
+        print(f'    {class_id:>2} {CLASS_NAMES[class_id]:<14} : {class_dice:.4f}')
 
     # Persist the same averaged scalar and class-wise metrics that are printed
     # above, using one column per value for straightforward downstream analysis.
@@ -1078,12 +1082,13 @@ def main() -> None:
 
     # Render the first ``num_samples`` test samples to ``./model/predictions.png``
     # so the predictions can be inspected visually alongside the metrics.
-    print('\nExporting sample predictions to ./model/predictions.png...')
+    output_predictions_path = os.path.join(output_directory, "predictions.png")
+    print(f'\nExporting sample predictions to {output_predictions_path}...')
     visualize_predictions(
         model=model,
         test_df=test_df,
         device=Configuration.DEVICE,
-        output_path="./model/predictions.png",
+        output_path=output_predictions_path,
     )
 
 

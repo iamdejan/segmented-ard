@@ -94,7 +94,7 @@ class Configuration:
     CHANNELS = 3
 
 
-class ImagePath:
+class Path:
     """Filesystem directory locations for BDD100k images and masks."""
 
     BASE = "./data/bdd100k"
@@ -167,7 +167,9 @@ def find_image_path_from_mask(complete_mask_path: str, base_image_path: str) -> 
     """
     file_path_split = complete_mask_path.split("/")
     mask_file_name = file_path_split[-1].split("_")[0]
-    return base_image_path + "/" + mask_file_name + ".jpg"
+
+    image_path = base_image_path + "/" + mask_file_name + ".jpg"
+    return image_path
 
 
 def find_train_image_path_from_mask(complete_mask_path: str) -> str:
@@ -175,7 +177,8 @@ def find_train_image_path_from_mask(complete_mask_path: str) -> str:
 
     Steps
     -----
-    1. Delegate to ``find_image_path_from_mask`` using ``ImagePath.IMAGE_TRAIN_PATH``.
+    1. Delegate to :func:`find_image_path_from_mask` using
+       ``Path.IMAGE_TRAIN_PATH``.
 
     Parameters
     ----------
@@ -187,46 +190,45 @@ def find_train_image_path_from_mask(complete_mask_path: str) -> str:
     str
         Full path to the corresponding training image JPEG.
     """
-    return find_image_path_from_mask(complete_mask_path, ImagePath.IMAGE_TRAIN_PATH)
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_TRAIN_PATH)
 
 
-def find_mask_path_from_image(complete_image_path: str, base_mask_path: str) -> str:
-    """Derive the corresponding PNG mask path from a JPEG image path.
+def find_val_image_path_from_mask(complete_mask_path: str) -> str:
+    """Locate the validation image corresponding to a validation mask.
 
     Steps
     -----
-    1. Extract the sample stem by stripping the ``.jpg`` extension.
-    2. Append the ``_train_color.png`` suffix used by BDD100k masks.
+    1. Delegate to :func:`find_image_path_from_mask` using
+       ``Path.IMAGE_VAL_PATH``.
 
     Parameters
     ----------
-    complete_image_path : str
-        Full filesystem path to an image JPEG.
-    base_mask_path : str
-        Directory containing the corresponding mask PNGs.
+    complete_mask_path : str
+        Full path to a validation mask PNG.
 
     Returns
     -------
     str
-        Full filesystem path to the matching mask file.
+        Full path to the corresponding validation image JPEG.
     """
-    file_path_split = complete_image_path.split("/")
-    mask_file_name = file_path_split[-1].split(".")[0]
-    return base_mask_path + "/" + mask_file_name + "_train_color.png"
+    return find_image_path_from_mask(complete_mask_path, Path.IMAGE_VAL_PATH)
 
 
 def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Scan disk and load the BDD100k train, validation, and test splits.
 
-    This function duplicates the exact partitioning logic from the training scripts
-    so the evaluation evaluates the model on the identical test split.
+    This function duplicates the exact partitioning logic from the training
+    scripts so the model is evaluated on the identical test split that was held
+    out during training.
 
     Steps
     -----
-    1. Collect train masks and filter out corrupted or non-standard resolutions.
-    2. Map to corresponding train images and filter any missing or malformed pairs.
-    3. Partition the train-test pool using 80/20 train_test_split with fixed SEED.
-    4. Collect and validate validation masks and images.
+    1. Collect train masks and filter non-standard resolutions without modifying
+       candidate lists during iteration.
+    2. Map to corresponding train images and filter non-matching pairs.
+    3. Partition the train-test pool using 80/20 ``train_test_split`` with the
+       fixed ``Configuration.SEED``.
+    4. Collect and validate validation masks and images without in-place mutation.
     5. Return DataFrames for train, validation, and test splits.
 
     Returns
@@ -235,11 +237,8 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         DataFrames representing ``(train_df, val_df, test_df)``.
     """
     # Build the valid training pool without mutating a list during iteration.
-    # Preserving candidate order matters because the seeded train/test split is
-    # deterministic only when it receives the same ordered population.
-    train_mask_candidates = glob.glob(
-        f"{ImagePath.SEGMENTATION_MASK_TRAIN_PATH}/*.png"
-    )
+    # In-place deletion during iteration skips adjacent candidate elements.
+    train_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_TRAIN_PATH}/*.png")
     train_mask_paths: List[str] = []
     problematic_masks: List[str] = []
     for complete_mask_path in train_mask_candidates:
@@ -249,6 +248,7 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
                 problematic_masks.append(complete_mask_path)
                 continue
         train_mask_paths.append(complete_mask_path)
+    print(f"Problematic masks: {problematic_masks}")
 
     train_image_paths: List[str] = []
     validated_train_mask_paths: List[str] = []
@@ -262,6 +262,7 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
                 continue
         train_image_paths.append(complete_image_path)
         validated_train_mask_paths.append(complete_mask_path)
+    print(f"Problematic images: {problematic_images}")
 
     train_test_df = pd.DataFrame({
         "image_paths": train_image_paths,
@@ -271,28 +272,40 @@ def load_dataset_from_files() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         train_test_df, test_size=0.2, random_state=Configuration.SEED
     )
 
-    val_mask_paths = glob.glob(f"{ImagePath.SEGMENTATION_MASK_VAL_PATH}/*.png")
-    for complete_mask_path in val_mask_paths:
+    # Load the BDD100k validation split, again filtering non-standard samples
+    # without mutating candidate lists during iteration.
+    val_mask_candidates = glob.glob(f"{Path.SEGMENTATION_MASK_VAL_PATH}/*.png")
+    val_mask_paths: List[str] = []
+    problematic_val_masks: List[str] = []
+    for complete_mask_path in val_mask_candidates:
         with Image.open(complete_mask_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
-                val_mask_paths.remove(complete_mask_path)
+                problematic_val_masks.append(complete_mask_path)
+                continue
+        val_mask_paths.append(complete_mask_path)
+    print(f"Problematic val masks: {problematic_val_masks}")
 
-    val_image_paths = list(map(find_image_path_from_mask, val_mask_paths, [ImagePath.IMAGE_VAL_PATH] * len(val_mask_paths)))
-    for complete_image_path in val_image_paths:
+    val_image_paths: List[str] = []
+    validated_val_mask_paths: List[str] = []
+    problematic_val_images: List[str] = []
+    for complete_mask_path in val_mask_paths:
+        complete_image_path = find_val_image_path_from_mask(complete_mask_path)
         with Image.open(complete_image_path) as img:
             width, height = img.size
             if width != 1280 or height != 720:
-                val_image_paths.remove(complete_image_path)
-                val_mask_paths.remove(find_mask_path_from_image(complete_image_path, ImagePath.SEGMENTATION_MASK_VAL_PATH))
+                problematic_val_images.append(complete_image_path)
+                continue
+        val_image_paths.append(complete_image_path)
+        validated_val_mask_paths.append(complete_mask_path)
+    print(f"Problematic val images: {problematic_val_images}")
 
     val_df = pd.DataFrame({
         "image_paths": val_image_paths,
-        "mask_paths": val_mask_paths,
+        "mask_paths": validated_val_mask_paths,
     })
 
     return train_df, val_df, test_df
-
 
 class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
     """BDD100k semantic segmentation dataset loader.
@@ -1477,7 +1490,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--pair-csv",
         type=str,
-        default=ImagePath.WEATHER_TIMEOFDAY_PAIR_CSV,
+        default=Path.WEATHER_TIMEOFDAY_PAIR_CSV,
         help=(
             "Pair/count CSV. Defaults to "
             "./data/weather_timeofday_pair_data.csv."
@@ -1486,7 +1499,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--intersection-csv",
         type=str,
-        default=ImagePath.METADATA_INTERSECTION_CSV,
+        default=Path.METADATA_INTERSECTION_CSV,
         help=(
             "10K image / 100K metadata intersection CSV. Defaults to "
             "./data/bdd100k_10k_images_with_100k_metadata_intersection.csv."
