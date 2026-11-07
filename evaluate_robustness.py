@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple, Union, cast
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from beartype import beartype
-from jaxtyping import Float, UInt8, jaxtyped
+from jaxtyping import Float, Int64, UInt8, jaxtyped
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,9 +30,9 @@ from tqdm import tqdm
 # Shape aliases enforced at runtime by jaxtyped + beartype to eliminate
 # broadcast shape mismatches across the evaluation pipeline.
 ImageTensor = Float[Tensor, "3 h w"]  # Single image, channel-first layout
-MaskTensor = Float[Tensor, "c h w"]  # One-hot mask, c == NUM_CLASSES
+MaskTensor = Int64[Tensor, "h w"]  # Single class-index mask
 BatchImage = Float[Tensor, "b 3 h w"]  # Collated batch of images
-BatchMask = Float[Tensor, "b c h w"]  # Collated batch of one-hot masks
+BatchMask = Int64[Tensor, "b h w"]  # Collated class-index masks
 Logits = Float[Tensor, "b c h w"]  # Model output, c == NUM_CLASSES
 NumpyImage = Float[np.ndarray, "h w 3"]  # Single image in channels-last layout
 ClassIndexArray = UInt8[np.ndarray, "h w"]  # Per-pixel class index map
@@ -356,13 +356,15 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
 
     @jaxtyped(typechecker=beartype)
     def __getitem__(self, index: int) -> Tuple[ImageTensor, MaskTensor]:
-        """Retrieve transformed image and one-hot mask tensors at index.
+        """Retrieve a transformed image and class-index mask tensor at index.
 
         Steps
         -----
         1. Load raw sample via ``load_sample``.
         2. Apply resize and PyTorch transposition transforms.
-        3. One-hot encode mask into ``(NUM_CLASSES, H, W)`` float tensor.
+        3. Preserve the mask as an ``int64`` class-index tensor of shape ``(H, W)``
+           so cross-entropy and metrics can consume it directly without one-hot
+           expansion and the corresponding GPU memory overhead.
 
         Parameters
         ----------
@@ -372,7 +374,7 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         Returns
         -------
         Tuple[ImageTensor, MaskTensor]
-            Pair of transformed image ``(3, H, W)`` and one-hot mask ``(20, H, W)``.
+            Pair of transformed image ``(3, H, W)`` and class-index mask ``(H, W)``.
         """
         image, class_mask = self.load_sample(index)
 
@@ -381,12 +383,11 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         else:
             transformed = ToTensorV2()(image=image, mask=class_mask)
 
-        # One-hot encode so the channel dimension aligns with the model's logits
-        mask_one_hot = torch.nn.functional.one_hot(
-            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float()
+        # Cross-entropy expects integer class IDs, so retaining the compact 2-D
+        # target avoids materializing a NUM_CLASSES-wide one-hot tensor per sample.
+        mask_class_indices = transformed["mask"].to(torch.int64)
 
-        return transformed["image"], mask_one_hot
+        return transformed["image"], mask_class_indices
 
 
 @jaxtyped(typechecker=beartype)
@@ -409,26 +410,31 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
 
 
 @torch.no_grad()
+@jaxtyped(typechecker=beartype)
 def compute_batch_macro_iou(
-    y_pred: torch.Tensor,
-    y_true: torch.Tensor,
+    y_pred: BatchMask,
+    y_true: BatchMask,
     num_classes: int = 19,
     eps: float = 1e-7,
 ) -> float:
-    """Compute per-batch macro IoU over non-empty classes.
+    """Compute per-batch macro IoU from class-index prediction and target maps.
 
     Steps
     -----
-    1. Collapse predictions and targets to 2D class maps using argmax.
-    2. Evaluate intersection and union class-by-class for classes 0 to ``num_classes - 1``.
-    3. Average IoU strictly over classes that appear in either ground-truth or prediction.
+    1. Count predicted and ground-truth pixels for each valid class with
+       ``torch.bincount`` while keeping all reductions on the accelerator.
+    2. Count per-class intersections from pixels where prediction equals target.
+    3. Derive unions and average IoU only over classes that appear in either the
+       prediction or ground truth, matching the previous metric definition.
+    4. Transfer only the final scalar to the CPU, avoiding repeated ``.item()``
+       synchronization inside the class loop.
 
     Parameters
     ----------
-    y_pred : torch.Tensor
-        Model output logits of shape ``(B, C, H, W)``.
-    y_true : torch.Tensor
-        One-hot ground-truth masks of shape ``(B, C, H, W)``.
+    y_pred : BatchMask
+        Predicted class-index maps of shape ``(B, H, W)``.
+    y_true : BatchMask
+        Ground-truth class-index maps of shape ``(B, H, W)``.
     num_classes : int, optional
         Number of valid classes to consider. Defaults to 19.
     eps : float, optional
@@ -439,21 +445,33 @@ def compute_batch_macro_iou(
     float
         Macro IoU score averaged across present classes in the batch.
     """
-    preds = y_pred.argmax(dim=1)
-    targets = y_true.argmax(dim=1)
+    # Include the ignored class in the bincount capacity because predictions and
+    # targets can legitimately contain class 19, then slice to the valid classes
+    # so the metric remains identical to the original 0..num_classes-1 loop.
+    count_length = max(Configuration.NUM_CLASSES, num_classes)
+    pred_counts = torch.bincount(y_pred.reshape(-1), minlength=count_length)[:num_classes]
+    true_counts = torch.bincount(y_true.reshape(-1), minlength=count_length)[:num_classes]
 
-    iou_per_class: List[float] = []
-    for cls in range(num_classes):
-        pred_mask = preds == cls
-        true_mask = targets == cls
+    # Intersections are pixels whose predicted and true class agree. Counting the
+    # matching class IDs directly avoids launching two mask-reduction kernels per class.
+    matching_labels = y_pred[y_pred == y_true]
+    intersections = torch.bincount(
+        matching_labels,
+        minlength=count_length,
+    )[:num_classes]
+    unions = pred_counts + true_counts - intersections
 
-        intersection = (pred_mask & true_mask).sum().float().item()
-        union = (pred_mask | true_mask).sum().float().item()
+    # Use float64 for the small class-wise reduction to preserve the previous
+    # Python/NumPy double-precision ratio and mean as closely as possible.
+    intersections_float = intersections.to(torch.float64)
+    unions_float = unions.to(torch.float64)
+    class_iou = (intersections_float + eps) / (unions_float + eps)
+    present = unions > 0
 
-        if union > 0:
-            iou_per_class.append((intersection + eps) / (union + eps))
-
-    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
+    # Multiplying by the presence mask and clamping the divisor reproduces the
+    # previous 0.0 result if no valid class appears, without a second GPU sync.
+    macro_iou = (class_iou * present).sum() / present.sum().clamp_min(1)
+    return float(macro_iou.item())
 
 
 def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
@@ -479,8 +497,12 @@ def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
     return palette[class_mask.astype(np.int64)]
 
 
-def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
-    """Load a trained segmentation model checkpoint from disk.
+def load_trained_model(
+    model_path: str,
+    device: torch.device,
+    compile_model: bool = True,
+) -> nn.Module:
+    """Load and prepare a trained segmentation model for robustness evaluation.
 
     Steps
     -----
@@ -489,6 +511,14 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
        serialized ``nn.Module`` objects produced by ``train_teacher.py``/``train_student.py``.
     3. Transfer model to target ``device`` and switch into ``eval()`` mode.
     4. Freeze all model parameters to prevent weight updates during adversarial attacks.
+    5. Enable cuDNN convolution autotuning on CUDA because evaluation uses fixed
+       spatial dimensions and can benefit from faster convolution kernel selection.
+    6. Optionally wrap the frozen model with ``torch.compile`` using
+       ``mode="reduce-overhead"`` to reduce Python and CUDA kernel-launch overhead,
+       while explicitly disabling TorchInductor's max-autotune GEMM path because
+       smaller GPUs can emit a non-actionable insufficient-SM warning for that path.
+       Dynamic shapes are disabled so variable batch sizes compile as separate static
+       graphs instead of entering the symbolic-shape path that can fail in Inductor.
 
     Parameters
     ----------
@@ -496,11 +526,14 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
         Filesystem path to the model ``.pt`` file.
     device : torch.device
         Device (CUDA or CPU) on which to place the model.
+    compile_model : bool, optional
+        Whether to compile the model with ``torch.compile``. Defaults to True.
 
     Returns
     -------
     nn.Module
-        Loaded, frozen PyTorch segmentation model ready for evaluation.
+        Loaded, frozen, and optionally compiled PyTorch segmentation model ready
+        for evaluation.
 
     Raises
     ------
@@ -525,6 +558,38 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
     for param in model.parameters():
         param.requires_grad = False
 
+    # The evaluator always resizes images to the same spatial dimensions, so
+    # cuDNN can benchmark candidate convolution kernels once and reuse the
+    # fastest choices for the repeated PGD forward/backward workload.
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
+    # Compilation is enabled by default because PGD repeatedly executes the
+    # same model graph. reduce-overhead targets Python/CUDA launch overhead
+    # without changing the attack definition or model parameters. Explicitly
+    # disabling the max-autotune flags prevents an externally configured
+    # TORCHINDUCTOR_MAX_AUTOTUNE[_GEMM] setting from activating a GEMM autotune
+    # path that logs "Not enough SMs" on smaller GPUs; reduce-overhead does not
+    # require that autotune path. Dynamic kernels are also disabled because
+    # this workload has fixed image dimensions and PyTorch's automatic dynamic-shape
+    # recompilation can enter a TorchInductor/SymPy path that fails on reciprocal
+    # symbolic expressions. With dynamic=False, a different batch size may trigger
+    # a separate static compilation, but it cannot be generalized into that failing
+    # symbolic-shape graph.
+    if compile_model:
+        model = cast(
+            nn.Module,
+            torch.compile(
+                model,
+                dynamic=False,
+                options={
+                    "triton.cudagraphs": True,
+                    "max_autotune": False,
+                    "max_autotune_gemm": False,
+                },
+            )
+        )
+
     return model
 
 
@@ -547,7 +612,7 @@ def pgd_attack(
 
     Steps
     -----
-    1. Freeze model in eval mode and prepare target class index map.
+    1. Freeze model in eval mode and use the supplied class-index target map directly.
     2. Initialize perturbed input, optionally adding uniform random noise in [-epsilon, epsilon].
     3. For ``num_steps`` iterations:
        a. Track gradients on the current perturbed image.
@@ -564,7 +629,7 @@ def pgd_attack(
     images : BatchImage
         Batch of clean images with shape ``(B, 3, H, W)`` and values in ``[0, 1]``.
     targets : BatchMask
-        One-hot ground-truth masks of shape ``(B, NUM_CLASSES, H, W)``.
+        Integer ground-truth class-index masks of shape ``(B, H, W)``.
     loss_fn : Optional[nn.Module], optional
         Differentiable loss function to maximize. Defaults to
         ``nn.CrossEntropyLoss(ignore_index=19)`` so unannotated pixels do not
@@ -591,9 +656,6 @@ def pgd_attack(
     else:
         effective_loss = loss_fn
 
-    # Collapse one-hot targets to class indices for standard cross-entropy evaluation
-    target_indices = targets.argmax(dim=1).to(torch.int64)
-
     # Initialize perturbation
     if random_start:
         noise = torch.empty_like(images).uniform_(-epsilon, epsilon)
@@ -603,11 +665,15 @@ def pgd_attack(
 
     # Multi-step projected gradient ascent
     for _ in range(num_steps):
-        # Enable autograd on input tensor to compute dLoss/dx_adv
-        x_adv = x_adv.clone().detach().requires_grad_(True)
+        # Detaching is sufficient to create a fresh leaf for the next input-gradient
+        # computation. Avoiding clone() prevents an unnecessary full-batch copy on
+        # every PGD step while preserving the same numerical attack update.
+        x_adv = x_adv.detach().requires_grad_(True)
 
         adv_logits = forward(model, x_adv)
-        loss = effective_loss(adv_logits, target_indices)
+        # Targets are already compact int64 class IDs, which is the native target
+        # representation required by multiclass cross-entropy.
+        loss = effective_loss(adv_logits, targets)
 
         # Compute gradient with respect to perturbed input
         grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
@@ -618,37 +684,6 @@ def pgd_attack(
         x_adv = torch.clamp(images + perturbation, 0.0, 1.0).detach()
 
     return x_adv
-
-
-def compute_untargeted_asr(clean_mean_iou: float, adv_mean_iou: float) -> float:
-    """Calculate the untargeted Attack Success Rate (ASR) from mean IoU values.
-
-    The formula measures relative degradation in mean IoU caused by the adversary:
-    ``ASR_untargeted = 1 - (mean_IoU_adversarial / mean_IoU_clean)``.
-    A score of 1.0 represents complete destruction of segmentation utility,
-    while 0.0 indicates absolute robustness.
-
-    Steps
-    -----
-    1. Guard against non-positive clean mean IoU to avoid division by zero.
-    2. Compute and return 1.0 - (adv_mean_iou / clean_mean_iou).
-
-    Parameters
-    ----------
-    clean_mean_iou : float
-        Mean Intersection over Union on clean, unperturbed inputs.
-    adv_mean_iou : float
-        Mean Intersection over Union on adversarial inputs.
-
-    Returns
-    -------
-    float
-        Untargeted ASR value.
-    """
-    # Guard against division by zero if clean model has zero performance
-    if clean_mean_iou <= 0.0:
-        return 0.0
-    return float(1.0 - (adv_mean_iou / clean_mean_iou))
 
 
 def evaluate_robustness(
@@ -670,13 +705,15 @@ def evaluate_robustness(
 
     Steps
     -----
-    1. Iterate through dataloader batches.
-    2. Run clean forward pass under ``torch.no_grad`` to obtain clean logits.
+    1. Iterate through batches containing images and compact class-index masks.
+    2. Run the clean forward pass, reduce logits to class predictions and batch IoU,
+       then release the clean logits before allocating PGD backward activations.
     3. Generate 10-step PGD adversarial images using ``pgd_attack``.
-    4. Run adversarial forward pass under ``torch.no_grad`` to obtain perturbed logits.
+    4. Run the adversarial forward pass and reduce its logits immediately.
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
-    6. Compute dataset-wide macro IoU, pixel accuracy, Dice score, and per-class IoU.
-    7. Calculate untargeted ASR via ``compute_untargeted_asr``.
+    6. Compute dataset-wide per-class IoU and Dice with explicit zero-division
+       handling, then average only classes that occur in the ground truth.
+    7. Compute pixel accuracy and preserve the existing per-batch macro IoU.
 
     Parameters
     ----------
@@ -702,7 +739,7 @@ def evaluate_robustness(
     Returns
     -------
     Dict[str, Union[float, List[float]]]
-        Dictionary with clean/adversarial metrics and untargeted ASR.
+        Dictionary with clean/adversarial metrics.
 
     Raises
     ------
@@ -727,10 +764,18 @@ def evaluate_robustness(
     for X, y in tqdm(dataloader, desc="Evaluating robustness"):
         X, y = X.to(device), y.to(device)
 
-        # 1. Clean forward pass (no gradients needed)
+        # 1. Clean forward pass (no gradients needed). Reduce logits immediately
+        # to class predictions and batch IoU so the large logits tensor can be
+        # released before PGD allocates its backward activations.
         with torch.no_grad():
             clean_logits = forward(model, X)
             clean_preds = clean_logits.argmax(dim=1)
+            clean_batch_iou_sum += compute_batch_macro_iou(
+                clean_preds,
+                y,
+                num_classes=num_classes,
+            )
+        del clean_logits
 
         # 2. Craft 10-step PGD adversarial examples
         adv_X = pgd_attack(
@@ -742,13 +787,20 @@ def evaluate_robustness(
             num_steps=num_steps,
         )
 
-        # 3. Adversarial forward pass
+        # 3. Adversarial forward pass. As with the clean path, keep only the class
+        # predictions and scalar batch IoU after the logits are no longer needed.
         with torch.no_grad():
             adv_logits = forward(model, adv_X)
             adv_preds = adv_logits.argmax(dim=1)
+            adv_batch_iou_sum += compute_batch_macro_iou(
+                adv_preds,
+                y,
+                num_classes=num_classes,
+            )
+        del adv_logits
 
         # 4. Relabel Unknown class (19) to sentinel -1 so smp excludes it from metrics
-        targets = y.argmax(dim=1)
+        targets = y
         target_relabelled = torch.where(
             targets == ignored_class, torch.full_like(targets, ignore_index), targets
         )
@@ -785,35 +837,81 @@ def evaluate_robustness(
         adv_fn_total = a_fn.sum(dim=0) if adv_fn_total is None else adv_fn_total + a_fn.sum(dim=0)
         adv_tn_total = a_tn.sum(dim=0) if adv_tn_total is None else adv_tn_total + a_tn.sum(dim=0)
 
-        # Per-batch macro IoU tracking
-        clean_batch_iou_sum += compute_batch_macro_iou(clean_logits, y, num_classes=num_classes)
-        adv_batch_iou_sum += compute_batch_macro_iou(adv_logits, y, num_classes=num_classes)
-
     if clean_tp_total is None or adv_tp_total is None:
         raise ValueError("The evaluation dataloader yielded zero batches.")
 
-    # Macro mean IoU across the whole dataset (primary metric for ASR)
-    clean_mean_iou = float(smp.metrics.iou_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="macro").item())
-    adv_mean_iou = float(smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="macro").item())
+    # Ground-truth support determines the macro class set for both clean and
+    # adversarial metrics. Using the same mask prevents predictions from changing
+    # which classes participate in the average, while absent classes contribute
+    # neither an artificial perfect score nor an artificial zero score.
+    present_in_gt = (clean_tp_total + clean_fn_total) > 0
+    if not present_in_gt.any().item():
+        raise ValueError("The evaluation dataloader contains no valid ground-truth classes.")
 
-    # Calculate untargeted ASR
-    untargeted_asr = compute_untargeted_asr(clean_mean_iou=clean_mean_iou, adv_mean_iou=adv_mean_iou)
+    # Compute class-wise IoU first. SMP's default ``zero_division=1.0`` would
+    # otherwise assign a perfect score to classes with TP=FP=FN=0. Explicitly
+    # use zero here, then exclude unsupported classes with ``present_in_gt``.
+    clean_class_iou_tensor = smp.metrics.iou_score(
+        clean_tp_total,
+        clean_fp_total,
+        clean_fn_total,
+        clean_tn_total,
+        reduction=None,
+        zero_division=0.0,
+    )
+    adv_class_iou_tensor = smp.metrics.iou_score(
+        adv_tp_total,
+        adv_fp_total,
+        adv_fn_total,
+        adv_tn_total,
+        reduction=None,
+        zero_division=0.0,
+    )
 
-    # Class-wise IoUs
-    clean_class_iou = cast(List[float], smp.metrics.iou_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction=None).tolist())
-    adv_class_iou = cast(List[float], smp.metrics.iou_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction=None).tolist())
+    # Do not call SMP with ``reduction="macro"`` on the already pooled 1-D
+    # class totals because that reduction sums dimension 0 before scoring. Mean
+    # the preserved class axis explicitly instead.
+    clean_mean_iou = float(clean_class_iou_tensor[present_in_gt].mean().item())
+    adv_mean_iou = float(adv_class_iou_tensor[present_in_gt].mean().item())
 
-    # Pixel accuracy and Dice (F1) scores
+    # Preserve all per-class IoUs for CSV/reporting, including zero values for
+    # classes that are absent from the evaluation ground truth.
+    clean_class_iou = cast(List[float], clean_class_iou_tensor.tolist())
+    adv_class_iou = cast(List[float], adv_class_iou_tensor.tolist())
+
+    # Pixel accuracy is pooled globally across all valid classes.
     clean_pixel_acc = float(smp.metrics.recall(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="micro").item())
     adv_pixel_acc = float(smp.metrics.recall(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="micro").item())
-    clean_dice = float(smp.metrics.f1_score(clean_tp_total, clean_fp_total, clean_fn_total, clean_tn_total, reduction="macro").item())
-    adv_dice = float(smp.metrics.f1_score(adv_tp_total, adv_fp_total, adv_fn_total, adv_tn_total, reduction="macro").item())
+
+    # Calculate class-wise Dice first so the class axis is preserved. Calling
+    # SMP with reduction="macro" on these 1-D per-class totals would sum along
+    # dim=0 before scoring, which does not produce the intended macro average.
+    clean_class_dice_tensor = smp.metrics.f1_score(
+        clean_tp_total,
+        clean_fp_total,
+        clean_fn_total,
+        clean_tn_total,
+        reduction=None,
+        zero_division=0.0,
+    )
+    adv_class_dice_tensor = smp.metrics.f1_score(
+        adv_tp_total,
+        adv_fp_total,
+        adv_fn_total,
+        adv_tn_total,
+        reduction=None,
+        zero_division=0.0,
+    )
+
+    # Macro Dice uses the same ground-truth-supported class set for clean and
+    # adversarial predictions, so absent classes cannot inflate either score.
+    clean_dice = float(clean_class_dice_tensor[present_in_gt].mean().item())
+    adv_dice = float(adv_class_dice_tensor[present_in_gt].mean().item())
 
     num_batches = len(dataloader)
     return {
         "clean_mean_iou": clean_mean_iou,
         "adv_mean_iou": adv_mean_iou,
-        "untargeted_asr": untargeted_asr,
         "clean_pixel_accuracy": clean_pixel_acc,
         "adv_pixel_accuracy": adv_pixel_acc,
         "clean_dice": clean_dice,
@@ -840,9 +938,12 @@ def visualize_adversarial_predictions(
     Steps
     -----
     1. Sample random test rows using the fixed seed.
-    2. Craft adversarial examples for each sample.
-    3. Generate colorized prediction maps for clean and adversarial inputs.
-    4. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
+    2. Apply the same fixed 360x640 inference preprocessing used by the robustness
+       evaluator so the compiled model never receives a new spatial shape here.
+    3. Keep ground-truth masks as compact class-index targets.
+    4. Run clean inference, release its logits, and craft an adversarial example.
+    5. Generate colorized prediction maps for clean and adversarial inputs.
+    6. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
 
     Parameters
     ----------
@@ -881,21 +982,35 @@ def visualize_adversarial_predictions(
     if num_rows == 1:
         axes = axes[np.newaxis, :]
 
-    sample_ds = BDDSegmentationDataset(sample_df)
+    # Use exactly the same resize/tensor conversion as the main evaluator. Besides
+    # making the visualization representative of evaluated inputs, fixed spatial
+    # dimensions prevent torch.compile from seeing a new HxW shape at the end of
+    # the run and attempting an unnecessary symbolic-shape recompilation.
+    visualization_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
+        ToTensorV2(),
+    ])
+    sample_ds = BDDSegmentationDataset(sample_df, transform=visualization_transforms)
     model.eval()
 
     for row in range(num_rows):
-        image, class_mask = sample_ds.load_sample(row)
+        image_tensor, mask_tensor = sample_ds[row]
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+        mask_tensor = mask_tensor.unsqueeze(0).to(device)
 
-        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous().unsqueeze(0).to(device)
-        mask_tensor = torch.nn.functional.one_hot(
-            torch.from_numpy(class_mask).to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float().unsqueeze(0).to(device)
+        # Convert the resized tensors back to NumPy only for rendering. The model,
+        # attack, prediction, ground truth, and perturbation therefore all share
+        # the same spatial coordinate system.
+        image = image_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+        class_mask = mask_tensor.squeeze(0).detach().cpu().numpy()
 
         # Clean inference
         with torch.no_grad():
             clean_logits = model(image_tensor)
         clean_pred_class = clean_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+        # The clean logits are not inputs to PGD; release them before attack
+        # generation to reduce peak accelerator memory usage.
+        del clean_logits
 
         # Adversarial attack and inference
         adv_image_tensor = pgd_attack(
@@ -956,7 +1071,6 @@ def flatten_robustness_metrics(
     -----
     1. Store the scalar robustness metrics in one flat result row.
     2. Expand clean and adversarial per-class IoUs into named columns.
-    3. Add per-class relative IoU degradation for direct comparison.
 
     Parameters
     ----------
@@ -971,7 +1085,6 @@ def flatten_robustness_metrics(
     row: Dict[str, float] = {
         "clean_mean_iou": cast(float, metrics["clean_mean_iou"]),
         "adv_mean_iou": cast(float, metrics["adv_mean_iou"]),
-        "untargeted_asr": cast(float, metrics["untargeted_asr"]),
         "clean_pixel_accuracy": cast(float, metrics["clean_pixel_accuracy"]),
         "adv_pixel_accuracy": cast(float, metrics["adv_pixel_accuracy"]),
         "clean_dice": cast(float, metrics["clean_dice"]),
@@ -988,14 +1101,9 @@ def flatten_robustness_metrics(
         class_slug = CLASS_NAMES[class_id].replace(" ", "_")
         clean_value = clean_class_iou[class_id]
         adv_value = adv_class_iou[class_id]
-        degradation = (
-            ((clean_value - adv_value) / clean_value) * 100.0
-            if clean_value > 0.0
-            else 0.0
-        )
+
         row[f"clean_class_iou_{class_id}_{class_slug}"] = clean_value
         row[f"adv_class_iou_{class_id}_{class_slug}"] = adv_value
-        row[f"class_iou_degradation_pct_{class_id}_{class_slug}"] = degradation
 
     return row
 
@@ -1062,7 +1170,8 @@ def parse_arguments() -> argparse.Namespace:
     Steps
     -----
     1. Require exactly one named ``--checkpoint`` value in ``NAME=PATH`` form.
-    2. Add optional arguments for attack parameters and visualization export.
+    2. Add optional arguments for attack parameters, model compilation, and
+       visualization export.
     3. Parse and return the argument namespace.
 
     Returns
@@ -1110,6 +1219,14 @@ def parse_arguments() -> argparse.Namespace:
         help="DataLoader batch size.",
     )
     parser.add_argument(
+        "--disable-compile",
+        action="store_true",
+        help=(
+            "Disable torch.compile and run the frozen eager-mode model instead. "
+            "Compilation is enabled by default."
+        ),
+    )
+    parser.add_argument(
         "--visualize",
         action="store_true",
         default=True,
@@ -1125,11 +1242,12 @@ def main() -> None:
     -----
     1. Parse checkpoint name/path and attack configuration from command-line arguments.
     2. Create the checkpoint-specific robustness result directory.
-    3. Load trained model checkpoint and place on target compute device.
+    3. Load and freeze the trained model, enable cuDNN autotuning on CUDA, and
+       compile the model unless ``--disable-compile`` was requested.
     4. Load test partition and construct evaluation DataLoader.
     5. Run clean and 10-step PGD adversarial evaluation.
     6. Save scalar and per-class robustness metrics to ``result.csv``.
-    7. Log comprehensive metrics and untargeted Attack Success Rate (ASR).
+    7. Log comprehensive metrics.
     8. Optionally export comparison visualizations.
 
     Raises
@@ -1160,8 +1278,14 @@ def main() -> None:
     # deterministically derived from its user-provided checkpoint name.
     print(f"Checkpoint name: {checkpoint_name}")
     print(f"Loading checkpoint from: {checkpoint_path}")
-    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
+    model = load_trained_model(
+        checkpoint_path,
+        Configuration.DEVICE,
+        compile_model=not args.disable_compile,
+    )
     print(f"Target execution device: {Configuration.DEVICE}")
+    print(f"cuDNN autotuning enabled: {Configuration.DEVICE.type == 'cuda'}")
+    print(f"torch.compile enabled: {not args.disable_compile}")
 
     # Load dataset test partition
     print("Loading BDD100k test split...")
@@ -1197,7 +1321,6 @@ def main() -> None:
 
     clean_iou = cast(float, results["clean_mean_iou"])
     adv_iou = cast(float, results["adv_mean_iou"])
-    asr = cast(float, results["untargeted_asr"])
     clean_acc = cast(float, results["clean_pixel_accuracy"])
     adv_acc = cast(float, results["adv_pixel_accuracy"])
     clean_dice = cast(float, results["clean_dice"])
@@ -1219,7 +1342,6 @@ def main() -> None:
     print("=" * 68)
     print(f"  Clean Mean IoU:         {clean_iou:.4f}")
     print(f"  Adversarial Mean IoU:   {adv_iou:.4f}")
-    print(f"  Untargeted ASR:         {asr:.4f} ({asr * 100.0:.2f}%)")
     print("-" * 68)
     print(f"  Clean Pixel Accuracy:   {clean_acc:.4f}")
     print(f"  Adv Pixel Accuracy:     {adv_acc:.4f}")
@@ -1233,8 +1355,7 @@ def main() -> None:
         c_name = CLASS_NAMES[cid]
         c_val = clean_class_iou[cid]
         a_val = adv_class_iou[cid]
-        deg = ((c_val - a_val) / c_val * 100.0) if c_val > 0 else 0.0
-        print(f"  {cid:>2}  {c_name:<15} {c_val:>10.4f} {a_val:>10.4f} {deg:>11.2f}%")
+        print(f"  {cid:>2}  {c_name:<15} {c_val:>10.4f} {a_val:>10.4f}")
     print("=" * 68 + "\n")
 
     if args.visualize:

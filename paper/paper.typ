@@ -804,9 +804,9 @@ where:
 
 #set par(first-line-indent: (amount: tab_length))
 
-Since this study focuses on semantic segmentation, there should be an adjustment to the formula. The adjusted formula is:
+Because this study focuses on semantic segmentation, there should be an adjustment to the formula. Instead of one formula for tracking the degradation of accuracy, now there are 3 formulas focused on each metric. The first formula is to calculate the degradation of mean IoU:
 $
-  text("ASR")_(text("untargeted")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
+  text("Degradation")_(text("mIoU")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
 $
 
 where:
@@ -817,6 +817,36 @@ where:
 )[
   - $text("mIoU")_(text("adversarial"))$ is defined as the mean intersection of union (mIoU) for the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
   - $text("mIoU")_(text("clean"))$ is defined as the mean intersection of union (mIoU) of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
+]
+
+The second formula is to calculate the degradation of pixel accuracy:
+$
+  text("Degradation")_(text("PA")) = 1 - (text("PA")_(text("adversarial"))) / (text("PA")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("PA")_(text("adversarial"))$ is defined as the pixel accuracy for the perturbed inputs.
+  - $text("PA")_(text("clean"))$ is defined as the pixel accuracy of the clean inputs.
+]
+
+The third formula focuses on Dice.
+$
+  text("Degradation")_(text("Dice")) = 1 - (text("Dice")_(text("adversarial"))) / (text("Dice")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("Dice")_(text("adversarial"))$ is defined as the Dice score for the perturbed inputs.
+  - $text("Dice")_(text("clean"))$ is defined as the Dice score of the clean inputs.
 ]
 
 Lower ASR is preferrable, signaling high robustnesss that the model possesses.
@@ -1300,15 +1330,55 @@ Due to the limitation of the dataset, not all images have weather and time of da
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Adversarial Robustness]
+  #text(size: 12pt)[Adversarial Robustness]
 ]
 #v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Accumulated Results]
+  #text(size: 12pt)[Accumulated Results]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Clean Pixel Accuracy*], [0.9266], [0.9202], [0.8190], [0.8373], [0.7612], [0.9169],
+    [*Adversarial Pixel Accuracy*], [0.0359], [0.0158], [0.7220], [0.6993], [0.5910], [0.0084],
+    [*Degradation of Pixel Accuracy*], [96.13%], [98.28%], [11.84%], [16.48%], [22.36%], [99.08%],
+  ),
+  caption: [Robustness results for pixel accuracy.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Clean Mean IoU*], [0.8633], [0.8521], [0.6934], [0.7201], [0.6145], [0.8465],
+    [*Adversarial Mean IoU*], [0.0183], [0.0080], [0.5650], [0.5377], [0.4195], [0.0042],
+    [*Degradation of Mean IoU*], [97.88%], [99.06%], [18.52%], [25.33%], [31.73%], [99.50%],
+  ),
+  caption: [Robustness results for mean IoU.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -1322,7 +1392,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
 ]
 #v(2 * line_spacing)
 
-// TODO dejan: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
+// TODO: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
