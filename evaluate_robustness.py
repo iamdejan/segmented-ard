@@ -646,7 +646,6 @@ def evaluate_robustness(
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
     6. Compute dataset-wide macro IoU, pixel accuracy, per-class Dice scores,
        macro Dice as their arithmetic mean, and per-class IoU.
-    7. Calculate untargeted ASR via ``compute_untargeted_asr``.
 
     Parameters
     ----------
@@ -672,7 +671,7 @@ def evaluate_robustness(
     Returns
     -------
     Dict[str, Union[float, List[float]]]
-        Dictionary with clean/adversarial metrics and untargeted ASR.
+        Dictionary with clean/adversarial metrics.
 
     Raises
     ------
@@ -974,14 +973,9 @@ def flatten_robustness_metrics(
         class_slug = CLASS_NAMES[class_id].replace(" ", "_")
         clean_value = clean_class_iou[class_id]
         adv_value = adv_class_iou[class_id]
-        degradation = (
-            ((clean_value - adv_value) / clean_value) * 100.0
-            if clean_value > 0.0
-            else 0.0
-        )
+
         row[f"clean_class_iou_{class_id}_{class_slug}"] = clean_value
         row[f"adv_class_iou_{class_id}_{class_slug}"] = adv_value
-        row[f"class_iou_degradation_pct_{class_id}_{class_slug}"] = degradation
 
     return row
 
@@ -1115,7 +1109,7 @@ def main() -> None:
     4. Load test partition and construct evaluation DataLoader.
     5. Run clean and 10-step PGD adversarial evaluation.
     6. Save scalar and per-class robustness metrics to ``result.csv``.
-    7. Log comprehensive metrics and untargeted Attack Success Rate (ASR).
+    7. Log comprehensive metrics.
     8. Optionally export comparison visualizations.
 
     Raises
@@ -1217,8 +1211,7 @@ def main() -> None:
         c_name = CLASS_NAMES[cid]
         c_val = clean_class_iou[cid]
         a_val = adv_class_iou[cid]
-        deg = ((c_val - a_val) / c_val * 100.0) if c_val > 0 else 0.0
-        print(f"  {cid:>2}  {c_name:<15} {c_val:>10.4f} {a_val:>10.4f} {deg:>11.2f}%")
+        print(f"  {cid:>2}  {c_name:<15} {c_val:>10.4f} {a_val:>10.4f}")
     print("=" * 68 + "\n")
 
     if args.visualize:
