@@ -13,7 +13,8 @@ from typing import Dict, List, Optional, Tuple, Union, cast
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from jaxtyping import Float, Int64, UInt8
+from beartype import beartype
+from jaxtyping import Float, Int64, UInt8, jaxtyped
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -313,6 +314,7 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         self.mask_paths: List[str] = df["mask_paths"].to_list()
         self.transform = transform
 
+    @jaxtyped(typechecker=beartype)
     def load_sample(self, index: int) -> Tuple[NumpyImage, ClassIndexArray]:
         """Load an image and its class-index mask from disk.
 
@@ -352,6 +354,7 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         """Return the total number of samples in the dataset."""
         return len(self.image_paths)
 
+    @jaxtyped(typechecker=beartype)
     def __getitem__(self, index: int) -> Tuple[ImageTensor, MaskTensor]:
         """Retrieve a transformed image and class-index mask tensor at index.
 
@@ -387,6 +390,7 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         return transformed["image"], mask_class_indices
 
 
+@jaxtyped(typechecker=beartype)
 def forward(model: nn.Module, x: BatchImage) -> Logits:
     """Execute model forward pass and verify batch tensor shape contract.
 
@@ -406,6 +410,7 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
 
 
 @torch.no_grad()
+@jaxtyped(typechecker=beartype)
 def compute_batch_macro_iou(
     y_pred: BatchMask,
     y_true: BatchMask,
@@ -492,8 +497,12 @@ def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
     return palette[class_mask.astype(np.int64)]
 
 
-def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
-    """Load a trained segmentation model checkpoint from disk.
+def load_trained_model(
+    model_path: str,
+    device: torch.device,
+    compile_model: bool = True,
+) -> nn.Module:
+    """Load and prepare a trained segmentation model for robustness evaluation.
 
     Steps
     -----
@@ -502,6 +511,14 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
        serialized ``nn.Module`` objects produced by ``train_teacher.py``/``train_student.py``.
     3. Transfer model to target ``device`` and switch into ``eval()`` mode.
     4. Freeze all model parameters to prevent weight updates during adversarial attacks.
+    5. Enable cuDNN convolution autotuning on CUDA because evaluation uses fixed
+       spatial dimensions and can benefit from faster convolution kernel selection.
+    6. Optionally wrap the frozen model with ``torch.compile`` using
+       ``mode="reduce-overhead"`` to reduce Python and CUDA kernel-launch overhead,
+       while explicitly disabling TorchInductor's max-autotune GEMM path because
+       smaller GPUs can emit a non-actionable insufficient-SM warning for that path.
+       Dynamic shapes are disabled so variable batch sizes compile as separate static
+       graphs instead of entering the symbolic-shape path that can fail in Inductor.
 
     Parameters
     ----------
@@ -509,11 +526,14 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
         Filesystem path to the model ``.pt`` file.
     device : torch.device
         Device (CUDA or CPU) on which to place the model.
+    compile_model : bool, optional
+        Whether to compile the model with ``torch.compile``. Defaults to True.
 
     Returns
     -------
     nn.Module
-        Loaded, frozen PyTorch segmentation model ready for evaluation.
+        Loaded, frozen, and optionally compiled PyTorch segmentation model ready
+        for evaluation.
 
     Raises
     ------
@@ -538,9 +558,42 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
     for param in model.parameters():
         param.requires_grad = False
 
+    # The evaluator always resizes images to the same spatial dimensions, so
+    # cuDNN can benchmark candidate convolution kernels once and reuse the
+    # fastest choices for the repeated PGD forward/backward workload.
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
+    # Compilation is enabled by default because PGD repeatedly executes the
+    # same model graph. reduce-overhead targets Python/CUDA launch overhead
+    # without changing the attack definition or model parameters. Explicitly
+    # disabling the max-autotune flags prevents an externally configured
+    # TORCHINDUCTOR_MAX_AUTOTUNE[_GEMM] setting from activating a GEMM autotune
+    # path that logs "Not enough SMs" on smaller GPUs; reduce-overhead does not
+    # require that autotune path. Dynamic kernels are also disabled because
+    # this workload has fixed image dimensions and PyTorch's automatic dynamic-shape
+    # recompilation can enter a TorchInductor/SymPy path that fails on reciprocal
+    # symbolic expressions. With dynamic=False, a different batch size may trigger
+    # a separate static compilation, but it cannot be generalized into that failing
+    # symbolic-shape graph.
+    if compile_model:
+        model = cast(
+            nn.Module,
+            torch.compile(
+                model,
+                dynamic=False,
+                options={
+                    "triton.cudagraphs": True,
+                    "max_autotune": False,
+                    "max_autotune_gemm": False,
+                },
+            )
+        )
+
     return model
 
 
+@jaxtyped(typechecker=beartype)
 def pgd_attack(
     model: nn.Module,
     images: BatchImage,
@@ -612,8 +665,10 @@ def pgd_attack(
 
     # Multi-step projected gradient ascent
     for _ in range(num_steps):
-        # Enable autograd on input tensor to compute dLoss/dx_adv
-        x_adv = x_adv.clone().detach().requires_grad_(True)
+        # Detaching is sufficient to create a fresh leaf for the next input-gradient
+        # computation. Avoiding clone() prevents an unnecessary full-batch copy on
+        # every PGD step while preserving the same numerical attack update.
+        x_adv = x_adv.detach().requires_grad_(True)
 
         adv_logits = forward(model, x_adv)
         # Targets are already compact int64 class IDs, which is the native target
@@ -883,11 +938,12 @@ def visualize_adversarial_predictions(
     Steps
     -----
     1. Sample random test rows using the fixed seed.
-    2. Convert each ground-truth mask to the same compact class-index target format
-       used by the main robustness evaluator.
-    3. Run clean inference, release its logits, and craft an adversarial example.
-    4. Generate colorized prediction maps for clean and adversarial inputs.
-    5. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
+    2. Apply the same fixed 360x640 inference preprocessing used by the robustness
+       evaluator so the compiled model never receives a new spatial shape here.
+    3. Keep ground-truth masks as compact class-index targets.
+    4. Run clean inference, release its logits, and craft an adversarial example.
+    5. Generate colorized prediction maps for clean and adversarial inputs.
+    6. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
 
     Parameters
     ----------
@@ -926,16 +982,27 @@ def visualize_adversarial_predictions(
     if num_rows == 1:
         axes = axes[np.newaxis, :]
 
-    sample_ds = BDDSegmentationDataset(sample_df)
+    # Use exactly the same resize/tensor conversion as the main evaluator. Besides
+    # making the visualization representative of evaluated inputs, fixed spatial
+    # dimensions prevent torch.compile from seeing a new HxW shape at the end of
+    # the run and attempting an unnecessary symbolic-shape recompilation.
+    visualization_transforms = A.Compose([
+        A.Resize(height=Configuration.IMAGE_HEIGHT, width=Configuration.IMAGE_WIDTH),
+        ToTensorV2(),
+    ])
+    sample_ds = BDDSegmentationDataset(sample_df, transform=visualization_transforms)
     model.eval()
 
     for row in range(num_rows):
-        image, class_mask = sample_ds.load_sample(row)
+        image_tensor, mask_tensor = sample_ds[row]
+        image_tensor = image_tensor.unsqueeze(0).to(device)
+        mask_tensor = mask_tensor.unsqueeze(0).to(device)
 
-        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous().unsqueeze(0).to(device)
-        # PGD consumes class-index targets directly, so keep the visualization
-        # mask compact instead of expanding it to a one-hot tensor.
-        mask_tensor = torch.from_numpy(class_mask).to(torch.int64).unsqueeze(0).to(device)
+        # Convert the resized tensors back to NumPy only for rendering. The model,
+        # attack, prediction, ground truth, and perturbation therefore all share
+        # the same spatial coordinate system.
+        image = image_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+        class_mask = mask_tensor.squeeze(0).detach().cpu().numpy()
 
         # Clean inference
         with torch.no_grad():
@@ -1103,7 +1170,8 @@ def parse_arguments() -> argparse.Namespace:
     Steps
     -----
     1. Require exactly one named ``--checkpoint`` value in ``NAME=PATH`` form.
-    2. Add optional arguments for attack parameters and visualization export.
+    2. Add optional arguments for attack parameters, model compilation, and
+       visualization export.
     3. Parse and return the argument namespace.
 
     Returns
@@ -1151,6 +1219,14 @@ def parse_arguments() -> argparse.Namespace:
         help="DataLoader batch size.",
     )
     parser.add_argument(
+        "--disable-compile",
+        action="store_true",
+        help=(
+            "Disable torch.compile and run the frozen eager-mode model instead. "
+            "Compilation is enabled by default."
+        ),
+    )
+    parser.add_argument(
         "--visualize",
         action="store_true",
         default=True,
@@ -1166,7 +1242,8 @@ def main() -> None:
     -----
     1. Parse checkpoint name/path and attack configuration from command-line arguments.
     2. Create the checkpoint-specific robustness result directory.
-    3. Load trained model checkpoint and place on target compute device.
+    3. Load and freeze the trained model, enable cuDNN autotuning on CUDA, and
+       compile the model unless ``--disable-compile`` was requested.
     4. Load test partition and construct evaluation DataLoader.
     5. Run clean and 10-step PGD adversarial evaluation.
     6. Save scalar and per-class robustness metrics to ``result.csv``.
@@ -1201,8 +1278,14 @@ def main() -> None:
     # deterministically derived from its user-provided checkpoint name.
     print(f"Checkpoint name: {checkpoint_name}")
     print(f"Loading checkpoint from: {checkpoint_path}")
-    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
+    model = load_trained_model(
+        checkpoint_path,
+        Configuration.DEVICE,
+        compile_model=not args.disable_compile,
+    )
     print(f"Target execution device: {Configuration.DEVICE}")
+    print(f"cuDNN autotuning enabled: {Configuration.DEVICE.type == 'cuda'}")
+    print(f"torch.compile enabled: {not args.disable_compile}")
 
     # Load dataset test partition
     print("Loading BDD100k test split...")
