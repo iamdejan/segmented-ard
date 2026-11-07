@@ -942,7 +942,6 @@ def flatten_robustness_metrics(
     -----
     1. Store the scalar robustness metrics in one flat result row.
     2. Expand clean and adversarial per-class IoUs into named columns.
-    3. Add per-class relative IoU degradation for direct comparison.
 
     Parameters
     ----------
