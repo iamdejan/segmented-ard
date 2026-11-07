@@ -1393,7 +1393,6 @@ def flatten_robustness_metrics(
         "evaluation_count": evaluation_count,
         "clean_mean_iou": cast(float, metrics["clean_mean_iou"]),
         "adv_mean_iou": cast(float, metrics["adv_mean_iou"]),
-        "untargeted_asr": cast(float, metrics["untargeted_asr"]),
         "clean_pixel_accuracy": cast(float, metrics["clean_pixel_accuracy"]),
         "adv_pixel_accuracy": cast(float, metrics["adv_pixel_accuracy"]),
         "clean_dice": cast(float, metrics["clean_dice"]),
@@ -1694,10 +1693,8 @@ def main() -> None:
 
         clean_iou = cast(float, results["clean_mean_iou"])
         adv_iou = cast(float, results["adv_mean_iou"])
-        asr = cast(float, results["untargeted_asr"])
         print(f"  Clean Mean IoU       : {clean_iou:.4f}")
         print(f"  Adversarial Mean IoU : {adv_iou:.4f}")
-        print(f"  Untargeted ASR       : {asr:.4f} ({asr * 100.0:.2f}%)")
         print(
             f"  Clean Pixel Accuracy : "
             f"{cast(float, results['clean_pixel_accuracy']):.4f}"
