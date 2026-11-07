@@ -13,8 +13,7 @@ from typing import Dict, List, Optional, Tuple, Union, cast
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from beartype import beartype
-from jaxtyping import Float, UInt8, jaxtyped
+from jaxtyping import Float, Int64, UInt8
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,9 +29,9 @@ from tqdm import tqdm
 # Shape aliases enforced at runtime by jaxtyped + beartype to eliminate
 # broadcast shape mismatches across the evaluation pipeline.
 ImageTensor = Float[Tensor, "3 h w"]  # Single image, channel-first layout
-MaskTensor = Float[Tensor, "c h w"]  # One-hot mask, c == NUM_CLASSES
+MaskTensor = Int64[Tensor, "h w"]  # Single class-index mask
 BatchImage = Float[Tensor, "b 3 h w"]  # Collated batch of images
-BatchMask = Float[Tensor, "b c h w"]  # Collated batch of one-hot masks
+BatchMask = Int64[Tensor, "b h w"]  # Collated class-index masks
 Logits = Float[Tensor, "b c h w"]  # Model output, c == NUM_CLASSES
 NumpyImage = Float[np.ndarray, "h w 3"]  # Single image in channels-last layout
 ClassIndexArray = UInt8[np.ndarray, "h w"]  # Per-pixel class index map
@@ -314,7 +313,6 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         self.mask_paths: List[str] = df["mask_paths"].to_list()
         self.transform = transform
 
-    @jaxtyped(typechecker=beartype)
     def load_sample(self, index: int) -> Tuple[NumpyImage, ClassIndexArray]:
         """Load an image and its class-index mask from disk.
 
@@ -354,15 +352,16 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         """Return the total number of samples in the dataset."""
         return len(self.image_paths)
 
-    @jaxtyped(typechecker=beartype)
     def __getitem__(self, index: int) -> Tuple[ImageTensor, MaskTensor]:
-        """Retrieve transformed image and one-hot mask tensors at index.
+        """Retrieve a transformed image and class-index mask tensor at index.
 
         Steps
         -----
         1. Load raw sample via ``load_sample``.
         2. Apply resize and PyTorch transposition transforms.
-        3. One-hot encode mask into ``(NUM_CLASSES, H, W)`` float tensor.
+        3. Preserve the mask as an ``int64`` class-index tensor of shape ``(H, W)``
+           so cross-entropy and metrics can consume it directly without one-hot
+           expansion and the corresponding GPU memory overhead.
 
         Parameters
         ----------
@@ -372,7 +371,7 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         Returns
         -------
         Tuple[ImageTensor, MaskTensor]
-            Pair of transformed image ``(3, H, W)`` and one-hot mask ``(20, H, W)``.
+            Pair of transformed image ``(3, H, W)`` and class-index mask ``(H, W)``.
         """
         image, class_mask = self.load_sample(index)
 
@@ -381,15 +380,13 @@ class BDDSegmentationDataset(Dataset[Tuple[ImageTensor, MaskTensor]]):
         else:
             transformed = ToTensorV2()(image=image, mask=class_mask)
 
-        # One-hot encode so the channel dimension aligns with the model's logits
-        mask_one_hot = torch.nn.functional.one_hot(
-            transformed["mask"].to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float()
+        # Cross-entropy expects integer class IDs, so retaining the compact 2-D
+        # target avoids materializing a NUM_CLASSES-wide one-hot tensor per sample.
+        mask_class_indices = transformed["mask"].to(torch.int64)
 
-        return transformed["image"], mask_one_hot
+        return transformed["image"], mask_class_indices
 
 
-@jaxtyped(typechecker=beartype)
 def forward(model: nn.Module, x: BatchImage) -> Logits:
     """Execute model forward pass and verify batch tensor shape contract.
 
@@ -410,25 +407,29 @@ def forward(model: nn.Module, x: BatchImage) -> Logits:
 
 @torch.no_grad()
 def compute_batch_macro_iou(
-    y_pred: torch.Tensor,
-    y_true: torch.Tensor,
+    y_pred: BatchMask,
+    y_true: BatchMask,
     num_classes: int = 19,
     eps: float = 1e-7,
 ) -> float:
-    """Compute per-batch macro IoU over non-empty classes.
+    """Compute per-batch macro IoU from class-index prediction and target maps.
 
     Steps
     -----
-    1. Collapse predictions and targets to 2D class maps using argmax.
-    2. Evaluate intersection and union class-by-class for classes 0 to ``num_classes - 1``.
-    3. Average IoU strictly over classes that appear in either ground-truth or prediction.
+    1. Count predicted and ground-truth pixels for each valid class with
+       ``torch.bincount`` while keeping all reductions on the accelerator.
+    2. Count per-class intersections from pixels where prediction equals target.
+    3. Derive unions and average IoU only over classes that appear in either the
+       prediction or ground truth, matching the previous metric definition.
+    4. Transfer only the final scalar to the CPU, avoiding repeated ``.item()``
+       synchronization inside the class loop.
 
     Parameters
     ----------
-    y_pred : torch.Tensor
-        Model output logits of shape ``(B, C, H, W)``.
-    y_true : torch.Tensor
-        One-hot ground-truth masks of shape ``(B, C, H, W)``.
+    y_pred : BatchMask
+        Predicted class-index maps of shape ``(B, H, W)``.
+    y_true : BatchMask
+        Ground-truth class-index maps of shape ``(B, H, W)``.
     num_classes : int, optional
         Number of valid classes to consider. Defaults to 19.
     eps : float, optional
@@ -439,21 +440,33 @@ def compute_batch_macro_iou(
     float
         Macro IoU score averaged across present classes in the batch.
     """
-    preds = y_pred.argmax(dim=1)
-    targets = y_true.argmax(dim=1)
+    # Include the ignored class in the bincount capacity because predictions and
+    # targets can legitimately contain class 19, then slice to the valid classes
+    # so the metric remains identical to the original 0..num_classes-1 loop.
+    count_length = max(Configuration.NUM_CLASSES, num_classes)
+    pred_counts = torch.bincount(y_pred.reshape(-1), minlength=count_length)[:num_classes]
+    true_counts = torch.bincount(y_true.reshape(-1), minlength=count_length)[:num_classes]
 
-    iou_per_class: List[float] = []
-    for cls in range(num_classes):
-        pred_mask = preds == cls
-        true_mask = targets == cls
+    # Intersections are pixels whose predicted and true class agree. Counting the
+    # matching class IDs directly avoids launching two mask-reduction kernels per class.
+    matching_labels = y_pred[y_pred == y_true]
+    intersections = torch.bincount(
+        matching_labels,
+        minlength=count_length,
+    )[:num_classes]
+    unions = pred_counts + true_counts - intersections
 
-        intersection = (pred_mask & true_mask).sum().float().item()
-        union = (pred_mask | true_mask).sum().float().item()
+    # Use float64 for the small class-wise reduction to preserve the previous
+    # Python/NumPy double-precision ratio and mean as closely as possible.
+    intersections_float = intersections.to(torch.float64)
+    unions_float = unions.to(torch.float64)
+    class_iou = (intersections_float + eps) / (unions_float + eps)
+    present = unions > 0
 
-        if union > 0:
-            iou_per_class.append((intersection + eps) / (union + eps))
-
-    return float(np.mean(iou_per_class)) if iou_per_class else 0.0
+    # Multiplying by the presence mask and clamping the divisor reproduces the
+    # previous 0.0 result if no valid class appears, without a second GPU sync.
+    macro_iou = (class_iou * present).sum() / present.sum().clamp_min(1)
+    return float(macro_iou.item())
 
 
 def colorize_mask(class_mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
@@ -528,7 +541,6 @@ def load_trained_model(model_path: str, device: torch.device) -> nn.Module:
     return model
 
 
-@jaxtyped(typechecker=beartype)
 def pgd_attack(
     model: nn.Module,
     images: BatchImage,
@@ -547,7 +559,7 @@ def pgd_attack(
 
     Steps
     -----
-    1. Freeze model in eval mode and prepare target class index map.
+    1. Freeze model in eval mode and use the supplied class-index target map directly.
     2. Initialize perturbed input, optionally adding uniform random noise in [-epsilon, epsilon].
     3. For ``num_steps`` iterations:
        a. Track gradients on the current perturbed image.
@@ -564,7 +576,7 @@ def pgd_attack(
     images : BatchImage
         Batch of clean images with shape ``(B, 3, H, W)`` and values in ``[0, 1]``.
     targets : BatchMask
-        One-hot ground-truth masks of shape ``(B, NUM_CLASSES, H, W)``.
+        Integer ground-truth class-index masks of shape ``(B, H, W)``.
     loss_fn : Optional[nn.Module], optional
         Differentiable loss function to maximize. Defaults to
         ``nn.CrossEntropyLoss(ignore_index=19)`` so unannotated pixels do not
@@ -591,9 +603,6 @@ def pgd_attack(
     else:
         effective_loss = loss_fn
 
-    # Collapse one-hot targets to class indices for standard cross-entropy evaluation
-    target_indices = targets.argmax(dim=1).to(torch.int64)
-
     # Initialize perturbation
     if random_start:
         noise = torch.empty_like(images).uniform_(-epsilon, epsilon)
@@ -607,7 +616,9 @@ def pgd_attack(
         x_adv = x_adv.clone().detach().requires_grad_(True)
 
         adv_logits = forward(model, x_adv)
-        loss = effective_loss(adv_logits, target_indices)
+        # Targets are already compact int64 class IDs, which is the native target
+        # representation required by multiclass cross-entropy.
+        loss = effective_loss(adv_logits, targets)
 
         # Compute gradient with respect to perturbed input
         grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
@@ -639,10 +650,11 @@ def evaluate_robustness(
 
     Steps
     -----
-    1. Iterate through dataloader batches.
-    2. Run clean forward pass under ``torch.no_grad`` to obtain clean logits.
+    1. Iterate through batches containing images and compact class-index masks.
+    2. Run the clean forward pass, reduce logits to class predictions and batch IoU,
+       then release the clean logits before allocating PGD backward activations.
     3. Generate 10-step PGD adversarial images using ``pgd_attack``.
-    4. Run adversarial forward pass under ``torch.no_grad`` to obtain perturbed logits.
+    4. Run the adversarial forward pass and reduce its logits immediately.
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
     6. Compute dataset-wide per-class IoU and Dice with explicit zero-division
        handling, then average only classes that occur in the ground truth.
@@ -697,10 +709,18 @@ def evaluate_robustness(
     for X, y in tqdm(dataloader, desc="Evaluating robustness"):
         X, y = X.to(device), y.to(device)
 
-        # 1. Clean forward pass (no gradients needed)
+        # 1. Clean forward pass (no gradients needed). Reduce logits immediately
+        # to class predictions and batch IoU so the large logits tensor can be
+        # released before PGD allocates its backward activations.
         with torch.no_grad():
             clean_logits = forward(model, X)
             clean_preds = clean_logits.argmax(dim=1)
+            clean_batch_iou_sum += compute_batch_macro_iou(
+                clean_preds,
+                y,
+                num_classes=num_classes,
+            )
+        del clean_logits
 
         # 2. Craft 10-step PGD adversarial examples
         adv_X = pgd_attack(
@@ -712,13 +732,20 @@ def evaluate_robustness(
             num_steps=num_steps,
         )
 
-        # 3. Adversarial forward pass
+        # 3. Adversarial forward pass. As with the clean path, keep only the class
+        # predictions and scalar batch IoU after the logits are no longer needed.
         with torch.no_grad():
             adv_logits = forward(model, adv_X)
             adv_preds = adv_logits.argmax(dim=1)
+            adv_batch_iou_sum += compute_batch_macro_iou(
+                adv_preds,
+                y,
+                num_classes=num_classes,
+            )
+        del adv_logits
 
         # 4. Relabel Unknown class (19) to sentinel -1 so smp excludes it from metrics
-        targets = y.argmax(dim=1)
+        targets = y
         target_relabelled = torch.where(
             targets == ignored_class, torch.full_like(targets, ignore_index), targets
         )
@@ -754,10 +781,6 @@ def evaluate_robustness(
         adv_fp_total = a_fp.sum(dim=0) if adv_fp_total is None else adv_fp_total + a_fp.sum(dim=0)
         adv_fn_total = a_fn.sum(dim=0) if adv_fn_total is None else adv_fn_total + a_fn.sum(dim=0)
         adv_tn_total = a_tn.sum(dim=0) if adv_tn_total is None else adv_tn_total + a_tn.sum(dim=0)
-
-        # Per-batch macro IoU tracking
-        clean_batch_iou_sum += compute_batch_macro_iou(clean_logits, y, num_classes=num_classes)
-        adv_batch_iou_sum += compute_batch_macro_iou(adv_logits, y, num_classes=num_classes)
 
     if clean_tp_total is None or adv_tp_total is None:
         raise ValueError("The evaluation dataloader yielded zero batches.")
@@ -860,9 +883,11 @@ def visualize_adversarial_predictions(
     Steps
     -----
     1. Sample random test rows using the fixed seed.
-    2. Craft adversarial examples for each sample.
-    3. Generate colorized prediction maps for clean and adversarial inputs.
-    4. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
+    2. Convert each ground-truth mask to the same compact class-index target format
+       used by the main robustness evaluator.
+    3. Run clean inference, release its logits, and craft an adversarial example.
+    4. Generate colorized prediction maps for clean and adversarial inputs.
+    5. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
 
     Parameters
     ----------
@@ -908,14 +933,17 @@ def visualize_adversarial_predictions(
         image, class_mask = sample_ds.load_sample(row)
 
         image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).contiguous().unsqueeze(0).to(device)
-        mask_tensor = torch.nn.functional.one_hot(
-            torch.from_numpy(class_mask).to(torch.int64), Configuration.NUM_CLASSES
-        ).permute(2, 0, 1).float().unsqueeze(0).to(device)
+        # PGD consumes class-index targets directly, so keep the visualization
+        # mask compact instead of expanding it to a one-hot tensor.
+        mask_tensor = torch.from_numpy(class_mask).to(torch.int64).unsqueeze(0).to(device)
 
         # Clean inference
         with torch.no_grad():
             clean_logits = model(image_tensor)
         clean_pred_class = clean_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+        # The clean logits are not inputs to PGD; release them before attack
+        # generation to reduce peak accelerator memory usage.
+        del clean_logits
 
         # Adversarial attack and inference
         adv_image_tensor = pgd_attack(
