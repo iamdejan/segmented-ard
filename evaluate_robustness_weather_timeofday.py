@@ -523,12 +523,12 @@ def load_trained_model(
     4. Freeze all model parameters to prevent weight updates during adversarial attacks.
     5. Enable cuDNN convolution autotuning on CUDA because evaluation uses fixed
        spatial dimensions and can benefit from faster convolution kernel selection.
-    6. Optionally wrap the frozen model with ``torch.compile`` using
-       ``mode="reduce-overhead"`` to reduce Python and CUDA kernel-launch overhead,
-       while explicitly disabling TorchInductor's max-autotune GEMM path because
-       smaller GPUs can emit a non-actionable insufficient-SM warning for that path.
-       Dynamic shapes are disabled so variable batch sizes compile as separate static
-       graphs instead of entering the symbolic-shape path that can fail in Inductor.
+    6. Optionally wrap the frozen model with ``torch.compile`` using CUDA graphs to
+       reduce Python and CUDA kernel-launch overhead, while explicitly disabling
+       TorchInductor's max-autotune GEMM path because smaller GPUs can emit a
+       non-actionable insufficient-SM warning for that path. Dynamic shapes are
+       disabled; callers keep the model-facing batch shape fixed by padding tail
+       batches before invoking the compiled model.
 
     Parameters
     ----------
@@ -578,12 +578,12 @@ def load_trained_model(
     # hyperparameters or model weights. Explicitly disabling the max-autotune
     # flags prevents an externally configured TORCHINDUCTOR_MAX_AUTOTUNE[_GEMM]
     # setting from activating a GEMM autotune path that logs "Not enough SMs" on
-    # smaller GPUs; reduce-overhead does not require that autotune path. Dynamic
-    # kernels are also disabled because pair loaders can produce different batch
-    # sizes. Allowing automatic dynamic-shape recompilation here can enter the
-    # TorchInductor/SymPy reciprocal-shape path that reports pow_by_natural
-    # failures. With dynamic=False, each encountered batch size stays a concrete
-    # static specialization instead.
+    # smaller GPUs; CUDA-graph overhead reduction does not require that autotune
+    # path. Dynamic kernels are also disabled because automatic dynamic-shape
+    # recompilation previously entered the TorchInductor/SymPy reciprocal-shape
+    # path that reports pow_by_natural failures. Evaluation and visualization pad
+    # tail batches to one fixed model-facing size, so this compiled model sees a
+    # stable concrete shape instead of accumulating per-size specializations.
     if compile_model:
         model = cast(
             nn.Module,
@@ -694,6 +694,93 @@ def pgd_attack(
     return x_adv
 
 
+@jaxtyped(typechecker=beartype)
+def pad_batch_for_static_compile(
+    images: BatchImage,
+    targets: BatchMask,
+    target_batch_size: int,
+    ignored_class: int = Configuration.IGNORED_CLASS,
+) -> Tuple[BatchImage, BatchMask, int]:
+    """Pad a real batch to one fixed size for static ``torch.compile`` graphs.
+
+    The weather/time-of-day evaluator creates many small DataLoaders, so their
+    final batches can have different sizes. With ``dynamic=False``, each distinct
+    batch size causes a new TorchDynamo specialization and can exhaust the
+    recompilation limit. This helper keeps the model-facing batch dimension fixed
+    while preserving the original samples used for PGD and metric calculation.
+
+    Steps
+    -----
+    1. Validate that images and targets contain the same positive batch size and
+       that the requested static batch size can contain all real samples.
+    2. Return the original tensors unchanged when the batch is already full.
+    3. Otherwise append zero-valued dummy images and masks filled with the ignored
+       class so cross-entropy contributes no loss for padded pixels.
+    4. Return the padded tensors together with the number of real samples so model
+       outputs can be sliced before metrics are accumulated.
+
+    Parameters
+    ----------
+    images : BatchImage
+        Real image batch of shape ``(B, 3, H, W)``.
+    targets : BatchMask
+        Real class-index masks of shape ``(B, H, W)``.
+    target_batch_size : int
+        Fixed batch size expected by the compiled model.
+    ignored_class : int, optional
+        Class ID ignored by the PGD cross-entropy loss. Defaults to the configured
+        BDD100k Unknown class.
+
+    Returns
+    -------
+    Tuple[BatchImage, BatchMask, int]
+        Padded images, padded targets, and the number of real samples in the
+        original batch.
+
+    Raises
+    ------
+    ValueError
+        If batch sizes disagree, the real batch is empty, ``target_batch_size`` is
+        not positive, or the real batch exceeds ``target_batch_size``.
+    """
+    real_batch_size = int(images.shape[0])
+    if real_batch_size != int(targets.shape[0]):
+        raise ValueError("Image and target batch sizes must match.")
+    if real_batch_size <= 0:
+        raise ValueError("Cannot pad an empty batch.")
+    if target_batch_size <= 0:
+        raise ValueError("target_batch_size must be greater than zero.")
+    if real_batch_size > target_batch_size:
+        raise ValueError(
+            f"Real batch size {real_batch_size} exceeds static batch size "
+            f"{target_batch_size}."
+        )
+
+    if real_batch_size == target_batch_size:
+        return images, targets, real_batch_size
+
+    pad_count = target_batch_size - real_batch_size
+
+    # Dummy images never contribute to reported metrics. Their target pixels are
+    # all ignored by CrossEntropyLoss, so they also contribute no PGD loss term.
+    padded_images = torch.cat(
+        (
+            images,
+            images.new_zeros((pad_count, *images.shape[1:])),
+        ),
+        dim=0,
+    )
+    padded_targets = torch.cat(
+        (
+            targets,
+            targets.new_full((pad_count, *targets.shape[1:]), ignored_class),
+        ),
+        dim=0,
+    )
+
+    return cast(BatchImage, padded_images), cast(BatchMask, padded_targets), real_batch_size
+
+
 def evaluate_robustness(
     model: nn.Module,
     dataloader: DataLoader[Tuple[ImageTensor, MaskTensor]],
@@ -704,6 +791,7 @@ def evaluate_robustness(
     num_classes: int = 19,
     ignore_index: int = -1,
     ignored_class: int = 19,
+    static_batch_size: Optional[int] = None,
 ) -> Dict[str, Union[float, List[float]]]:
     """Run full clean and 10-step PGD adversarial evaluation on a dataloader.
 
@@ -713,11 +801,13 @@ def evaluate_robustness(
 
     Steps
     -----
-    1. Iterate through batches containing images and compact class-index masks.
-    2. Run the clean forward pass, reduce logits to class predictions and batch IoU,
+    1. Iterate through batches containing images and compact class-index masks, and
+       optionally pad only the model-facing tensors to one fixed compiled batch size.
+    2. Run the clean forward pass, slice away any padding, reduce logits to class
+       predictions and batch IoU,
        then release the clean logits before allocating PGD backward activations.
-    3. Generate 10-step PGD adversarial images using ``pgd_attack``.
-    4. Run the adversarial forward pass and reduce its logits immediately.
+    3. Generate 10-step PGD adversarial images on the same fixed-size compute batch.
+    4. Run the adversarial forward pass, slice away padding, and reduce its logits.
     5. Accumulate per-class confusion statistics for both clean and adversarial outputs.
     6. Compute dataset-wide per-class IoU and Dice with explicit zero-division
        handling, then average only classes that occur in the ground truth.
@@ -743,6 +833,10 @@ def evaluate_robustness(
         Sentinel index for ignored pixels in ``smp.metrics.get_stats``. Defaults to -1.
     ignored_class : int, optional
         Class index corresponding to Unknown in dataset. Defaults to 19.
+    static_batch_size : Optional[int], optional
+        Fixed batch size presented to the model when static ``torch.compile`` is
+        enabled. Smaller real batches are padded with ignored dummy samples and
+        sliced back before metrics. ``None`` disables padding. Defaults to None.
 
     Returns
     -------
@@ -772,12 +866,27 @@ def evaluate_robustness(
     for X, y in tqdm(dataloader, desc="Evaluating robustness"):
         X, y = X.to(device), y.to(device)
 
+        # Static torch.compile specializes on concrete tensor shapes. Pair-specific
+        # loaders frequently produce different tail batch sizes, so pad only the
+        # compute tensors to one model-facing batch dimension and retain the real
+        # sample count for exact metric slicing.
+        if static_batch_size is not None:
+            model_X, model_y, real_batch_size = pad_batch_for_static_compile(
+                X,
+                y,
+                target_batch_size=static_batch_size,
+                ignored_class=ignored_class,
+            )
+        else:
+            model_X, model_y = X, y
+            real_batch_size = int(X.shape[0])
+
         # 1. Clean forward pass (no gradients needed). Reduce logits immediately
         # to class predictions and batch IoU so the large logits tensor can be
         # released before PGD allocates its backward activations.
         with torch.no_grad():
-            clean_logits = forward(model, X)
-            clean_preds = clean_logits.argmax(dim=1)
+            clean_logits = forward(model, model_X)
+            clean_preds = clean_logits[:real_batch_size].argmax(dim=1)
             clean_batch_iou_sum += compute_batch_macro_iou(
                 clean_preds,
                 y,
@@ -788,8 +897,8 @@ def evaluate_robustness(
         # 2. Craft 10-step PGD adversarial examples
         adv_X = pgd_attack(
             model=model,
-            images=X,
-            targets=y,
+            images=model_X,
+            targets=model_y,
             epsilon=epsilon,
             alpha=alpha,
             num_steps=num_steps,
@@ -799,7 +908,7 @@ def evaluate_robustness(
         # predictions and scalar batch IoU after the logits are no longer needed.
         with torch.no_grad():
             adv_logits = forward(model, adv_X)
-            adv_preds = adv_logits.argmax(dim=1)
+            adv_preds = adv_logits[:real_batch_size].argmax(dim=1)
             adv_batch_iou_sum += compute_batch_macro_iou(
                 adv_preds,
                 y,
@@ -940,6 +1049,7 @@ def visualize_adversarial_predictions(
     num_steps: int = 10,
     num_samples: int = 4,
     output_path: str = "./model/adversarial_predictions.png",
+    static_batch_size: Optional[int] = None,
 ) -> None:
     """Render a visual side-by-side comparison of clean and adversarial predictions.
 
@@ -949,9 +1059,11 @@ def visualize_adversarial_predictions(
     2. Apply the same fixed 360x640 inference preprocessing used by the robustness
        evaluator so the compiled model never receives a new spatial shape here.
     3. Keep ground-truth masks as compact class-index targets.
-    4. Run clean inference, release its logits, and craft an adversarial example.
-    5. Generate colorized prediction maps for clean and adversarial inputs.
-    6. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
+    4. Optionally pad each one-sample visualization batch to the same static compiled
+       batch size used during evaluation, then slice model outputs back to one sample.
+    5. Run clean inference, release its logits, and craft an adversarial example.
+    6. Generate colorized prediction maps for clean and adversarial inputs.
+    7. Export comparison grid (Image / Ground Truth / Clean Pred / Adv Pred / Perturbation).
 
     Parameters
     ----------
@@ -971,6 +1083,9 @@ def visualize_adversarial_predictions(
         Number of samples to visualize. Defaults to 4.
     output_path : str, optional
         Destination image path.
+    static_batch_size : Optional[int], optional
+        Fixed model-facing batch size used by static ``torch.compile``. ``None``
+        disables padding. Defaults to None.
 
     Raises
     ------
@@ -1006,6 +1121,19 @@ def visualize_adversarial_predictions(
         image_tensor = image_tensor.unsqueeze(0).to(device)
         mask_tensor = mask_tensor.unsqueeze(0).to(device)
 
+        if static_batch_size is not None:
+            model_image_tensor, model_mask_tensor, real_batch_size = (
+                pad_batch_for_static_compile(
+                    image_tensor,
+                    mask_tensor,
+                    target_batch_size=static_batch_size,
+                    ignored_class=Configuration.IGNORED_CLASS,
+                )
+            )
+        else:
+            model_image_tensor, model_mask_tensor = image_tensor, mask_tensor
+            real_batch_size = 1
+
         # Convert the resized tensors back to NumPy only for rendering. The model,
         # attack, prediction, ground truth, and perturbation therefore all share
         # the same spatial coordinate system.
@@ -1014,8 +1142,14 @@ def visualize_adversarial_predictions(
 
         # Clean inference
         with torch.no_grad():
-            clean_logits = model(image_tensor)
-        clean_pred_class = clean_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+            clean_logits = model(model_image_tensor)
+        clean_pred_class = (
+            clean_logits[:real_batch_size]
+            .argmax(dim=1)
+            .squeeze(0)
+            .cpu()
+            .numpy()
+        )
         # The clean logits are not inputs to PGD; release them before attack
         # generation to reduce peak accelerator memory usage.
         del clean_logits
@@ -1023,15 +1157,21 @@ def visualize_adversarial_predictions(
         # Adversarial attack and inference
         adv_image_tensor = pgd_attack(
             model=model,
-            images=image_tensor,
-            targets=mask_tensor,
+            images=model_image_tensor,
+            targets=model_mask_tensor,
             epsilon=epsilon,
             alpha=alpha,
             num_steps=num_steps,
         )
         with torch.no_grad():
             adv_logits = model(adv_image_tensor)
-        adv_pred_class = adv_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+        adv_pred_class = (
+            adv_logits[:real_batch_size]
+            .argmax(dim=1)
+            .squeeze(0)
+            .cpu()
+            .numpy()
+        )
 
         # Colorize masks
         clean_pred_color = colorize_mask(clean_pred_class, CLASS_COLORS).astype(np.float32) / 255.0
@@ -1039,7 +1179,9 @@ def visualize_adversarial_predictions(
         true_mask_color = colorize_mask(class_mask, CLASS_COLORS).astype(np.float32) / 255.0
 
         # Amplified perturbation map for visual inspection
-        diff = np.abs(adv_image_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() - image)
+        diff = np.abs(
+            adv_image_tensor[0].permute(1, 2, 0).cpu().numpy() - image
+        )
         diff_vis = np.clip(diff * 10.0, 0.0, 1.0)
 
         # Plot columns
@@ -1716,9 +1858,13 @@ def main() -> None:
     4. Resolve the checkpoint-specific result directory from ``--checkpoint``.
     5. Load and freeze the trained checkpoint only after data validation succeeds,
        enable cuDNN autotuning on CUDA, and compile it unless disabled explicitly.
-    6. Evaluate clean and PGD-adversarial metrics for each pair.
-    7. Print and export the equal pair/evaluation counts and all metrics.
-    8. Optionally visualize clean/adversarial predictions from evaluated pairs.
+    6. When compilation is enabled, keep every model-facing batch at the requested
+       ``--batch-size`` by padding only temporary compute tensors with ignored
+       dummy samples; this prevents TorchDynamo recompilation across pair tails.
+    7. Evaluate clean and PGD-adversarial metrics for each pair.
+    8. Print and export the equal pair/evaluation counts and all metrics.
+    9. Optionally visualize clean/adversarial predictions from evaluated pairs using
+       the same fixed model-facing batch size.
 
     Raises
     ------
@@ -1783,6 +1929,17 @@ def main() -> None:
     print(f"Target execution device: {Configuration.DEVICE}")
     print(f"cuDNN autotuning enabled: {Configuration.DEVICE.type == 'cuda'}")
     print(f"torch.compile enabled: {not args.disable_compile}")
+    static_batch_size: Optional[int] = (
+        args.batch_size if not args.disable_compile else None
+    )
+    print(
+        "Static compiled batch padding: "
+        + (
+            f"enabled (model-facing batch size={static_batch_size})"
+            if static_batch_size is not None
+            else "disabled"
+        )
+    )
     print(
         f"PGD configuration: steps={args.steps}, epsilon={args.epsilon}, "
         f"alpha={args.alpha}"
@@ -1818,6 +1975,7 @@ def main() -> None:
             model=model,
             dataloader=pair_loader,
             device=Configuration.DEVICE,
+            static_batch_size=static_batch_size,
             epsilon=args.epsilon,
             alpha=args.alpha,
             num_steps=args.steps,
@@ -1872,6 +2030,7 @@ def main() -> None:
             model=model,
             test_df=combined_test_df,
             device=Configuration.DEVICE,
+            static_batch_size=static_batch_size,
             epsilon=args.epsilon,
             alpha=args.alpha,
             num_steps=args.steps,
