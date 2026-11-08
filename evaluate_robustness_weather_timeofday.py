@@ -38,6 +38,8 @@ ImageTensor = Float[Tensor, "3 h w"]  # Single image, channel-first layout
 MaskTensor = Int64[Tensor, "h w"]  # Single class-index mask
 BatchImage = Float[Tensor, "b 3 h w"]  # Collated batch of images
 BatchMask = Int64[Tensor, "b h w"]  # Collated class-index masks
+StaticBatchImage = Float[Tensor, "static_b 3 h w"]  # Padded model-facing image batch
+StaticBatchMask = Int64[Tensor, "static_b h w"]  # Padded model-facing class-index masks
 Logits = Float[Tensor, "b c h w"]  # Model output, c == NUM_CLASSES
 NumpyImage = Float[np.ndarray, "h w 3"]  # Single image in channels-last layout
 ClassIndexArray = UInt8[np.ndarray, "h w"]  # Per-pixel class index map
@@ -700,7 +702,7 @@ def pad_batch_for_static_compile(
     targets: BatchMask,
     target_batch_size: int,
     ignored_class: int = Configuration.IGNORED_CLASS,
-) -> Tuple[BatchImage, BatchMask, int]:
+) -> Tuple[StaticBatchImage, StaticBatchMask, int]:
     """Pad a real batch to one fixed size for static ``torch.compile`` graphs.
 
     The weather/time-of-day evaluator creates many small DataLoaders, so their
@@ -733,8 +735,9 @@ def pad_batch_for_static_compile(
 
     Returns
     -------
-    Tuple[BatchImage, BatchMask, int]
-        Padded images, padded targets, and the number of real samples in the
+    Tuple[StaticBatchImage, StaticBatchMask, int]
+        Padded model-facing images and targets, whose ``static_b`` axis is allowed
+        to differ from the input ``b`` axis, plus the number of real samples in the
         original batch.
 
     Raises
@@ -757,7 +760,11 @@ def pad_batch_for_static_compile(
         )
 
     if real_batch_size == target_batch_size:
-        return images, targets, real_batch_size
+        return (
+            cast(StaticBatchImage, images),
+            cast(StaticBatchMask, targets),
+            real_batch_size,
+        )
 
     pad_count = target_batch_size - real_batch_size
 
@@ -778,7 +785,11 @@ def pad_batch_for_static_compile(
         dim=0,
     )
 
-    return cast(BatchImage, padded_images), cast(BatchMask, padded_targets), real_batch_size
+    return (
+        cast(StaticBatchImage, padded_images),
+        cast(StaticBatchMask, padded_targets),
+        real_batch_size,
+    )
 
 
 def evaluate_robustness(
