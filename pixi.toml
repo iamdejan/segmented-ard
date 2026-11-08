@@ -58,6 +58,8 @@ nvidia-ml-py = ">=13.615.71,<14"
 
 [target.default.dependencies]
 pytorch-gpu = "=2.10.0"
+cuda-cudart-dev = ">=12.9.79,<13"
+cuda-version = ">=12.9,<13"
 
 [target.cicd.dependencies]
 pytorch-cpu = "=2.10.0"
