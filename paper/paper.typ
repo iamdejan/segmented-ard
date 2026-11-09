@@ -804,9 +804,9 @@ where:
 
 #set par(first-line-indent: (amount: tab_length))
 
-Since this study focuses on semantic segmentation, there should be an adjustment to the formula. The adjusted formula is:
+Because this study focuses on semantic segmentation, there should be an adjustment to the formula. Instead of one formula for tracking the degradation of accuracy, now there are 3 formulas focused on each metric. The first formula is to calculate the degradation of mean IoU:
 $
-  text("ASR")_(text("untargeted")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
+  text("Degradation")_(text("mIoU")) = 1 - (text("mIoU")_(text("adversarial"))) / (text("mIoU")_(text("clean")))
 $
 
 where:
@@ -817,6 +817,36 @@ where:
 )[
   - $text("mIoU")_(text("adversarial"))$ is defined as the mean intersection of union (mIoU) for the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
   - $text("mIoU")_(text("clean"))$ is defined as the mean intersection of union (mIoU) of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
+]
+
+The second formula is to calculate the degradation of pixel accuracy:
+$
+  text("Degradation")_(text("PA")) = 1 - (text("PA")_(text("adversarial"))) / (text("PA")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("PA")_(text("adversarial"))$ is defined as the pixel accuracy for the perturbed inputs.
+  - $text("PA")_(text("clean"))$ is defined as the pixel accuracy of the clean inputs.
+]
+
+The third formula focuses on Dice.
+$
+  text("Degradation")_(text("Dice")) = 1 - (text("Dice")_(text("adversarial"))) / (text("Dice")_(text("clean")))
+$
+
+where:
+\
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  - $text("Dice")_(text("adversarial"))$ is defined as the Dice score for the perturbed inputs.
+  - $text("Dice")_(text("clean"))$ is defined as the Dice score of the clean inputs.
 ]
 
 Lower ASR is preferrable, signaling high robustnesss that the model possesses.
@@ -870,7 +900,7 @@ As previously mentioned in Section 3.1 Research Design, the results presented in
   inset: (left: tab_length)
 )[
   - A non-robust student distilled from a non-robust teacher. Moving forward, this student will be named as "S-NR-V5."
-  - A student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
+  - A non-robust student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
   - A robust student distilled from a non-robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this student will be named as "S-R-V1."
   - A robust student distilled from a robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this will be named "S-R-V2."
 ]
@@ -926,7 +956,7 @@ The class proportion will be used for oversampling process during training proce
 ]
 #v(2 * line_spacing)
 
-The results of the semantic segmentation will be divided into two parts: the accumulated results, and per-class results.
+The results of the semantic segmentation will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the performance for images with weather and time of day metadata.
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -1132,10 +1162,10 @@ The results of the semantic segmentation will be divided into two parts: the acc
 #v(2 * line_spacing)
 #heading(level: 3)[
   #text(size: 12pt)[Results Based on Weather and Time of Day]
-]
+] <segmentation-performance-weather-timeofday>
 #v(2 * line_spacing)
 
-Due to the limitation of the dataset, not all images have weather and time of day metadata. The dataset used for this study belongs to the 10K subset, as previously stated. However, some images and masks in the 10K subset are not present in the 100K dataset, so it is not completely a subset, rather it forms an intersection. Moreover, some images have weather and/or time of day metadata, but the value is "unknown", and hence these images need to be filtered out. Due to this reason, only 545 images have valid weather and time of day metadata.
+Due to the limitation of the dataset, not all images have weather and time of day metadata. The dataset used for this study belongs to the 10K subset, as previously stated. However, some images and masks in the 10K subset are not present in the 100K dataset, so it is not completely a subset, rather it forms an intersection. Moreover, some images have weather and/or time of day metadata, but the value is "unknown", and hence these images need to be filtered out. Due to this reason, only 545 images have valid weather and time of day metadata, all of which are used for evaluation in this section.
 
 #figure(
   table(
@@ -1160,6 +1190,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   caption: [Distribution of weather and time of day pairs.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Non-Robust - V5 (T-NR-V5)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 6,
@@ -1182,6 +1218,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   ),
   caption: [Weather-time of day pair results for T-NR-V5.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V5 (S-NR-V5)]
+]
+#v(2 * line_spacing)
 
 #figure(
   table(
@@ -1206,6 +1248,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   caption: [Weather-time of day pair results for S-NR-V5.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Robust - V5 (T-R-V5)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 6,
@@ -1228,6 +1276,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   ),
   caption: [Weather-time of day pair results for T-R-V5.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V1 (S-R-V1)]
+]
+#v(2 * line_spacing)
 
 #figure(
   table(
@@ -1252,6 +1306,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   caption: [Weather-time of day pair results for S-R-V1.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V2 (S-R-V1)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 6,
@@ -1274,6 +1334,12 @@ Due to the limitation of the dataset, not all images have weather and time of da
   ),
   caption: [Weather-time of day pair results for S-R-V2.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V6 (S-NR-V6)]
+]
+#v(2 * line_spacing)
 
 #figure(
   table(
@@ -1300,29 +1366,859 @@ Due to the limitation of the dataset, not all images have weather and time of da
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Adversarial Robustness]
+  #text(size: 12pt)[Adversarial Robustness]
 ]
 #v(2 * line_spacing)
+
+The results of the adversarial robustness will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the robustness for images with weather and time of day metadata.
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Accumulated Results]
+  #text(size: 12pt)[Accumulated Results]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Clean Pixel Accuracy*], [0.9266], [0.9202], [0.8190], [0.8373], [0.7612], [0.9169],
+    [*Adversarial Pixel Accuracy*], [0.0359], [0.0152], [0.7220], [0.6994], [0.5909], [0.0086],
+    [*Degradation of Pixel Accuracy*], [96.12%], [98.35%], [11.84%], [16.47%], [22.38%], [99.06%],
+  ),
+  caption: [Robustness results for pixel accuracy.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Clean Mean IoU*], [0.5291], [0.5166], [0.2329], [0.2988], [0.1704], [0.4709],
+    [*Adversarial Mean IoU*], [0.0101], [0.0058], [0.1774], [0.1842], [0.1117], [0.0026],
+    [*Degradation of Mean IoU*], [98.10%], [98.88%], [23.82%], [38.37%], [34.48%], [99.46%],
+  ),
+  caption: [Robustness results for mean IoU.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Clean Dice*], [0.6205], [0.6097], [0.2874], [0.3854], [0.2064], [0.5597],
+    [*Adversarial Dice*], [0.0197], [0.0114], [0.2284], [0.2478], [0.1465], [0.0051],
+    [*Degradation of Dice*], [96.82%], [98.14%], [20.52%], [35.69%], [29.01%], [99.09%],
+  ),
+  caption: [Robustness results for Dice score.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Per-Class Results]
+  #text(size: 12pt)[Per-Class Results]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.9363], [0.0100], [98.93%],
+    [sidewalk], [0.6579], [0.0078], [98.82%],
+    [building], [0.8365], [0.0297], [96.45%],
+    [wall], [0.6666], [0.0002], [99.96%],
+    [fence], [0.6242], [0.0052], [99.17%],
+    [pole], [0.3614], [0.0117], [96.77%],
+    [traffic light], [0.3367], [0.0135], [96.00%],
+    [traffic sign], [0.4556], [0.0062], [98.64%],
+    [vegetation], [0.8464], [0.0287], [96.61%],
+    [terrain], [0.6725], [0.0077], [98.85%],
+    [sky], [0.9441], [0.0108], [98.85%],
+    [person], [0.4588], [0.0110], [97.60%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.8763], [0.0272], [96.90%],
+    [truck], [0.6955], [0.0014], [99.80%],
+    [bus], [0.6835], [0.0201], [97.07%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0.0002], [0], [100.00%],
+    [bicycle], [5.19 #math.times 10^(-6)], [0], [100.00%]
+  ),
+  caption: [Per-class results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.9305], [0.0055], [99.41%],
+    [sidewalk], [0.6359], [0.0055], [99.13%],
+    [building], [0.8155], [0.0245], [96.99%],
+    [wall], [0.5637], [0.0004], [99.93%],
+    [fence], [0.5773], [0.0047], [99.19%],
+    [pole], [0.3144], [0.0015], [99.51%],
+    [traffic light], [0.3085], [0.0059], [98.10%],
+    [traffic sign], [0.4304], [0.0032], [99.25%],
+    [vegetation], [0.8328], [0.0071], [99.15%],
+    [terrain], [0.6356], [0.0040], [99.37%],
+    [sky], [0.9384], [0.0026], [99.72%],
+    [person], [0.4965], [0.0109], [97.80%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.8678], [0.0074], [99.15%],
+    [truck], [0.6998], [0.0005], [99.93%],
+    [bus], [0.7676], [0.0258], [96.64%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0], [0], [0.00%],
+    [bicycle], [0], [0], [0.00%],
+  ),
+  caption: [Per-class results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: true
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.8360], [0.7574], [9.39%],
+    [sidewalk], [0.2781], [0.1485], [46.61%],
+    [building], [0.6202], [0.4317], [30.40%],
+    [wall], [0], [0], [0.00%],
+    [fence], [0.0598], [0.0291], [51.34%],
+    [pole], [0.0722], [0.0657], [8.97%],
+    [traffic light], [0], [0], [0.00%],
+    [traffic sign], [0], [0], [0.00%],
+    [vegetation], [0.6457], [0.4671], [27.65%],
+    [terrain], [0.1466], [0.0418], [71.47%],
+    [sky], [0.9031], [0.8596], [4.81%],
+    [person], [0], [0], [0.00%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.6906], [0.5034], [27.10%],
+    [truck], [0.1732], [0.0667], [61.48%],
+    [bus], [0], [0], [0.00%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0], [0], [0.00%],
+    [bicycle], [0], [0], [0.00%],
+  ),
+  caption: [Per-class results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.8607], [0.7632], [11.33%],
+    [sidewalk], [0.2903], [0.0957], [67.04%],
+    [building], [0.6362], [0.4170], [34.45%],
+    [wall], [0.0208], [0.0027], [87.23%],
+    [fence], [0.2118], [0.0423], [80.02%],
+    [pole], [0.1594], [0.1170], [26.56%],
+    [traffic light], [0.0119], [0.0057], [52.08%],
+    [traffic sign], [0.2003], [0.1087], [45.71%],
+    [vegetation], [0.6557], [0.3401], [48.14%],
+    [terrain], [0.1956], [0.0340], [82.64%],
+    [sky], [0.9081], [0.8512], [6.26%],
+    [person], [0.1878], [0.0748], [60.18%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.7534], [0.4897], [35.00%],
+    [truck], [0.2415], [0.0435], [81.97%],
+    [bus], [0.3436], [0.1134], [67.01%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0], [0], [0.00%],
+    [bicycle], [0], [0], [0.00%],
+  ),
+  caption: [Per-class results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.7551], [0.6304], [16.52%],
+    [sidewalk], [0.0075], [0.0037], [50.56%],
+    [building], [0.4807], [0.1680], [65.05%],
+    [wall], [0], [2.45 #math.times 10^(-6)], [0.00%],
+    [fence], [0.0004], [8.00 #math.times 10^(-5)], [81.98%],
+    [pole], [0.0094], [0.0023], [75.52%],
+    [traffic light], [0], [0], [0.00%],
+    [traffic sign], [0.0018], [6.48 #math.times 10^(-5)], [96.39%],
+    [vegetation], [0.5743], [0.3156], [45.04%],
+    [terrain], [0.0126], [0.0003], [97.38%],
+    [sky], [0.8730], [0.7917], [9.31%],
+    [person], [0], [0], [0.00%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.5229], [0.2093], [59.97%],
+    [truck], [2.80 #math.times 10^(-5)], [3.45 #math.times 10^(-7)], [98.77%],
+    [bus], [0], [0], [0.00%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0], [0], [0.00%],
+    [bicycle], [0], [0], [0.00%],
+  ),
+  caption: [Per-class results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 4,
+    table.header(
+      [*Class*], [*Clean IoU*], [*Adversarial IoU*], [*Degradation*]
+    ),
+    [road], [0.9287], [0.0050], [99.46%],
+    [sidewalk], [0.6096], [0.0014], [99.77%],
+    [building], [0.8205], [0.0034], [99.58%],
+    [wall], [0.5651], [0.0002], [99.96%],
+    [fence], [0.5247], [0.0018], [99.65%],
+    [pole], [0.2792], [0.0043], [98.45%],
+    [traffic light], [0], [0], [0.00%],
+    [traffic sign], [0.3412], [0.0048], [98.59%],
+    [vegetation], [0.8275], [0.0070], [99.16%],
+    [terrain], [0.5981], [0.0022], [99.63%],
+    [sky], [0.9389], [0.0138], [98.53%],
+    [person], [0.4002], [0.0016], [99.60%],
+    [rider], [0], [0], [0.00%],
+    [car], [0.8704], [0.0012], [99.87%],
+    [truck], [0.6103], [0.0010], [99.83%],
+    [bus], [0.6321], [0.0008], [99.87%],
+    [train], [0], [0], [0.00%],
+    [motorcycle], [0], [0], [0.00%],
+    [bicycle], [0], [0], [0.00%],
+  ),
+  caption: [Per-class results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Results Based on Weather and Time of Day]
+  #text(size: 12pt)[Results Based on Weather and Time of Day]
 ]
 #v(2 * line_spacing)
 
-// TODO dejan: jelaskan bahwa pengambilan data ini tidak dilakukan atas semua gambar, karena tidak semua gambar memiliki metadata.
+Similar to the limitation mentioned previously (in @segmentation-performance-weather-timeofday), the adversarial robustness results of this part will not be based on all 10K images, but rather a small selected subset of 545 images.
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Non-Robust - V5 (T-NR-V5)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9132], [0.0392], [95.71%],
+    [overcast], [daytime], [0.9152], [0.0355], [96.12%],
+    [partly cloudy], [daytime], [0.9064], [0.0278], [96.93%],
+    [rainy], [daytime], [0.9080], [0.0263], [97.11%],
+    [snowy], [daytime], [0.9063], [0.0488], [94.61%],
+    [clear], [night], [0.8705], [0.0209], [97.60%],
+    [clear], [dawn/dusk], [0.9295], [0.0446], [95.20%],
+    [overcast], [dawn/dusk], [0.9482], [0.0283], [97.01%],
+    [partly cloudy], [dawn/dusk], [0.8445], [0.0176], [97.92%],
+    [snowy], [dawn/dusk], [0.9364], [0.0369], [96.06%],
+    [rainy], [dawn/dusk], [0.8311], [0.0339], [95.92%],
+    [snowy], [night], [0.8293], [0.0178], [97.85%],
+    [rainy], [night], [0.9547], [0.0574], [93.99%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.5168], [0.0114], [97.79%],
+    [overcast], [daytime], [0.4850], [0.0105], [97.84%],
+    [partly cloudy], [daytime], [0.4994], [0.0073], [98.53%],
+    [rainy], [daytime], [0.5722], [0.0067], [98.83%],
+    [snowy], [daytime], [0.5331], [0.0139], [97.39%],
+    [clear], [night], [0.4644], [0.0054], [98.84%],
+    [clear], [dawn/dusk], [0.4673], [0.0100], [97.87%],
+    [overcast], [dawn/dusk], [0.6348], [0.0082], [98.71%],
+    [partly cloudy], [dawn/dusk], [0.4731], [0.0056], [98.82%],
+    [snowy], [dawn/dusk], [0.5585], [0.0133], [97.61%],
+    [rainy], [dawn/dusk], [0.4525], [0.0131], [97.10%],
+    [snowy], [night], [0.4610], [0.0056], [98.79%],
+    [rainy], [night], [0.5960], [0.0204], [96.58%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.6103], [0.0224], [96.33%],
+    [overcast], [daytime], [0.5782], [0.0205], [96.45%],
+    [partly cloudy], [daytime], [0.5885], [0.0144], [97.55%],
+    [rainy], [daytime], [0.6769], [0.0132], [98.05%],
+    [snowy], [daytime], [0.6336], [0.0268], [95.78%],
+    [clear], [night], [0.5689], [0.0106], [98.14%],
+    [clear], [dawn/dusk], [0.5639], [0.0192], [96.59%],
+    [overcast], [dawn/dusk], [0.7341], [0.0159], [97.83%],
+    [partly cloudy], [dawn/dusk], [0.5762], [0.0108], [98.12%],
+    [snowy], [dawn/dusk], [0.6490], [0.0250], [96.14%],
+    [rainy], [dawn/dusk], [0.5477], [0.0249], [95.46%],
+    [snowy], [night], [0.5657], [0.0108], [98.09%],
+    [rainy], [night], [0.6621], [0.0370], [94.41%],
+  ),
+  caption: [Dice-based weather-time of day pair results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V5 (S-NR-V5)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9077], [0.0154], [98.31%],
+    [overcast], [daytime], [0.9113], [0.0136], [98.50%],
+    [partly cloudy], [daytime], [0.8977], [0.0158], [98.24%],
+    [rainy], [daytime], [0.9102], [0.0096], [98.94%],
+    [snowy], [daytime], [0.8840], [0.0235], [97.34%],
+    [clear], [night], [0.8117], [0.0091], [98.88%],
+    [clear], [dawn/dusk], [0.9249], [0.0160], [98.27%],
+    [overcast], [dawn/dusk], [0.9408], [0.0126], [98.66%],
+    [partly cloudy], [dawn/dusk], [0.8495], [0.0053], [99.38%],
+    [snowy], [dawn/dusk], [0.9330], [0.0179], [98.08%],
+    [rainy], [dawn/dusk], [0.8402], [0.0066], [99.22%],
+    [snowy], [night], [0.8377], [0.0152], [98.18%],
+    [rainy], [night], [0.9716], [0.0011], [99.88%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.5078], [0.0047], [99.08%],
+    [overcast], [daytime], [0.4895], [0.0045], [99.09%],
+    [partly cloudy], [daytime], [0.4859], [0.0044], [99.10%],
+    [rainy], [daytime], [0.5832], [0.0031], [99.47%],
+    [snowy], [daytime], [0.4863], [0.0054], [98.90%],
+    [clear], [night], [0.4045], [0.0015], [99.63%],
+    [clear], [dawn/dusk], [0.4753], [0.0045], [99.05%],
+    [overcast], [dawn/dusk], [0.5892], [0.0033], [99.44%],
+    [partly cloudy], [dawn/dusk], [0.5067], [0.0021], [99.58%],
+    [snowy], [dawn/dusk], [0.5122], [0.0088], [98.28%],
+    [rainy], [dawn/dusk], [0.4546], [0.0031], [99.32%],
+    [snowy], [night], [0.3632], [0.0053], [98.53%],
+    [rainy], [night], [0.6201], [0.0034], [99.45%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.6027], [0.0092], [98.47%],
+    [overcast], [daytime], [0.5821], [0.0088], [98.49%],
+    [partly cloudy], [daytime], [0.5729], [0.0086], [98.49%],
+    [rainy], [daytime], [0.6859], [0.0061], [99.11%],
+    [snowy], [daytime], [0.5908], [0.0105], [98.22%],
+    [clear], [night], [0.5098], [0.0030], [99.41%],
+    [clear], [dawn/dusk], [0.5733], [0.0089], [98.45%],
+    [overcast], [dawn/dusk], [0.6888], [0.0064], [99.06%],
+    [partly cloudy], [dawn/dusk], [0.6081], [0.0042], [99.31%],
+    [snowy], [dawn/dusk], [0.6021], [0.0171], [97.16%],
+    [rainy], [dawn/dusk], [0.5551], [0.0060], [98.92%],
+    [snowy], [night], [0.4480], [0.0103], [97.70%],
+    [rainy], [night], [0.6829], [0.0067], [99.02%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Robust - V5 (T-R-V5)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.8051], [0.7038], [12.59%],
+    [overcast], [daytime], [0.8338], [0.7403], [11.21%],
+    [partly cloudy], [daytime], [0.7889], [0.6914], [12.35%],
+    [rainy], [daytime], [0.8042], [0.6805], [15.38%],
+    [snowy], [daytime], [0.7607], [0.6421], [15.59%],
+    [clear], [night], [0.6646], [0.5753], [13.44%],
+    [clear], [dawn/dusk], [0.8262], [0.7446], [9.87%],
+    [overcast], [dawn/dusk], [0.8415], [0.7359], [12.55%],
+    [partly cloudy], [dawn/dusk], [0.7199], [0.6312], [12.32%],
+    [snowy], [dawn/dusk], [0.8365], [0.7015], [16.14%],
+    [rainy], [dawn/dusk], [0.5891], [0.4211], [28.53%],
+    [snowy], [night], [0.7501], [0.6240], [16.81%],
+    [rainy], [night], [0.5687], [0.4545], [20.09%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.2355], [0.1759], [25.32%],
+    [overcast], [daytime], [0.2476], [0.1890], [23.67%],
+    [partly cloudy], [daytime], [0.2402], [0.1781], [25.85%],
+    [rainy], [daytime], [0.2612], [0.1845], [29.35%],
+    [snowy], [daytime], [0.2072], [0.1593], [23.12%],
+    [clear], [night], [0.1317], [0.0961], [27.08%],
+    [clear], [dawn/dusk], [0.2224], [0.1772], [20.34%],
+    [overcast], [dawn/dusk], [0.2920], [0.2150], [26.38%],
+    [partly cloudy], [dawn/dusk], [0.1909], [0.1483], [22.32%],
+    [snowy], [dawn/dusk], [0.3030], [0.2208], [27.13%],
+    [rainy], [dawn/dusk], [0.1733], [0.1131], [34.78%],
+    [snowy], [night], [0.2225], [0.1615], [27.42%],
+    [rainy], [night], [0.3592], [0.3164], [11.91%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.2937], [0.2290], [22.03%],
+    [overcast], [daytime], [0.3008], [0.2404], [20.10%],
+    [partly cloudy], [daytime], [0.2979], [0.2288], [23.21%],
+    [rainy], [daytime], [0.3236], [0.2382], [26.39%],
+    [snowy], [daytime], [0.2575], [0.2116], [17.82%],
+    [clear], [night], [0.1794], [0.1354], [24.51%],
+    [clear], [dawn/dusk], [0.2707], [0.2255], [16.70%],
+    [overcast], [dawn/dusk], [0.3570], [0.2837], [20.55%],
+    [partly cloudy], [dawn/dusk], [0.2456], [0.1998], [18.64%],
+    [snowy], [dawn/dusk], [0.3595], [0.2774], [22.83%],
+    [rainy], [dawn/dusk], [0.2370], [0.1699], [28.32%],
+    [snowy], [night], [0.2665], [0.2150], [19.34%],
+    [rainy], [night], [0.4294], [0.3781], [11.96%],
+  ),
+  caption: [Dice-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V1 (S-R-V1)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.8238], [0.6838], [17.00%],
+    [overcast], [daytime], [0.8400], [0.7152], [14.86%],
+    [partly cloudy], [daytime], [0.8124], [0.6863], [15.53%],
+    [rainy], [daytime], [0.8284], [0.6593], [20.41%],
+    [snowy], [daytime], [0.7824], [0.6430], [17.82%],
+    [clear], [night], [0.6825], [0.5498], [19.44%],
+    [clear], [dawn/dusk], [0.8509], [0.7035], [17.32%],
+    [overcast], [dawn/dusk], [0.8769], [0.7411], [15.49%],
+    [partly cloudy], [dawn/dusk], [0.7605], [0.6074], [20.13%],
+    [snowy], [dawn/dusk], [0.8456], [0.6859], [18.88%],
+    [rainy], [dawn/dusk], [0.7122], [0.4363], [38.74%],
+    [snowy], [night], [0.7506], [0.5115], [31.86%],
+    [rainy], [night], [0.6995], [0.4457], [36.29%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.2875], [0.1760], [38.78%],
+    [overcast], [daytime], [0.2941], [0.1852], [37.04%],
+    [partly cloudy], [daytime], [0.2909], [0.1894], [34.90%],
+    [rainy], [daytime], [0.3391], [0.1948], [42.54%],
+    [snowy], [daytime], [0.2595], [0.1617], [37.69%],
+    [clear], [night], [0.1590], [0.0863], [45.73%],
+    [clear], [dawn/dusk], [0.2615], [0.1724], [34.07%],
+    [overcast], [dawn/dusk], [0.3524], [0.2135], [39.44%],
+    [partly cloudy], [dawn/dusk], [0.2536], [0.1686], [33.50%],
+    [snowy], [dawn/dusk], [0.3097], [0.1966], [36.52%],
+    [rainy], [dawn/dusk], [0.2427], [0.1214], [49.97%],
+    [snowy], [night], [0.2218], [0.1217], [45.13%],
+    [rainy], [night], [0.4945], [0.3048], [38.35%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.3712], [0.2364], [36.31%],
+    [overcast], [daytime], [0.3752], [0.2424], [35.38%],
+    [partly cloudy], [daytime], [0.3702], [0.2513], [32.10%],
+    [rainy], [daytime], [0.4285], [0.2626], [38.72%],
+    [snowy], [daytime], [0.3407], [0.2168], [36.38%],
+    [clear], [night], [0.2200], [0.1223], [44.41%],
+    [clear], [dawn/dusk], [0.3222], [0.2273], [29.45%],
+    [overcast], [dawn/dusk], [0.4406], [0.2786], [36.76%],
+    [partly cloudy], [dawn/dusk], [0.3317], [0.2349], [29.19%],
+    [snowy], [dawn/dusk], [0.3694], [0.2520], [31.79%],
+    [rainy], [dawn/dusk], [0.3060], [0.1719], [43.83%],
+    [snowy], [night], [0.2710], [0.1763], [34.96%],
+    [rainy], [night], [0.5901], [0.3964], [32.82%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V2 (S-R-V2)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.7477], [0.5878], [21.39%],
+    [overcast], [daytime], [0.7732], [0.5964], [22.86%],
+    [partly cloudy], [daytime], [0.7213], [0.5685], [21.18%],
+    [rainy], [daytime], [0.7496], [0.5211], [30.48%],
+    [snowy], [daytime], [0.7066], [0.5158], [27.00%],
+    [clear], [night], [0.5577], [0.3142], [43.66%],
+    [clear], [dawn/dusk], [0.8003], [0.6600], [17.53%],
+    [overcast], [dawn/dusk], [0.8223], [0.6553], [20.32%],
+    [partly cloudy], [dawn/dusk], [0.7246], [0.5468], [24.54%],
+    [snowy], [dawn/dusk], [0.7401], [0.5349], [27.72%],
+    [rainy], [dawn/dusk], [0.5338], [0.2831], [46.97%],
+    [snowy], [night], [0.6158], [0.2140], [65.26%],
+    [rainy], [night], [0.4313], [0.2979], [30.93%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.1670], [0.1106], [33.75%],
+    [overcast], [daytime], [0.1790], [0.1175], [34.40%],
+    [partly cloudy], [daytime], [0.1717], [0.1149], [33.06%],
+    [rainy], [daytime], [0.1928], [0.1142], [40.76%],
+    [snowy], [daytime], [0.1632], [0.1023], [37.28%],
+    [clear], [night], [0.1039], [0.0445], [57.21%],
+    [clear], [dawn/dusk], [0.1873], [0.1309], [30.12%],
+    [overcast], [dawn/dusk], [0.2134], [0.1380], [35.36%],
+    [partly cloudy], [dawn/dusk], [0.1722], [0.1067], [38.07%],
+    [snowy], [dawn/dusk], [0.2283], [0.1326], [41.92%],
+    [rainy], [dawn/dusk], [0.1498], [0.0700], [53.24%],
+    [snowy], [night], [0.1789], [0.0520], [70.94%],
+    [rainy], [night], [0.3263], [0.1798], [44.88%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.2040], [0.1455], [28.67%],
+    [overcast], [daytime], [0.2155], [0.1531], [28.94%],
+    [partly cloudy], [daytime], [0.2111], [0.1520], [27.98%],
+    [rainy], [daytime], [0.2320], [0.1546], [33.36%],
+    [snowy], [daytime], [0.2037], [0.1398], [31.38%],
+    [clear], [night], [0.1457], [0.0689], [52.71%],
+    [clear], [dawn/dusk], [0.2224], [0.1655], [25.58%],
+    [overcast], [dawn/dusk], [0.2520], [0.1776], [29.51%],
+    [partly cloudy], [dawn/dusk], [0.2163], [0.1439], [33.50%],
+    [snowy], [dawn/dusk], [0.2776], [0.1808], [34.87%],
+    [rainy], [dawn/dusk], [0.2011], [0.1102], [45.21%],
+    [snowy], [night], [0.2315], [0.0883], [61.85%],
+    [rainy], [night], [0.3691], [0.2437], [33.97%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V6 (S-NR-V6)]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9038], [0.0100], [98.89%],
+    [overcast], [daytime], [0.9051], [0.0079], [99.13%],
+    [partly cloudy], [daytime], [0.8900], [0.0101], [98.87%],
+    [rainy], [daytime], [0.9060], [0.0106], [98.83%],
+    [snowy], [daytime], [0.8751], [0.0103], [98.83%],
+    [clear], [night], [0.8413], [0.0044], [99.48%],
+    [clear], [dawn/dusk], [0.9265], [0.0078], [99.16%],
+    [overcast], [dawn/dusk], [0.9463], [0.0115], [98.79%],
+    [partly cloudy], [dawn/dusk], [0.8568], [0.0030], [99.65%],
+    [snowy], [dawn/dusk], [0.9467], [0.0136], [98.56%],
+    [rainy], [dawn/dusk], [0.7993], [0.0117], [98.54%],
+    [snowy], [night], [0.7948], [0.0005], [99.94%],
+    [rainy], [night], [0.9646], [0.0056], [99.42%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.4530], [0.0036], [99.20%],
+    [overcast], [daytime], [0.4497], [0.0024], [99.48%],
+    [partly cloudy], [daytime], [0.4532], [0.0030], [99.35%],
+    [rainy], [daytime], [0.5187], [0.0036], [99.31%],
+    [snowy], [daytime], [0.4254], [0.0033], [99.21%],
+    [clear], [night], [0.3761], [0.0013], [99.65%],
+    [clear], [dawn/dusk], [0.4389], [0.0025], [99.44%],
+    [overcast], [dawn/dusk], [0.5675], [0.0033], [99.42%],
+    [partly cloudy], [dawn/dusk], [0.3934], [0.0010], [99.76%],
+    [snowy], [dawn/dusk], [0.5355], [0.0062], [98.83%],
+    [rainy], [dawn/dusk], [0.3267], [0.0039], [98.80%],
+    [snowy], [night], [0.2738], [0.0002], [99.92%],
+    [rainy], [night], [0.6212], [0.0014], [99.77%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.5436], [0.0072], [98.68%],
+    [overcast], [daytime], [0.5414], [0.0047], [99.14%],
+    [partly cloudy], [daytime], [0.5389], [0.0058], [98.91%],
+    [rainy], [daytime], [0.6125], [0.0071], [98.85%],
+    [snowy], [daytime], [0.5180], [0.0066], [98.72%],
+    [clear], [night], [0.4651], [0.0027], [99.43%],
+    [clear], [dawn/dusk], [0.5142], [0.0049], [99.05%],
+    [overcast], [dawn/dusk], [0.6537], [0.0065], [99.00%],
+    [partly cloudy], [dawn/dusk], [0.4746], [0.0019], [99.60%],
+    [snowy], [dawn/dusk], [0.6126], [0.0118], [98.08%],
+    [rainy], [dawn/dusk], [0.4019], [0.0077], [98.08%],
+    [snowy], [night], [0.3235], [0.0005], [99.86%],
+    [rainy], [night], [0.6777], [0.0028], [99.59%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 2)[
