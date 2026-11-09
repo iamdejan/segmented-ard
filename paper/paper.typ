@@ -2222,7 +2222,61 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Latency and Hardware Utilization]
+  #text(size: 12pt)[Latency and Hardware Utilization]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] High-Level Summary]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] Overhead Summary]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] Inference Summary]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] End-to-End Summary]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] U-Net Component Profiling]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] Encoder-only Latency]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] Decoder-only Latency]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[[WIP] Segmentation-head Latency]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[[WIP] Hardware Utilization]
 ]
 #v(2 * line_spacing)
 
