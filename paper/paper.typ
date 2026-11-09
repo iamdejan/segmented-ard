@@ -1675,6 +1675,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   table(
     columns: 5,
     table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9132], [0.0392], [95.71%],
+    [overcast], [daytime], [0.9152], [0.0355], [96.12%],
+    [partly cloudy], [daytime], [0.9064], [0.0278], [96.93%],
+    [rainy], [daytime], [0.9080], [0.0263], [97.11%],
+    [snowy], [daytime], [0.9063], [0.0488], [94.61%],
+    [clear], [night], [0.8705], [0.0209], [97.60%],
+    [clear], [dawn/dusk], [0.9295], [0.0446], [95.20%],
+    [overcast], [dawn/dusk], [0.9482], [0.0283], [97.01%],
+    [partly cloudy], [dawn/dusk], [0.8445], [0.0176], [97.92%],
+    [snowy], [dawn/dusk], [0.9364], [0.0369], [96.06%],
+    [rainy], [dawn/dusk], [0.8311], [0.0339], [95.92%],
+    [snowy], [night], [0.8293], [0.0178], [97.85%],
+    [rainy], [night], [0.9547], [0.0574], [93.99%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
       [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
     ),
     [clear], [daytime], [0.5168], [0.0114], [97.79%],
@@ -1702,6 +1731,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   #text(size: 12pt)[[WIP] Student - Non-Robust - V5 (S-NR-V5)]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9077], [0.0154], [98.31%],
+    [overcast], [daytime], [0.9113], [0.0136], [98.50%],
+    [partly cloudy], [daytime], [0.8977], [0.0158], [98.24%],
+    [rainy], [daytime], [0.9102], [0.0096], [98.94%],
+    [snowy], [daytime], [0.8840], [0.0235], [97.34%],
+    [clear], [night], [0.8117], [0.0091], [98.88%],
+    [clear], [dawn/dusk], [0.9249], [0.0160], [98.27%],
+    [overcast], [dawn/dusk], [0.9408], [0.0126], [98.66%],
+    [partly cloudy], [dawn/dusk], [0.8495], [0.0053], [99.38%],
+    [snowy], [dawn/dusk], [0.9330], [0.0179], [98.08%],
+    [rainy], [dawn/dusk], [0.8402], [0.0066], [99.22%],
+    [snowy], [night], [0.8377], [0.0152], [98.18%],
+    [rainy], [night], [0.9716], [0.0011], [99.88%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
 
 #set par(
   justify: false
@@ -1745,6 +1803,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   table(
     columns: 5,
     table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.8051], [0.7038], [12.59%],
+    [overcast], [daytime], [0.8338], [0.7403], [11.21%],
+    [partly cloudy], [daytime], [0.7889], [0.6914], [12.35%],
+    [rainy], [daytime], [0.8042], [0.6805], [15.38%],
+    [snowy], [daytime], [0.7607], [0.6421], [15.59%],
+    [clear], [night], [0.6646], [0.5753], [13.44%],
+    [clear], [dawn/dusk], [0.8262], [0.7446], [9.87%],
+    [overcast], [dawn/dusk], [0.8415], [0.7359], [12.55%],
+    [partly cloudy], [dawn/dusk], [0.7199], [0.6312], [12.32%],
+    [snowy], [dawn/dusk], [0.8365], [0.7015], [16.14%],
+    [rainy], [dawn/dusk], [0.5891], [0.4211], [28.53%],
+    [snowy], [night], [0.7501], [0.6240], [16.81%],
+    [rainy], [night], [0.5687], [0.4545], [20.09%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
       [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
     ),
     [clear], [daytime], [0.2355], [0.1759], [25.32%],
@@ -1772,6 +1859,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   #text(size: 12pt)[[WIP] Student - Robust - V1 (S-R-V1)]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.8238], [0.6838], [17.00%],
+    [overcast], [daytime], [0.8400], [0.7152], [14.86%],
+    [partly cloudy], [daytime], [0.8124], [0.6863], [15.53%],
+    [rainy], [daytime], [0.8284], [0.6593], [20.41%],
+    [snowy], [daytime], [0.7824], [0.6430], [17.82%],
+    [clear], [night], [0.6825], [0.5498], [19.44%],
+    [clear], [dawn/dusk], [0.8509], [0.7035], [17.32%],
+    [overcast], [dawn/dusk], [0.8769], [0.7411], [15.49%],
+    [partly cloudy], [dawn/dusk], [0.7605], [0.6074], [20.13%],
+    [snowy], [dawn/dusk], [0.8456], [0.6859], [18.88%],
+    [rainy], [dawn/dusk], [0.7122], [0.4363], [38.74%],
+    [snowy], [night], [0.7506], [0.5115], [31.86%],
+    [rainy], [night], [0.6995], [0.4457], [36.29%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
 
 #set par(
   justify: false
@@ -1815,6 +1931,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   table(
     columns: 5,
     table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.7477], [0.5878], [21.39%],
+    [overcast], [daytime], [0.7732], [0.5964], [22.86%],
+    [partly cloudy], [daytime], [0.7213], [0.5685], [21.18%],
+    [rainy], [daytime], [0.7496], [0.5211], [30.48%],
+    [snowy], [daytime], [0.7066], [0.5158], [27.00%],
+    [clear], [night], [0.5577], [0.3142], [43.66%],
+    [clear], [dawn/dusk], [0.8003], [0.6600], [17.53%],
+    [overcast], [dawn/dusk], [0.8223], [0.6553], [20.32%],
+    [partly cloudy], [dawn/dusk], [0.7246], [0.5468], [24.54%],
+    [snowy], [dawn/dusk], [0.7401], [0.5349], [27.72%],
+    [rainy], [dawn/dusk], [0.5338], [0.2831], [46.97%],
+    [snowy], [night], [0.6158], [0.2140], [65.26%],
+    [rainy], [night], [0.4313], [0.2979], [30.93%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
       [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
     ),
     [clear], [daytime], [0.1670], [0.1106], [33.75%],
@@ -1842,6 +1987,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   #text(size: 12pt)[[WIP] Student - Non-Robust - V6 (S-NR-V6)]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Pixel Accuracy*], [*Adversarial Pixel Accuracy*], [*Degradation of Pixel Accuracy*]
+    ),
+    [clear], [daytime], [0.9038], [0.0100], [98.89%],
+    [overcast], [daytime], [0.9051], [0.0079], [99.13%],
+    [partly cloudy], [daytime], [0.8900], [0.0101], [98.87%],
+    [rainy], [daytime], [0.9060], [0.0106], [98.83%],
+    [snowy], [daytime], [0.8751], [0.0103], [98.83%],
+    [clear], [night], [0.8413], [0.0044], [99.48%],
+    [clear], [dawn/dusk], [0.9265], [0.0078], [99.16%],
+    [overcast], [dawn/dusk], [0.9463], [0.0115], [98.79%],
+    [partly cloudy], [dawn/dusk], [0.8568], [0.0030], [99.65%],
+    [snowy], [dawn/dusk], [0.9467], [0.0136], [98.56%],
+    [rainy], [dawn/dusk], [0.7993], [0.0117], [98.54%],
+    [snowy], [night], [0.7948], [0.0005], [99.94%],
+    [rainy], [night], [0.9646], [0.0056], [99.42%],
+  ),
+  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
 
 #set par(
   justify: false
