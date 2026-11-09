@@ -389,6 +389,8 @@ def load_trained_model(checkpoint_path: str, device: torch.device) -> nn.Module:
     2. Load it with ``torch.load`` using ``weights_only=False`` to unpack the
        serialized ``nn.Module`` object produced by the training scripts.
     3. Transfer it to the target ``device`` and switch into ``eval()`` mode.
+    4. Return the eager model so the component profiler can attach hooks to
+       the original U-Net modules.
 
     Parameters
     ----------
@@ -400,7 +402,7 @@ def load_trained_model(checkpoint_path: str, device: torch.device) -> nn.Module:
     Returns
     -------
     nn.Module
-        Loaded PyTorch segmentation model ready for evaluation.
+        Loaded, uncompiled PyTorch segmentation model ready for evaluation.
 
     Raises
     ------
@@ -426,6 +428,57 @@ def load_trained_model(checkpoint_path: str, device: torch.device) -> nn.Module:
     model.eval()
 
     return model
+
+
+def compile_inference_model(model: nn.Module, compile_model: bool = True) -> nn.Module:
+    """Optionally compile a model for steady-state inference latency evaluation.
+
+    This matches the static-shape TorchInductor configuration used by
+    ``evaluate_robustness.py`` while retaining the original eager model for
+    hook-based U-Net component profiling.
+
+    Steps
+    -----
+    1. Return the eager model unchanged when compilation is disabled.
+    2. Otherwise compile with static shapes and CUDA-graph support, disabling
+       max-autotune paths that can warn on GPUs with few streaming multiprocessors.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Evaluation-mode model to optionally compile.
+    compile_model : bool, optional
+        Whether to use ``torch.compile``. Defaults to True.
+
+    Returns
+    -------
+    nn.Module
+        The compiled wrapper, or the original model if compilation is disabled.
+
+    Raises
+    ------
+    RuntimeError
+        If the PyTorch compilation backend fails during compilation or execution.
+    """
+    if not compile_model:
+        return model
+
+    # Fixed-size BDD100k inputs permit static graphs. Keep the exact compile
+    # options from the robustness evaluator for consistent execution settings.
+    # Compilation is lazy; the benchmark's existing warm-up forwards trigger it
+    # before inference timing and resource monitoring begin.
+    return cast(
+        nn.Module,
+        torch.compile(
+            model,
+            dynamic=False,
+            options={
+                "triton.cudagraphs": True,
+                "max_autotune": False,
+                "max_autotune_gemm": False,
+            },
+        ),
+    )
 
 
 def _read_max_cpu_temperature_c() -> Optional[float]:
@@ -1273,11 +1326,12 @@ def parse_arguments() -> argparse.Namespace:
     -----
     1. Require one named checkpoint specification in ``NAME=PATH`` form.
     2. Accept an optional resource-monitor sampling interval in milliseconds.
+    3. Allow disabling default model compilation with ``--disable-compile``.
 
     Returns
     -------
     argparse.Namespace
-        Parsed checkpoint and resource-sampling arguments.
+        Parsed checkpoint, resource-sampling, and compilation arguments.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -1301,6 +1355,14 @@ def parse_arguments() -> argparse.Namespace:
             "Defaults to 250 ms. Lower values may perturb latency more."
         ),
     )
+    parser.add_argument(
+        "--disable-compile",
+        action="store_true",
+        help=(
+            "Disable torch.compile and benchmark the eager-mode model instead. "
+            "Compilation is enabled by default."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1314,13 +1376,15 @@ def main() -> None:
 
     Steps
     -----
-    1. Parse options and load the trained segmentation checkpoint.
+    1. Parse options, load the eager checkpoint, and compile for primary latency
+       measurement unless ``--disable-compile`` was requested.
     2. Reconstruct the BDD100k test split and build an image-only synchronous
        DataLoader so preprocessing overhead is measurable per image.
     3. Measure inference, computational overhead, and their additive end-to-end
        latency while collecting resource peaks.
-    4. Run a second pass that profiles SMP U-Net encoder, decoder, and segmentation
-       head latency without changing the primary end-to-end benchmark.
+    4. Run a second pass on the eager model to profile SMP U-Net encoder,
+       decoder, and segmentation head via hooks. These timings are eager-mode
+       component timings even when the primary benchmark is compiled.
     5. Print latency distributions and resource-use summaries.
     6. Save the same statistics and resource peaks to checkpoint-specific CSV.
 
@@ -1334,6 +1398,8 @@ def main() -> None:
     ValueError
         If the requested resource sampling interval is not positive or latency
         measurement constraints are violated.
+    RuntimeError
+        If compilation or a compiled forward pass fails.
     """
     args = parse_arguments()
     checkpoint_name, checkpoint_path = args.checkpoint
@@ -1347,8 +1413,12 @@ def main() -> None:
 
     print(f"Checkpoint name: {checkpoint_name}")
     print(f"Loading checkpoint from: {checkpoint_path}")
-    model = load_trained_model(checkpoint_path, Configuration.DEVICE)
+    # Keep the original module for the second pass: forward hooks need to run
+    # on the eager U-Net components rather than an optimized compiled graph.
+    eager_model = load_trained_model(checkpoint_path, Configuration.DEVICE)
+    model = compile_inference_model(eager_model, compile_model=not args.disable_compile)
     print(f"Target execution device: {Configuration.DEVICE}")
+    print(f"torch.compile enabled: {not args.disable_compile}")
 
     if Configuration.DEVICE.type == "cuda":
         device_index = (
@@ -1398,9 +1468,11 @@ def main() -> None:
     overhead_stats = compute_latency_statistics(latency_measurements["overhead"])
     end_to_end_stats = compute_latency_statistics(latency_measurements["end_to_end"])
 
-    print("Profiling U-Net encoder/decoder components on a second pass...")
+    # A compiled graph may bypass module-level forward hooks. Profile the same
+    # weights in eager mode to retain meaningful encoder/decoder/head intervals.
+    print("Profiling U-Net encoder/decoder components in eager mode on a second pass...")
     component_measurements = measure_unet_component_latency_ms(
-        model,
+        eager_model,
         test_loader,
         Configuration.DEVICE,
     )
