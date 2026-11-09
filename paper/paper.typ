@@ -900,7 +900,7 @@ As previously mentioned in Section 3.1 Research Design, the results presented in
   inset: (left: tab_length)
 )[
   - A non-robust student distilled from a non-robust teacher. Moving forward, this student will be named as "S-NR-V5."
-  - A student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
+  - A non-robust student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
   - A robust student distilled from a non-robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this student will be named as "S-R-V1."
   - A robust student distilled from a robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this will be named "S-R-V2."
 ]
@@ -1664,7 +1664,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Teacher - Non-Robust - V5 (T-NR-V5)]
+  #text(size: 12pt)[Teacher - Non-Robust - V5 (T-NR-V5)]
 ]
 #v(2 * line_spacing)
 
@@ -1726,9 +1726,38 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   justify: true
 )
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.6103], [0.0224], [96.33%],
+    [overcast], [daytime], [0.5782], [0.0205], [96.45%],
+    [partly cloudy], [daytime], [0.5885], [0.0144], [97.55%],
+    [rainy], [daytime], [0.6769], [0.0132], [98.05%],
+    [snowy], [daytime], [0.6336], [0.0268], [95.78%],
+    [clear], [night], [0.5689], [0.0106], [98.14%],
+    [clear], [dawn/dusk], [0.5639], [0.0192], [96.59%],
+    [overcast], [dawn/dusk], [0.7341], [0.0159], [97.83%],
+    [partly cloudy], [dawn/dusk], [0.5762], [0.0108], [98.12%],
+    [snowy], [dawn/dusk], [0.6490], [0.0250], [96.14%],
+    [rainy], [dawn/dusk], [0.5477], [0.0249], [95.46%],
+    [snowy], [night], [0.5657], [0.0108], [98.09%],
+    [rainy], [night], [0.6621], [0.0370], [94.41%],
+  ),
+  caption: [Dice-based weather-time of day pair results for T-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Student - Non-Robust - V5 (S-NR-V5)]
+  #text(size: 12pt)[Student - Non-Robust - V5 (S-NR-V5)]
 ]
 #v(2 * line_spacing)
 
@@ -1790,9 +1819,38 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   justify: true
 )
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.6027], [0.0092], [98.47%],
+    [overcast], [daytime], [0.5821], [0.0088], [98.49%],
+    [partly cloudy], [daytime], [0.5729], [0.0086], [98.49%],
+    [rainy], [daytime], [0.6859], [0.0061], [99.11%],
+    [snowy], [daytime], [0.5908], [0.0105], [98.22%],
+    [clear], [night], [0.5098], [0.0030], [99.41%],
+    [clear], [dawn/dusk], [0.5733], [0.0089], [98.45%],
+    [overcast], [dawn/dusk], [0.6888], [0.0064], [99.06%],
+    [partly cloudy], [dawn/dusk], [0.6081], [0.0042], [99.31%],
+    [snowy], [dawn/dusk], [0.6021], [0.0171], [97.16%],
+    [rainy], [dawn/dusk], [0.5551], [0.0060], [98.92%],
+    [snowy], [night], [0.4480], [0.0103], [97.70%],
+    [rainy], [night], [0.6829], [0.0067], [99.02%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Teacher - Robust - V5 (T-R-V5)]
+  #text(size: 12pt)[Teacher - Robust - V5 (T-R-V5)]
 ]
 #v(2 * line_spacing)
 
@@ -1854,9 +1912,38 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   justify: true
 )
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.2937], [0.2290], [22.03%],
+    [overcast], [daytime], [0.3008], [0.2404], [20.10%],
+    [partly cloudy], [daytime], [0.2979], [0.2288], [23.21%],
+    [rainy], [daytime], [0.3236], [0.2382], [26.39%],
+    [snowy], [daytime], [0.2575], [0.2116], [17.82%],
+    [clear], [night], [0.1794], [0.1354], [24.51%],
+    [clear], [dawn/dusk], [0.2707], [0.2255], [16.70%],
+    [overcast], [dawn/dusk], [0.3570], [0.2837], [20.55%],
+    [partly cloudy], [dawn/dusk], [0.2456], [0.1998], [18.64%],
+    [snowy], [dawn/dusk], [0.3595], [0.2774], [22.83%],
+    [rainy], [dawn/dusk], [0.2370], [0.1699], [28.32%],
+    [snowy], [night], [0.2665], [0.2150], [19.34%],
+    [rainy], [night], [0.4294], [0.3781], [11.96%],
+  ),
+  caption: [Dice-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Student - Robust - V1 (S-R-V1)]
+  #text(size: 12pt)[Student - Robust - V1 (S-R-V1)]
 ]
 #v(2 * line_spacing)
 
@@ -1918,9 +2005,38 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   justify: true
 )
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.3712], [0.2364], [36.31%],
+    [overcast], [daytime], [0.3752], [0.2424], [35.38%],
+    [partly cloudy], [daytime], [0.3702], [0.2513], [32.10%],
+    [rainy], [daytime], [0.4285], [0.2626], [38.72%],
+    [snowy], [daytime], [0.3407], [0.2168], [36.38%],
+    [clear], [night], [0.2200], [0.1223], [44.41%],
+    [clear], [dawn/dusk], [0.3222], [0.2273], [29.45%],
+    [overcast], [dawn/dusk], [0.4406], [0.2786], [36.76%],
+    [partly cloudy], [dawn/dusk], [0.3317], [0.2349], [29.19%],
+    [snowy], [dawn/dusk], [0.3694], [0.2520], [31.79%],
+    [rainy], [dawn/dusk], [0.3060], [0.1719], [43.83%],
+    [snowy], [night], [0.2710], [0.1763], [34.96%],
+    [rainy], [night], [0.5901], [0.3964], [32.82%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Student - Robust - V2 (S-R-V2)]
+  #text(size: 12pt)[Student - Robust - V2 (S-R-V2)]
 ]
 #v(2 * line_spacing)
 
@@ -1982,9 +2098,38 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   justify: true
 )
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.2040], [0.1455], [28.67%],
+    [overcast], [daytime], [0.2155], [0.1531], [28.94%],
+    [partly cloudy], [daytime], [0.2111], [0.1520], [27.98%],
+    [rainy], [daytime], [0.2320], [0.1546], [33.36%],
+    [snowy], [daytime], [0.2037], [0.1398], [31.38%],
+    [clear], [night], [0.1457], [0.0689], [52.71%],
+    [clear], [dawn/dusk], [0.2224], [0.1655], [25.58%],
+    [overcast], [dawn/dusk], [0.2520], [0.1776], [29.51%],
+    [partly cloudy], [dawn/dusk], [0.2163], [0.1439], [33.50%],
+    [snowy], [dawn/dusk], [0.2776], [0.1808], [34.87%],
+    [rainy], [dawn/dusk], [0.2011], [0.1102], [45.21%],
+    [snowy], [night], [0.2315], [0.0883], [61.85%],
+    [rainy], [night], [0.3691], [0.2437], [33.97%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Student - Non-Robust - V6 (S-NR-V6)]
+  #text(size: 12pt)[Student - Non-Robust - V6 (S-NR-V6)]
 ]
 #v(2 * line_spacing)
 
@@ -2041,6 +2186,35 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [rainy], [night], [0.6212], [0.0014], [99.77%],
   ),
   caption: [Mean IoU-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Dice*], [*Adversarial Dice*], [*Degradation of Dice*]
+    ),
+    [clear], [daytime], [0.5436], [0.0072], [98.68%],
+    [overcast], [daytime], [0.5414], [0.0047], [99.14%],
+    [partly cloudy], [daytime], [0.5389], [0.0058], [98.91%],
+    [rainy], [daytime], [0.6125], [0.0071], [98.85%],
+    [snowy], [daytime], [0.5180], [0.0066], [98.72%],
+    [clear], [night], [0.4651], [0.0027], [99.43%],
+    [clear], [dawn/dusk], [0.5142], [0.0049], [99.05%],
+    [overcast], [dawn/dusk], [0.6537], [0.0065], [99.00%],
+    [partly cloudy], [dawn/dusk], [0.4746], [0.0019], [99.60%],
+    [snowy], [dawn/dusk], [0.6126], [0.0118], [98.08%],
+    [rainy], [dawn/dusk], [0.4019], [0.0077], [98.08%],
+    [snowy], [night], [0.3235], [0.0005], [99.86%],
+    [rainy], [night], [0.6777], [0.0028], [99.59%],
+  ),
+  caption: [Dice-based weather-time of day pair results for S-NR-V6.]
 )
 #set par(
   justify: true
