@@ -1444,6 +1444,9 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 ]
 #v(2 * line_spacing)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 4,
@@ -1472,7 +1475,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for T-NR-V5.]
 )
+#set par(
+  justify: true
+)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 4,
@@ -1501,7 +1510,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for S-NR-V5.]
 )
+#set par(
+  justify: true
+)
 
+#set par(
+  justify: true
+)
 #figure(
   table(
     columns: 4,
@@ -1530,7 +1545,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for T-R-V5.]
 )
+#set par(
+  justify: true
+)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 4,
@@ -1559,7 +1580,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for S-R-V1.]
 )
+#set par(
+  justify: true
+)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 4,
@@ -1588,7 +1615,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for S-R-V2.]
 )
+#set par(
+  justify: true
+)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 4,
@@ -1617,10 +1650,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   ),
   caption: [Per-class results for S-NR-V6.]
 )
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] Results Based on Weather and Time of Day]
+  #text(size: 12pt)[Results Based on Weather and Time of Day]
 ]
 #v(2 * line_spacing)
 
@@ -1628,10 +1664,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[Teacher - Non-Robust - V5 (T-NR-V5)]
+  #text(size: 12pt)[[WIP] Teacher - Non-Robust - V5 (T-NR-V5)]
 ]
 #v(2 * line_spacing)
 
+#set par(
+  justify: false
+)
 #figure(
   table(
     columns: 5,
@@ -1654,6 +1693,9 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   ),
   caption: [Mean IoU-based weather-time of day pair results for T-NR-V5.]
 )
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -1661,11 +1703,69 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 ]
 #v(2 * line_spacing)
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.5078], [0.0047], [99.08%],
+    [overcast], [daytime], [0.4895], [0.0045], [99.09%],
+    [partly cloudy], [daytime], [0.4859], [0.0044], [99.10%],
+    [rainy], [daytime], [0.5832], [0.0031], [99.47%],
+    [snowy], [daytime], [0.4863], [0.0054], [98.90%],
+    [clear], [night], [0.4045], [0.0015], [99.63%],
+    [clear], [dawn/dusk], [0.4753], [0.0045], [99.05%],
+    [overcast], [dawn/dusk], [0.5892], [0.0033], [99.44%],
+    [partly cloudy], [dawn/dusk], [0.5067], [0.0021], [99.58%],
+    [snowy], [dawn/dusk], [0.5122], [0.0088], [98.28%],
+    [rainy], [dawn/dusk], [0.4546], [0.0031], [99.32%],
+    [snowy], [night], [0.3632], [0.0053], [98.53%],
+    [rainy], [night], [0.6201], [0.0034], [99.45%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-NR-V5.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[[WIP] Teacher - Robust - V5 (T-R-V5)]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.2355], [0.1759], [25.32%],
+    [overcast], [daytime], [0.2476], [0.1890], [23.67%],
+    [partly cloudy], [daytime], [0.2402], [0.1781], [25.85%],
+    [rainy], [daytime], [0.2612], [0.1845], [29.35%],
+    [snowy], [daytime], [0.2072], [0.1593], [23.12%],
+    [clear], [night], [0.1317], [0.0961], [27.08%],
+    [clear], [dawn/dusk], [0.2224], [0.1772], [20.34%],
+    [overcast], [dawn/dusk], [0.2920], [0.2150], [26.38%],
+    [partly cloudy], [dawn/dusk], [0.1909], [0.1483], [22.32%],
+    [snowy], [dawn/dusk], [0.3030], [0.2208], [27.13%],
+    [rainy], [dawn/dusk], [0.1733], [0.1131], [34.78%],
+    [snowy], [night], [0.2225], [0.1615], [27.42%],
+    [rainy], [night], [0.3592], [0.3164], [11.91%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for T-R-V5.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -1673,17 +1773,104 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 ]
 #v(2 * line_spacing)
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.2875], [0.1760], [38.78%],
+    [overcast], [daytime], [0.2941], [0.1852], [37.04%],
+    [partly cloudy], [daytime], [0.2909], [0.1894], [34.90%],
+    [rainy], [daytime], [0.3391], [0.1948], [42.54%],
+    [snowy], [daytime], [0.2595], [0.1617], [37.69%],
+    [clear], [night], [0.1590], [0.0863], [45.73%],
+    [clear], [dawn/dusk], [0.2615], [0.1724], [34.07%],
+    [overcast], [dawn/dusk], [0.3524], [0.2135], [39.44%],
+    [partly cloudy], [dawn/dusk], [0.2536], [0.1686], [33.50%],
+    [snowy], [dawn/dusk], [0.3097], [0.1966], [36.52%],
+    [rainy], [dawn/dusk], [0.2427], [0.1214], [49.97%],
+    [snowy], [night], [0.2218], [0.1217], [45.13%],
+    [rainy], [night], [0.4945], [0.3048], [38.35%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-R-V1.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[[WIP] Student - Robust - V2 (S-R-V2)]
 ]
 #v(2 * line_spacing)
 
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.1670], [0.1106], [33.75%],
+    [overcast], [daytime], [0.1790], [0.1175], [34.40%],
+    [partly cloudy], [daytime], [0.1717], [0.1149], [33.06%],
+    [rainy], [daytime], [0.1928], [0.1142], [40.76%],
+    [snowy], [daytime], [0.1632], [0.1023], [37.28%],
+    [clear], [night], [0.1039], [0.0445], [57.21%],
+    [clear], [dawn/dusk], [0.1873], [0.1309], [30.12%],
+    [overcast], [dawn/dusk], [0.2134], [0.1380], [35.36%],
+    [partly cloudy], [dawn/dusk], [0.1722], [0.1067], [38.07%],
+    [snowy], [dawn/dusk], [0.2283], [0.1326], [41.92%],
+    [rainy], [dawn/dusk], [0.1498], [0.0700], [53.24%],
+    [snowy], [night], [0.1789], [0.0520], [70.94%],
+    [rainy], [night], [0.3263], [0.1798], [44.88%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-R-V2.]
+)
+#set par(
+  justify: true
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Student - Non-Robust - V6 (S-R-V6)]
+  #text(size: 12pt)[[WIP] Student - Non-Robust - V6 (S-NR-V6)]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 5,
+    table.header(
+      [*Weather*], [*Time of Day*], [*Clean Mean IoU*], [*Adversarial Mean IoU*], [*Degradation of Mean IoU*]
+    ),
+    [clear], [daytime], [0.4530], [0.0036], [99.20%],
+    [overcast], [daytime], [0.4497], [0.0024], [99.48%],
+    [partly cloudy], [daytime], [0.4532], [0.0030], [99.35%],
+    [rainy], [daytime], [0.5187], [0.0036], [99.31%],
+    [snowy], [daytime], [0.4254], [0.0033], [99.21%],
+    [clear], [night], [0.3761], [0.0013], [99.65%],
+    [clear], [dawn/dusk], [0.4389], [0.0025], [99.44%],
+    [overcast], [dawn/dusk], [0.5675], [0.0033], [99.42%],
+    [partly cloudy], [dawn/dusk], [0.3934], [0.0010], [99.76%],
+    [snowy], [dawn/dusk], [0.5355], [0.0062], [98.83%],
+    [rainy], [dawn/dusk], [0.3267], [0.0039], [98.80%],
+    [snowy], [night], [0.2738], [0.0002], [99.92%],
+    [rainy], [night], [0.6212], [0.0014], [99.77%],
+  ),
+  caption: [Mean IoU-based weather-time of day pair results for S-NR-V6.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 2)[
