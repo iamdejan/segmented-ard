@@ -2228,51 +2228,201 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] High-Level Summary]
+  #text(size: 12pt)[High-Level Results]
 ]
 #v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Overhead Summary]
+  #text(size: 12pt)[Computational Overhead]
 ]
 #v(2 * line_spacing)
 
-#v(2 * line_spacing)
-#heading(level: 4)[
-  #text(size: 12pt)[[WIP] Inference Summary]
-]
-#v(2 * line_spacing)
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [10.1593], [10.0576], [11.1244], [9.9295], [9.7235], [9.6508],
+    [*P50 (median)*], [11.2397], [11.4350], [12.5241], [10.9850], [10.8566], [10.7845],
+    [*Average*], [11.6454], [11.8126], [12.8739], [11.2504], [11.0716], [11.0908],
+    [*P75*], [12.5955], [12.9150], [14.1808], [12.2466], [12.1228], [12.2175],
+    [*P90*], [14.2389], [14.6516], [15.8132], [13.7367], [13.4471], [13.8605],
+    [*P95*], [15.5260], [15.7906], [16.7003], [14.7941], [14.3316], [14.6992],
+    [*P99*], [20.2258], [18.5832], [26.2736], [16.7716], [16.4604], [16.1041],
+    [*Max*], [41.1558], [35.3790], [37.3602], [28.4346], [18.7762], [41.3165],
+  ),
+  caption: [Computational overhead summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] End-to-End Summary]
+  #text(size: 12pt)[Inference Latency]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [11.1196], [14.1500], [11.1521], [14.3310], [14.2485], [14.3120],
+    [*P50 (median)*], [11.1670], [11.2777], [11.1670], [14.7247], [14.6042], [14.7255],
+    [*Average*], [11.8478], [15.6577], [12.1195], [16.2052], [15.6422], [15.8194],
+    [*P75*], [11.4772], [15.5334], [12.0182], [15.9747], [15.6567], [15.4772],
+    [*P90*], [13.4005], [19.8223], [14.1266], [21.3563], [18.9074], [20.1007],
+    [*P95*], [15.6508], [23.7471], [16.2358], [25.7915], [22.1863], [24.5570],
+    [*P99*], [19.6308], [28.3681], [21.9586], [28.8592], [29.0575], [28.9000],
+    [*Max*], [31.9817], [30.3471], [33.6524], [32.5069], [31.7734], [33.1412],
+  ),
+  caption: [Inference latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[End-to-End Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [21.6284], [24.8999], [22.6449], [24.7260], [24.5314], [24.3598],
+    [*P50 (median)*], [22.7929], [26.4949], [24.3285], [26.2350], [25.8976], [25.8151],
+    [*Average*], [23.4932], [27.4703], [24.9934], [27.4556], [26.7138], [26.9102],
+    [*P75*], [24.5322], [28.6994], [26.3384], [28.8034], [27.8036], [28.0598],
+    [*P90*], [26.5159], [32.5144], [28.2516], [33.5762], [30.6825], [31.3651],
+    [*P95*], [28.2264], [35.6270], [30.4456], [36.9143], [34.0085], [35.9358],
+    [*P99*], [35.1956], [41.9501], [45.2076], [40.8194], [39.9296], [42.5772],
+    [*Max*], [60.1147], [61.1872], [70.8066], [47.2117], [47.8895], [72.6499],
+  ),
+  caption: [End-to-end latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[[WIP] U-Net Component Profiling]
+  #text(size: 12pt)[U-Net Component Profiling]
 ]
 #v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Encoder-only Latency]
+  #text(size: 12pt)[Encoder-only Latency]
 ]
 #v(2 * line_spacing)
 
-#v(2 * line_spacing)
-#heading(level: 4)[
-  #text(size: 12pt)[[WIP] Decoder-only Latency]
-]
-#v(2 * line_spacing)
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [4.9133], [7.2440], [4.9284], [7.3395], [7.2473], [7.4538],
+    [*P50 (median)*], [4.9342], [7.6169], [4.9886], [7.7913], [7.6090], [7.8413],
+    [*Average*], [5.2833], [8.4797], [5.6355], [9.1072], [8.4189], [8.7080],
+    [*P75*], [4.9912], [8.1624], [5.5551], [8.7811], [8.1677], [8.5529],
+    [*P90*], [5.9597], [11.8403], [7.5518], [13.8078], [11.5105], [12.1031],
+    [*P95*], [7.5613], [14.3579], [8.8830], [17.8440], [13.8947], [14.2258],
+    [*P99*], [10.2639], [20.5758], [11.3832], [21.4281], [20.4393], [20.2651],
+    [*Max*], [12.8681], [23.3731], [13.2724], [23.9934], [23.1079], [22.2980],
+  ),
+  caption: [Encoder-only latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 4)[
-  #text(size: 12pt)[[WIP] Segmentation-head Latency]
+  #text(size: 12pt)[Decoder-only Latency]
 ]
 #v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [5.5388], [6.2085], [5.5388], [6.2126], [6.2093], [6.2065],
+    [*P50 (median)*], [5.5409], [6.2269], [5.5409], [6.2341], [6.2290], [6.2254],
+    [*Average*], [5.6090], [6.2763], [5.6430], [6.2984], [6.2662], [6.2769],
+    [*P75*], [5.5429], [6.2659], [5.5913], [6.2894], [6.2669], [6.2597],
+    [*P90*], [5.6603], [6.3264], [5.8310], [6.3805], [6.3293], [6.3223],
+    [*P95*], [5.8542], [6.4041], [5.9765], [6.4729], [6.3928], [6.4031],
+    [*P99*], [6.9027], [7.5129], [7.2082], [7.6955], [7.0747], [7.6275],
+    [*Max*], [17.3271], [9.9348], [10.2072], [12.1528], [8.9436], [10.1827],
+  ),
+  caption: [Decoder-only latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Segmentation head Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [0.5048], [0.5048], [0.5048], [0.5048], [0.5048], [0.5048],
+    [*P50 (median)*], [0.5048], [0.5048], [0.5048], [0.5059], [0.5048], [0.5048],
+    [*Average*], [0.5051], [0.5053], [0.5050], [0.5059], [0.5063], [0.5053],
+    [*P75*], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059],
+    [*P90*], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059],
+    [*P95*], [0.5059], [0.5059], [0.5059], [0.5069], [0.5059], [0.5059],
+    [*P99*], [0.5059], [0.5069], [0.5069], [0.5130], [0.5069], [0.5069],
+    [*Max*], [0.5069], [0.5089], [0.5079], [0.8212], [1.6527], [0.5089],
+  ),
+  caption: [Segmentation head summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
