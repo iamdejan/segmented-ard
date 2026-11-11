@@ -1293,8 +1293,8 @@ def _format_csv_percentage(value: Optional[float]) -> Optional[str]:
     Optional[str]
         Percentage text ending in ``%``, or ``None`` for an unavailable metric.
     """
-    # Keep missing sensor data as None because pandas already serializes it as an
-    # empty CSV field, while available percentages need an explicit unit marker.
+    # Keep unavailable measurements as None so pandas writes an empty CSV field;
+    # available percentages carry their unit explicitly as requested.
     return None if value is None else f"{value}%"
 
 
@@ -1304,17 +1304,14 @@ def flatten_latency_metrics(
     resources: Dict[str, Optional[float]],
     measured_samples: int,
 ) -> Dict[str, float | int | str | None]:
-    """Flatten latency and resource summaries into one CSV-compatible row.
+    """Flatten latency and selected resource summaries into one CSV-compatible row.
 
     Steps
     -----
     1. Prefix each latency statistic with its measured component name.
-    2. Record the component shares after the latency statistics.
-    3. Append the ten user-facing hardware-utilisation metrics in the same order
-       as the console summary, omitting internal baseline/helper measurements.
-    4. Serialize CPU/system-RAM percentages with a trailing ``%`` so their unit is
-       explicit in the CSV while leaving MiB and temperature values numeric.
-    5. Include the number of steady-state samples used for latency statistics.
+    2. Record component shares and the number of steady-state measured samples.
+    3. Append exactly the ten requested hardware-utilisation fields in their
+       requested order, adding ``%`` to percentage-valued CSV cells.
 
     Parameters
     ----------
@@ -1330,8 +1327,9 @@ def flatten_latency_metrics(
     Returns
     -------
     Dict[str, float | int | str | None]
-        Flat result fields for one CSV row. Percentage hardware-utilisation values
-        are strings ending in ``%``; other numeric metrics remain numeric.
+        Flat result fields for one CSV row. Latency and component-share values
+        remain numeric; the three requested percentage hardware metrics are
+        strings ending in ``%``.
     """
     result: Dict[str, float | int | str | None] = {"measured_samples": measured_samples}
 
@@ -1341,49 +1339,33 @@ def flatten_latency_metrics(
         for statistic, value in stats.items():
             result[f"{component}_{statistic}_ms"] = value
 
-    # Keep component-share columns immediately after latency columns, preserving the
-    # existing output layout before the hardware-utilisation section begins.
+    # Preserve the original latency/component portion of the CSV before appending
+    # hardware data, so this change does not remove benchmark timing results.
     result.update(component_shares)
 
-    # Dict insertion order becomes DataFrame column order. Build the hardware section
-    # explicitly so the CSV follows the requested presentation sequence instead of
-    # inheriting the internal resource dictionary's baseline-oriented order.
-    ordered_hardware_metrics: Tuple[Tuple[str, float | str | None], ...] = (
-        (
-            "peak_process_cpu_percent",
-            _format_csv_percentage(resources.get("peak_process_cpu_percent")),
+    # Only these ten hardware-utilisation fields are persisted. The broader
+    # resource dictionary may contain baselines/helper values used internally to
+    # derive increments, but those implementation details must not leak into CSV.
+    result.update({
+        "peak_process_cpu_percent": _format_csv_percentage(
+            resources.get("peak_process_cpu_percent")
         ),
-        (
-            "peak_cpu_total_capacity_percent",
-            _format_csv_percentage(resources.get("peak_cpu_total_capacity_percent")),
+        "peak_cpu_total_capacity_percent": _format_csv_percentage(
+            resources.get("peak_cpu_total_capacity_percent")
         ),
-        ("peak_process_ram_mb", resources.get("peak_process_ram_mb")),
-        ("incremental_process_ram_mb", resources.get("incremental_process_ram_mb")),
-        (
-            "peak_system_ram_percent",
-            _format_csv_percentage(resources.get("peak_system_ram_percent")),
+        "peak_process_ram_mb": resources.get("peak_process_ram_mb"),
+        "incremental_process_ram_mb": resources.get("incremental_process_ram_mb"),
+        "peak_system_ram_percent": _format_csv_percentage(
+            resources.get("peak_system_ram_percent")
         ),
-        (
-            "peak_torch_vram_allocated_mb",
-            resources.get("peak_torch_vram_allocated_mb"),
+        "peak_torch_vram_allocated_mb": resources.get("peak_torch_vram_allocated_mb"),
+        "peak_torch_vram_reserved_mb": resources.get("peak_torch_vram_reserved_mb"),
+        "incremental_torch_vram_allocated_mb": resources.get(
+            "incremental_torch_vram_allocated_mb"
         ),
-        (
-            "peak_torch_vram_reserved_mb",
-            resources.get("peak_torch_vram_reserved_mb"),
-        ),
-        (
-            "incremental_torch_vram_allocated_mb",
-            resources.get("incremental_torch_vram_allocated_mb"),
-        ),
-        ("max_gpu_temperature_c", resources.get("max_gpu_temperature_c")),
-        (
-            "peak_nvml_device_vram_used_mb",
-            resources.get("peak_nvml_device_vram_used_mb"),
-        ),
-    )
-    for metric_name, metric_value in ordered_hardware_metrics:
-        result[metric_name] = metric_value
-
+        "max_gpu_temperature_c": resources.get("max_gpu_temperature_c"),
+        "peak_nvml_device_vram_used_mb": resources.get("peak_nvml_device_vram_used_mb"),
+    })
     return result
 
 
@@ -1454,7 +1436,8 @@ def main() -> None:
        decoder, and segmentation head via hooks. These timings are eager-mode
        component timings even when the primary benchmark is compiled.
     5. Print latency distributions and resource-use summaries.
-    6. Save the same statistics and resource peaks to checkpoint-specific CSV.
+    6. Save the latency/component statistics plus exactly the ten requested
+       hardware-utilisation fields to checkpoint-specific CSV.
 
     Returns
     -------
