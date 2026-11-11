@@ -1275,19 +1275,46 @@ def parse_checkpoint_spec(value: str) -> Tuple[str, str]:
     return checkpoint_name, checkpoint_path
 
 
+def _format_csv_percentage(value: Optional[float]) -> Optional[str]:
+    """Append an explicit percentage unit to an optional CSV metric.
+
+    Steps
+    -----
+    1. Preserve ``None`` so unavailable optional measurements remain blank in CSV.
+    2. Convert available numeric values to strings with a trailing ``%`` symbol.
+
+    Parameters
+    ----------
+    value : Optional[float]
+        Percentage value to serialize, or ``None`` when the metric is unavailable.
+
+    Returns
+    -------
+    Optional[str]
+        Percentage text ending in ``%``, or ``None`` for an unavailable metric.
+    """
+    # Keep missing sensor data as None because pandas already serializes it as an
+    # empty CSV field, while available percentages need an explicit unit marker.
+    return None if value is None else f"{value}%"
+
+
 def flatten_latency_metrics(
     latency_stats: Dict[str, Dict[str, float]],
     component_shares: Dict[str, float],
     resources: Dict[str, Optional[float]],
     measured_samples: int,
-) -> Dict[str, float | int | None]:
+) -> Dict[str, float | int | str | None]:
     """Flatten latency and resource summaries into one CSV-compatible row.
 
     Steps
     -----
     1. Prefix each latency statistic with its measured component name.
-    2. Record component shares and available or missing resource measurements.
-    3. Include the number of steady-state samples used for latency statistics.
+    2. Record the component shares after the latency statistics.
+    3. Append the ten user-facing hardware-utilisation metrics in the same order
+       as the console summary, omitting internal baseline/helper measurements.
+    4. Serialize CPU/system-RAM percentages with a trailing ``%`` so their unit is
+       explicit in the CSV while leaving MiB and temperature values numeric.
+    5. Include the number of steady-state samples used for latency statistics.
 
     Parameters
     ----------
@@ -1302,10 +1329,11 @@ def flatten_latency_metrics(
 
     Returns
     -------
-    Dict[str, float | int | None]
-        Flat, numeric result fields for one CSV row.
+    Dict[str, float | int | str | None]
+        Flat result fields for one CSV row. Percentage hardware-utilisation values
+        are strings ending in ``%``; other numeric metrics remain numeric.
     """
-    result: Dict[str, float | int | None] = {"measured_samples": measured_samples}
+    result: Dict[str, float | int | str | None] = {"measured_samples": measured_samples}
 
     # Prefix the common percentile names to distinguish inference, overhead,
     # end-to-end and U-Net component timings in the saved result.
@@ -1313,9 +1341,49 @@ def flatten_latency_metrics(
         for statistic, value in stats.items():
             result[f"{component}_{statistic}_ms"] = value
 
-    # Include the same component shares and sensor peaks that the console reports.
+    # Keep component-share columns immediately after latency columns, preserving the
+    # existing output layout before the hardware-utilisation section begins.
     result.update(component_shares)
-    result.update(resources)
+
+    # Dict insertion order becomes DataFrame column order. Build the hardware section
+    # explicitly so the CSV follows the requested presentation sequence instead of
+    # inheriting the internal resource dictionary's baseline-oriented order.
+    ordered_hardware_metrics: Tuple[Tuple[str, float | str | None], ...] = (
+        (
+            "peak_process_cpu_percent",
+            _format_csv_percentage(resources.get("peak_process_cpu_percent")),
+        ),
+        (
+            "peak_cpu_total_capacity_percent",
+            _format_csv_percentage(resources.get("peak_cpu_total_capacity_percent")),
+        ),
+        ("peak_process_ram_mb", resources.get("peak_process_ram_mb")),
+        ("incremental_process_ram_mb", resources.get("incremental_process_ram_mb")),
+        (
+            "peak_system_ram_percent",
+            _format_csv_percentage(resources.get("peak_system_ram_percent")),
+        ),
+        (
+            "peak_torch_vram_allocated_mb",
+            resources.get("peak_torch_vram_allocated_mb"),
+        ),
+        (
+            "peak_torch_vram_reserved_mb",
+            resources.get("peak_torch_vram_reserved_mb"),
+        ),
+        (
+            "incremental_torch_vram_allocated_mb",
+            resources.get("incremental_torch_vram_allocated_mb"),
+        ),
+        ("max_gpu_temperature_c", resources.get("max_gpu_temperature_c")),
+        (
+            "peak_nvml_device_vram_used_mb",
+            resources.get("peak_nvml_device_vram_used_mb"),
+        ),
+    )
+    for metric_name, metric_value in ordered_hardware_metrics:
+        result[metric_name] = metric_value
+
     return result
 
 
