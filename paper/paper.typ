@@ -266,6 +266,7 @@ I am deeply grateful for the supervision of Dr. Lim Chee Kau during the writing 
 #set text(hyphenate: false)
 #set par(first-line-indent: (amount: tab_length, all: true), leading: 2 * line_spacing, spacing: 2 * line_spacing, justify: true)
 #show enum: set block(spacing: 2 * line_spacing)
+#show figure: set block(breakable: true)
 
 #align(center)[
   #heading(level: 1)[
@@ -905,9 +906,53 @@ As previously mentioned in Section 3.1 Research Design, the results presented in
   - A robust student distilled from a robust teacher, with Segmented ARD (Seg-ARD) used for knowledge distillation. Moving forward, this will be named "S-R-V2."
 ]
 
-In addition, the results of two teachers (one non-robust teacher, which will be called "T-NR-V5", and one robust teacher which will be called "T-R-V5") will be presented as well. This is important to compare the performance, robustness, and latency between the teachers and the students.
+In addition, the results of two teachers, a non-robust teacher which will be called "T-NR-V5", and a robust teacher which will be called "T-R-V5", will be presented as well. The results of these two teachers are important to compare the performance, robustness, and latency between the teachers and the students, drawing the conclusions of whether or not the distillation is effective and required.
 
-// TODO: add training curve?
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Training]
+]
+#v(2 * line_spacing)
+
+This section contains the training graph for all models here. The training graphs function as an indicator of overfitting. If the evaluation loss starts increasing in the middle of the training process, that is the indication of overfitting during the training process.
+
+#figure(
+  image("teacher_v5_training_graph.png"),
+  caption: [Training graph for non-robust teacher (T-NR-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("student_v5_training_graph.png"),
+  caption: [Training graph for non-robust student distilled from non-robust teacher (S-NR-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("teacher_robust_v5_training_graph.png"),
+  caption: [Training graph for robust teacher (T-R-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("student_robust_v1_training_graph.png"),
+  caption: [Training graph for robust student distilled from non-robust teacher (S-R-V1).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("student_robust_v2_training_graph.png"),
+  caption: [Training graph for robust student distilled from robust teacher (S-R-V2).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("student_v6_training_graph.png"),
+  caption: [Training graph for non-robust student distilled from robust teacher (S-NR-V6).]
+)
+#v(2 * line_spacing)
+
+For all training graphs above, there are no clear indications of overfitting. Some evaluation losses are not able to decrease as much as the training loss, but it is expected, given the unseen data from the evaluation set.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
@@ -2439,7 +2484,6 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     table.header(
       [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
     ),
-    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
     [*Peak process CPU*], [1008.20%], [947.54%], [1006.30%], [951.79%], [1043.32%], [952.78%],
     [*Peak CPU total capacity*], [63.01%], [59.22%], [62.89%], [59.49%], [65.21%], [59.55%],
     [*Peak process RAM (MiB)*], [1273.8633], [1425.3906], [1273.7383], [1425.4531], [1425.2578], [1425.4102],
@@ -2457,6 +2501,22 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #set par(
   justify: true
 )
+
+#pagebreak()
+#align(center)[
+  #heading(level: 1, numbering: none)[
+    #text(size: 12pt)[[WIP] DISCUSSIONS]
+  ]
+]
+#v(2 * line_spacing)
+
+#pagebreak()
+#align(center)[
+  #heading(level: 1, numbering: none)[
+    #text(size: 12pt)[[WIP] CONCLUSIONS AND FUTURE WORK]
+  ]
+]
+#v(2 * line_spacing)
 
 #pagebreak()
 #align(center)[
