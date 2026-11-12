@@ -2481,22 +2481,23 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #figure(
   table(
     columns: 7,
+    inset: 6.5pt,
     table.header(
-      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*],
     ),
     [*Peak process CPU*], [1008.20%], [947.54%], [1006.30%], [951.79%], [1043.32%], [952.78%],
     [*Peak CPU total capacity*], [63.01%], [59.22%], [62.89%], [59.49%], [65.21%], [59.55%],
     [*Peak process RAM (MiB)*], [1273.8633], [1425.3906], [1273.7383], [1425.4531], [1425.2578], [1425.4102],
     [*Incremental RAM peak (MiB)*], [8.5664], [31.582], [8.9414], [31.457], [31.582], [31.582],
     [*Peak system RAM usage*], [12.70%], [13.40%], [12.60%], [13.40%], [13.40%], [13.40%],
-    [*Peak PyTorch VRAM alloc*], [58.5664], [28.1646], [58.5664], [28.1646], [28.1646], [28.1646],
-    [*Peak PyTorch VRAM reserv*], [184], [192], [184], [192], [192], [192],
-    [*Incremental VRAM alloc*], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367],
+    [*Peak PyTorch VRAM allocation*], [58.5664], [28.1646], [58.5664], [28.1646], [28.1646], [28.1646],
+    [*Peak PyTorch VRAM reserve*], [184], [192], [184], [192], [192], [192],
+    [*Incremental VRAM allocation*], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367],
     [*Maximum CPU temp (°C)*], [75.6], [75.6], [80.1], [78.2], [78.4], [72.8],
     [*Maximum GPU temp (°C)*], [67], [64], [68], [66], [66], [66],
     [*Peak device VRAM (NVML)*], [803.0391], [811.5391], [803.0391], [811.1016], [811.1016], [811.1016],
   ),
-  caption: [Segmentation head latency across all model checkpoints.]
+  caption: [Hardware utilization across all model checkpoints.]
 )
 #set par(
   justify: true
