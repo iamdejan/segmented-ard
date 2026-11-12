@@ -1021,7 +1021,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [*Mean IoU*], [0.5291], [0.5166], [0.2329], [0.2988], [0.1704], [0.4709],
     [*Dice*], [0.6205], [0.6096], [0.2874], [0.3854], [0.2064], [0.5597]
   ),
-  caption: [Results, accumulated over all classes.]
+  caption: [Segmentation performance results, accumulated over all classes.]
 )
 
 #v(2 * line_spacing)
@@ -1056,7 +1056,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0.002], [0.002], [0.0003],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for T-NR-V5.]
+  caption: [Segmentation performance results of T-NR-V5, grouped by each class.]
 )
 
 #figure(
@@ -1085,7 +1085,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0], [0], [0],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for S-NR-V5.]
+  caption: [Segmentation performance results of S-NR-V5, grouped by each class.]
 )
 
 #figure(
@@ -1114,7 +1114,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0], [0], [0],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for T-R-V5.]
+  caption: [Segmentation performance results of T-R-V5, grouped by each class.]
 )
 
 #figure(
@@ -1143,7 +1143,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0], [0], [0],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for S-R-V1.]
+  caption: [Segmentation performance results of S-R-V1, grouped by each class.]
 )
 
 #figure(
@@ -1172,7 +1172,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0], [0], [0],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for S-R-V2.]
+  caption: [Segmentation performance results of S-R-V2, grouped by each class.]
 )
 
 #figure(
@@ -1201,7 +1201,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
     [motorcycle], [0], [0], [0],
     [bicycle], [0], [0], [0],
   ),
-  caption: [Per-class results for S-NR-V6.]
+  caption: [Segmentation performance results of S-NR-V6, grouped by each class.]
 )
 
 #v(2 * line_spacing)
@@ -1232,7 +1232,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [2],
     [rainy], [night], [1],
   ),
-  caption: [Distribution of weather and time of day pairs.]
+  caption: [Distribution of weather and time of day group.]
 )
 
 #v(2 * line_spacing)
@@ -1261,7 +1261,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.8293], [0.7083], [0.5341], [0.5837],
     [rainy], [night], [0.9547], [0.9133], [0.6832], [0.7006],
   ),
-  caption: [Weather-time of day pair results for T-NR-V5.]
+  caption: [Performance results of T-NR-V5, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1290,7 +1290,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.8376], [0.7206], [0.5404], [0.5806],
     [rainy], [night], [0.9716], [0.9447], [0.6895], [0.7060],
   ),
-  caption: [Weather-time of day pair results for S-NR-V5.]
+  caption: [Performance results of S-NR-V5, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1319,7 +1319,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.7501], [0.6001], [0.5264], [0.5473],
     [rainy], [night], [0.5688], [0.3974], [0.6208], [0.6393],
   ),
-  caption: [Weather-time of day pair results for T-R-V5.]
+  caption: [Performance results of T-R-V5, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1348,7 +1348,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.7506], [0.6008], [0.5260], [0.5493],
     [rainy], [night], [0.6996], [0.5380], [0.6565], [0.6816],
   ),
-  caption: [Weather-time of day pair results for S-R-V1.]
+  caption: [Performance results of S-R-V1, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1377,7 +1377,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.6161], [0.4452], [0.4006], [0.4255],
     [rainy], [night], [0.4315], [0.2751], [0.6122], [0.6235],
   ),
-  caption: [Weather-time of day pair results for S-R-V2.]
+  caption: [Performance results of S-R-V2, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1406,7 +1406,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [0.7947], [0.6594], [0.4981], [0.5216],
     [rainy], [night], [0.9646], [0.9317], [0.7951], [0.8100],
   ),
-  caption: [Weather-time of day pair results for S-NR-V6.]
+  caption: [Performance results of S-NR-V6, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -1419,7 +1419,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[Accumulated Results]
+  #text(size: 12pt)[Accumulated Robustness Results]
 ]
 #v(2 * line_spacing)
 
@@ -1438,7 +1438,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [*Adversarial Pixel Accuracy*], [0.0359], [0.0152], [0.7220], [0.6994], [0.5909], [0.0086],
     [*Degradation of Pixel Accuracy*], [96.12%], [98.35%], [11.84%], [16.47%], [22.38%], [99.06%],
   ),
-  caption: [Robustness results for pixel accuracy.]
+  caption: [Accumulated robustness results, measured by pixel accuracy.]
 )
 #set par(
   justify: true,
@@ -1460,7 +1460,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [*Adversarial Mean IoU*], [0.0101], [0.0058], [0.1774], [0.1842], [0.1117], [0.0026],
     [*Degradation of Mean IoU*], [98.10%], [98.88%], [23.82%], [38.37%], [34.48%], [99.46%],
   ),
-  caption: [Robustness results for mean IoU.]
+  caption: [Accumulated robustness results, measured by mean IoU.]
 )
 #set par(
   justify: true,
@@ -1482,7 +1482,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [*Adversarial Dice*], [0.0197], [0.0114], [0.2284], [0.2478], [0.1465], [0.0051],
     [*Degradation of Dice*], [96.82%], [98.14%], [20.52%], [35.69%], [29.01%], [99.09%],
   ),
-  caption: [Robustness results for Dice score.]
+  caption: [Accumulated robustness results, measured by Dice score.]
 )
 #set par(
   justify: true,
@@ -1525,7 +1525,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0.0002], [0], [100.00%],
     [bicycle], [5.19 #math.times 10^(-6)], [0], [100.00%]
   ),
-  caption: [Per-class results for T-NR-V5.]
+  caption: [Segmentation robustness results of T-NR-V5, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1562,7 +1562,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0], [0], [0.00%],
     [bicycle], [0], [0], [0.00%],
   ),
-  caption: [Per-class results for S-NR-V5.]
+  caption: [Segmentation robustness results of S-NR-V5, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1598,7 +1598,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0], [0], [0.00%],
     [bicycle], [0], [0], [0.00%],
   ),
-  caption: [Per-class results for T-R-V5.]
+  caption: [Segmentation robustness results of T-R-V5, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1635,7 +1635,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0], [0], [0.00%],
     [bicycle], [0], [0], [0.00%],
   ),
-  caption: [Per-class results for S-R-V1.]
+  caption: [Segmentation robustness results of S-R-V1, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1672,7 +1672,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0], [0], [0.00%],
     [bicycle], [0], [0], [0.00%],
   ),
-  caption: [Per-class results for S-R-V2.]
+  caption: [Segmentation robustness results of S-R-V2, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1709,7 +1709,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
     [motorcycle], [0], [0], [0.00%],
     [bicycle], [0], [0], [0.00%],
   ),
-  caption: [Per-class results for S-NR-V6.]
+  caption: [Segmentation robustness results of S-NR-V6, grouped by each class.]
 )
 #set par(
   justify: true,
@@ -1754,7 +1754,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.8293], [0.0178], [97.85%],
     [rainy], [night], [0.9547], [0.0574], [93.99%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for T-NR-V5.]
+  caption: [Pixel accuracy-based robustness results of T-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1785,7 +1785,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.4610], [0.0056], [98.79%],
     [rainy], [night], [0.5960], [0.0204], [96.58%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for T-NR-V5.]
+  caption: [Mean IoU-based robustness results of T-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1816,7 +1816,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.5657], [0.0108], [98.09%],
     [rainy], [night], [0.6621], [0.0370], [94.41%],
   ),
-  caption: [Dice-based weather-time of day pair results for T-NR-V5.]
+  caption: [Dice-based robustness results of T-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1852,7 +1852,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.8377], [0.0152], [98.18%],
     [rainy], [night], [0.9716], [0.0011], [99.88%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V5.]
+  caption: [Pixel accuracy-based robustness results of S-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1883,7 +1883,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.3632], [0.0053], [98.53%],
     [rainy], [night], [0.6201], [0.0034], [99.45%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for S-NR-V5.]
+  caption: [Mean IoU-based robustness results of S-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1914,7 +1914,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.4480], [0.0103], [97.70%],
     [rainy], [night], [0.6829], [0.0067], [99.02%],
   ),
-  caption: [Dice-based weather-time of day pair results for S-NR-V5.]
+  caption: [Dice-based robustness results of S-NR-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1950,7 +1950,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.7501], [0.6240], [16.81%],
     [rainy], [night], [0.5687], [0.4545], [20.09%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for T-R-V5.]
+  caption: [Pixel accuracy-based robustness results of T-R-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -1981,7 +1981,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2225], [0.1615], [27.42%],
     [rainy], [night], [0.3592], [0.3164], [11.91%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for T-R-V5.]
+  caption: [Mean IoU-based robustness results of T-R-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2012,7 +2012,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2665], [0.2150], [19.34%],
     [rainy], [night], [0.4294], [0.3781], [11.96%],
   ),
-  caption: [Dice-based weather-time of day pair results for T-R-V5.]
+  caption: [Dice-based robustness results of T-R-V5, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2049,7 +2049,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.7506], [0.5115], [31.86%],
     [rainy], [night], [0.6995], [0.4457], [36.29%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V1.]
+  caption: [Pixel accuracy-based robustness results of S-R-V1, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2080,7 +2080,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2218], [0.1217], [45.13%],
     [rainy], [night], [0.4945], [0.3048], [38.35%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for S-R-V1.]
+  caption: [Mean IoU-based robustness results of S-R-V1, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2111,7 +2111,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2710], [0.1763], [34.96%],
     [rainy], [night], [0.5901], [0.3964], [32.82%],
   ),
-  caption: [Dice-based weather-time of day pair results for S-R-V1.]
+  caption: [Dice-based robustness results of S-R-V1, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2148,7 +2148,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.6158], [0.2140], [65.26%],
     [rainy], [night], [0.4313], [0.2979], [30.93%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for S-R-V2.]
+  caption: [Pixel accuracy-based robustness results of S-R-V2, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2179,7 +2179,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.1789], [0.0520], [70.94%],
     [rainy], [night], [0.3263], [0.1798], [44.88%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for S-R-V2.]
+  caption: [Mean IoU-based robustness results of S-R-V2, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2210,7 +2210,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2315], [0.0883], [61.85%],
     [rainy], [night], [0.3691], [0.2437], [33.97%],
   ),
-  caption: [Dice-based weather-time of day pair results for S-R-V2.]
+  caption: [Dice-based robustness results of S-R-V2, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2247,7 +2247,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.7948], [0.0005], [99.94%],
     [rainy], [night], [0.9646], [0.0056], [99.42%],
   ),
-  caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V6.]
+  caption: [Pixel accuracy-based robustness results of S-NR-V6, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2278,7 +2278,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.2738], [0.0002], [99.92%],
     [rainy], [night], [0.6212], [0.0014], [99.77%],
   ),
-  caption: [Mean IoU-based weather-time of day pair results for S-NR-V6.]
+  caption: [Mean IoU-based robustness results of S-NR-V6, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2309,7 +2309,7 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
     [snowy], [night], [0.3235], [0.0005], [99.86%],
     [rainy], [night], [0.6777], [0.0028], [99.59%],
   ),
-  caption: [Dice-based weather-time of day pair results for S-NR-V6.]
+  caption: [Dice-based robustness results of S-NR-V6, grouped by weather and time of day.]
 )
 #set par(
   justify: true,
@@ -2358,7 +2358,7 @@ High-Level latency results present the latency without the breakdown of the U-Ne
     [*P99*], [13.7670], [22.5545], [13.9077], [22.7313], [25.1785], [22.3488],
     [*Max*], [15.5699], [30.6357], [16.0060], [28.7341], [37.0017], [30.0276],
   ),
-  caption: [Computational overhead summary across all model checkpoints.]
+  caption: [Computational overhead across all model checkpoints.]
 )
 #set par(
   justify: true,
@@ -2391,7 +2391,7 @@ High-Level latency results present the latency without the breakdown of the U-Ne
     [*P99*], [12.0211], [12.8438], [12.2067], [12.8523], [13.1814], [12.9189],
     [*Max*], [13.7022], [14.0261], [13.4138], [13.7758], [17.1346], [14.4398],
   ),
-  caption: [Inference latency summary across all model checkpoints.]
+  caption: [Inference latency across all model checkpoints.]
 )
 #set par(
   justify: true,
@@ -2424,7 +2424,7 @@ High-Level latency results present the latency without the breakdown of the U-Ne
     [*P99*], [25.1133], [34.7747], [25.3181], [34.7553], [37.2449], [34.6271],
     [*Max*], [26.9269], [42.7713], [28.4858], [40.6611], [49.8411], [42.3598],
   ),
-  caption: [End-to-end latency summary across all model checkpoints.]
+  caption: [End-to-end latency across all model checkpoints.]
 )
 #set par(
   justify: true,
