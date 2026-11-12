@@ -2222,9 +2222,241 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Latency and Hardware Utilization]
+  #text(size: 12pt)[Latency and Hardware Utilization]
 ]
 #v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[High-Level Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Computational Overhead]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [9.1209], [15.9818], [8.8983], [16.1332], [16.0194], [16.1119],
+    [*P50 (median)*], [10.3460], [17.7029], [10.1664], [17.8642], [17.5426], [17.7692],
+    [*Average*], [10.2873], [17.7410], [10.1469], [17.9222], [17.6616], [17.7559],
+    [*P75*], [11.0284], [19.0738], [10.9260], [19.2782], [18.9703], [19.1209],
+    [*P90*], [12.1121], [20.1207], [12.1902], [20.4029], [20.3195], [20.2003],
+    [*P95*], [12.7919], [21.0775], [12.7936], [21.2545], [21.2481], [21.1420],
+    [*P99*], [13.7670], [22.5545], [13.9077], [22.7313], [25.1785], [22.3488],
+    [*Max*], [15.5699], [30.6357], [16.0060], [28.7341], [37.0017], [30.0276],
+  ),
+  caption: [Computational overhead summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Inference Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [11.3226], [11.9216], [11.3312], [11.8737], [11.3584], [11.3971],
+    [*P50 (median)*], [11.3469], [12.1104], [11.3563], [12.1081], [12.0448], [12.1099],
+    [*Average*], [11.3886], [11.8793], [11.4019], [11.8730], [11.8412], [11.7726],
+    [*P75*], [11.3811], [12.2060], [11.3906], [12.2814], [12.1625], [12.3062],
+    [*P90*], [11.4809], [12.3631], [11.4935], [12.4222], [12.4240], [12.4241],
+    [*P95*], [11.7473], [12.4196], [11.7991], [12.5718], [12.8567], [12.6710],
+    [*P99*], [12.0211], [12.8438], [12.2067], [12.8523], [13.1814], [12.9189],
+    [*Max*], [13.7022], [14.0261], [13.4138], [13.7758], [17.1346], [14.4398],
+  ),
+  caption: [Inference latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[End-to-End Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [20.4933], [27.9840], [20.2574], [28.1196], [27.6386], [28.0434],
+    [*P50 (median)*], [21.7468], [29.5899], [21.5801], [29.6740], [29.3825], [29.4639],
+    [*Average*], [21.6759], [29.6204], [21.5488], [29.7951], [29.5028], [29.5285],
+    [*P75*], [22.4113], [31.2429], [22.3250], [31.4036], [30.9976], [31.3520],
+    [*P90*], [23.4937], [32.2318], [23.6007], [32.5589], [32.5066], [32.4284],
+    [*P95*], [24.1718], [33.1867], [24.2179], [33.4997], [33.2923], [33.3618],
+    [*P99*], [25.1133], [34.7747], [25.3181], [34.7553], [37.2449], [34.6271],
+    [*Max*], [26.9269], [42.7713], [28.4858], [40.6611], [49.8411], [42.3598],
+  ),
+  caption: [End-to-end latency summary across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[U-Net Component Profiling]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Encoder-only Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [4.9125], [6.9142], [4.9098], [7.1661], [7.0287], [7.0955],
+    [*P50 (median)*], [4.9290], [7.6757], [4.9276], [7.8315], [7.7393], [7.7421],
+    [*Average*], [5.2335], [8.5811], [5.3011], [8.5966], [8.5096], [8.3301],
+    [*P75*], [4.9619], [7.9579], [4.9606], [8.0712], [8.0545], [8.0528],
+    [*P90*], [5.6288], [13.3390], [6.4799], [13.0010], [13.1279], [11.0412],
+    [*P95*], [7.5153], [17.0287], [8.1460], [16.9327], [16.8453], [13.8347],
+    [*P99*], [10.3834], [20.2755], [10.3439], [20.0113], [20.0247], [19.1141],
+    [*Max*], [13.2217], [21.3340], [12.8358], [21.5970], [21.2020], [21.0779],
+  ),
+  caption: [Encoder-only latency across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Decoder-only Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [5.5316], [6.1952], [5.5316], [6.1942], [6.1891], [6.1932],
+    [*P50 (median)*], [5.5337], [6.2116], [5.5337], [6.2106], [6.2075], [6.2095],
+    [*Average*], [5.5697], [6.2352], [5.5851], [6.2343], [6.2331], [6.2277],
+    [*P75*], [5.5357], [6.2341], [5.5368], [6.2290], [6.2290], [6.2280],
+    [*P90*], [5.5409], [6.3109], [5.7816], [6.2977], [6.2986], [6.2731],
+    [*P95*], [5.8511], [6.3826], [5.8675], [6.3746], [6.3693], [6.3672],
+    [*P99*], [6.1887], [6.7072], [6.3105], [6.7396], [6.7683], [6.5796],
+    [*Max*], [7.6237], [6.9949], [7.5786], [8.3712], [8.3057], [6.9673],
+  ),
+  caption: [Decoder-only latency across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Segmentation head Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [0.5048], [0.5048], [0.5048], [0.5048], [0.5048], [0.5048],
+    [*P50 (median)*], [0.5059], [0.5048], [0.5059], [0.5048], [0.5048], [0.5048],
+    [*Average*], [0.5063], [0.5060], [0.5073], [0.5060], [0.5050], [0.5072],
+    [*P75*], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059],
+    [*P90*], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059],
+    [*P95*], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059], [0.5059],
+    [*P99*], [0.5069], [0.5069], [0.5069], [0.5069], [0.5059], [0.5069],
+    [*Max*], [1.6568], [1.6179], [1.7746], [1.1540], [0.5110], [1.8504],
+  ),
+  caption: [Segmentation head latency across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
+
+#v(2 * line_spacing)
+#heading(level: 3)[
+  #text(size: 12pt)[Hardware Utilization]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*Peak process CPU*], [1008.20%], [947.54%], [1006.30%], [951.79%], [1043.32%], [952.78%],
+    [*Peak CPU total capacity*], [63.01%], [59.22%], [62.89%], [59.49%], [65.21%], [59.55%],
+    [*Peak process RAM (MiB)*], [1273.8633], [1425.3906], [1273.7383], [1425.4531], [1425.2578], [1425.4102],
+    [*Incremental RAM peak (MiB)*], [8.5664], [31.582], [8.9414], [31.457], [31.582], [31.582],
+    [*Peak system RAM usage*], [12.70%], [13.40%], [12.60%], [13.40%], [13.40%], [13.40%],
+    [*Peak PyTorch VRAM alloc*], [58.5664], [28.1646], [58.5664], [28.1646], [28.1646], [28.1646],
+    [*Peak PyTorch VRAM reserv*], [184], [192], [184], [192], [192], [192],
+    [*Incremental VRAM alloc*], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367],
+    [*Maximum CPU temp (°C)*], [75.6], [75.6], [80.1], [78.2], [78.4], [72.8],
+    [*Maximum GPU temp (°C)*], [67], [64], [68], [66], [66], [66],
+    [*Peak device VRAM (NVML)*], [803.0391], [811.5391], [803.0391], [811.1016], [811.1016], [811.1016],
+  ),
+  caption: [Segmentation head latency across all model checkpoints.]
+)
+#set par(
+  justify: true
+)
 
 #pagebreak()
 #align(center)[
