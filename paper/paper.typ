@@ -309,7 +309,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
 )[
   + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
   + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
-  + What is the impact of the proposed framework on inference latency, hardware utilization, and memory consumption in resource-constrained deployment settings?
+  + What is the impact of the proposed framework on inference latency and hardware utilization in resource-constrained deployment settings?
 ]
 
 #v(2 * line_spacing)
@@ -2583,6 +2583,45 @@ The hardware utilization results, as the name implies, present the results of ha
   ]
 ]
 #v(2 * line_spacing)
+
+
+#set par(
+  justify: false,
+)
+Research questions:
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
+  + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
+  + What is the impact of the proposed framework on inference latency and hardware utilization in resource-constrained deployment settings?
+]
+
+Research objectives:
+#box(
+  stroke: 0pt,
+  inset: (left: tab_length)
+)[
+  + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
+  + To evaluate and benchmark the trade-off between clean segmentation performance and adversarial robustness using BDD100K dataset.
+  + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
+]
+
+#table(
+  columns: 3,
+  fill: (_, y) => if y == 0 { gray.lighten(85%) },
+  table.header(
+    [*Research Question*], [*Specific Question*], [*Relevant Chart*],
+  ),
+  [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
+  [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
+  [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training.],
+  [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training, grouped by weather and time of day.],
+  [RQ 3], [How is the latency across models?], [Chart showing the comparison of accumulated latency between models.],
+  [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
+  [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
+)
 
 #pagebreak()
 #align(center)[
