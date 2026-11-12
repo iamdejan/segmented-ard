@@ -1424,7 +1424,8 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1440,11 +1441,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Robustness results for pixel accuracy.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1460,11 +1463,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Robustness results for mean IoU.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1480,7 +1485,8 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Robustness results for Dice score.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -1490,7 +1496,8 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1521,11 +1528,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for T-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1556,7 +1565,8 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for S-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
@@ -1591,11 +1601,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for T-R-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1626,11 +1638,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for S-R-V1.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1661,11 +1675,13 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for S-R-V2.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1696,7 +1712,8 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   caption: [Per-class results for S-NR-V6.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -1714,7 +1731,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1739,11 +1757,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for T-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1768,11 +1788,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for T-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1797,17 +1819,18 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for T-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[Student - Non-Robust - V5 (S-NR-V5)]
 ]
-#v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1832,11 +1855,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1861,11 +1886,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for S-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1890,17 +1917,18 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for S-NR-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[Teacher - Robust - V5 (T-R-V5)]
 ]
-#v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1925,11 +1953,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for T-R-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1954,11 +1984,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for T-R-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -1983,7 +2015,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for T-R-V5.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -1993,7 +2026,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2018,11 +2052,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for S-R-V1.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2047,11 +2083,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for S-R-V1.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2076,7 +2114,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for S-R-V1.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2086,7 +2125,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2111,11 +2151,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for S-R-V2.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2140,11 +2182,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for S-R-V2.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2169,7 +2213,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for S-R-V2.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2179,7 +2224,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2204,11 +2250,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Pixel accuracy-based weather-time of day pair results for S-NR-V6.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2233,11 +2281,13 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Mean IoU-based weather-time of day pair results for S-NR-V6.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2262,7 +2312,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Dice-based weather-time of day pair results for S-NR-V6.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2271,11 +2322,15 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 ]
 #v(2 * line_spacing)
 
+In this section, the latency and hardware utilization results will be reported. The report is split into three major parts: High-Level Latency Results, U-Net Component Results Breakdown, and Hardware Utilization.
+
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[High-Level Results]
+  #text(size: 12pt)[High-Level Latency Results]
 ]
 #v(2 * line_spacing)
+
+High-Level latency results present the latency without the breakdown of the U-Net component. The results are useful for the discussion of the deployment in embedded settings, allowing in-depth analysis and decision on whether or not the model is adequate for real-world deployment.
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -2284,7 +2339,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2305,7 +2361,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Computational overhead summary across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2315,7 +2372,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2336,7 +2394,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Inference latency summary across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2346,7 +2405,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2367,14 +2427,17 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [End-to-end latency summary across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[U-Net Component Profiling]
+  #text(size: 12pt)[U-Net Results Breakdown]
 ]
 #v(2 * line_spacing)
+
+This section presents the detailed results of latency for each component inside the U-Net model. The detailed breakdown enables the discussion regarding the performance of specific parts.
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -2383,7 +2446,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2404,7 +2468,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Encoder-only latency across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2414,7 +2479,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2435,7 +2501,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Decoder-only latency across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
@@ -2445,7 +2512,8 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #v(2 * line_spacing)
 
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
@@ -2466,41 +2534,46 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   caption: [Segmentation head latency across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing,
 )
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[Hardware Utilization]
+  #text(size: 12pt)[Hardware Utilization Results]
 ]
 #v(2 * line_spacing)
 
+The hardware utilization results, as the name implies, present the results of hardware utilization during inference. The hardware utilization results allow discussion regarding the minimum acceptable hardware specifications suited for the model.
+
+#v(2 * line_spacing)
 #set par(
-  justify: false
+  justify: false,
+  leading: line_spacing,
 )
 #figure(
   table(
     columns: 7,
-    inset: 6.5pt,
     table.header(
       [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*],
     ),
-    [*Peak process CPU*], [1008.20%], [947.54%], [1006.30%], [951.79%], [1043.32%], [952.78%],
-    [*Peak CPU total capacity*], [63.01%], [59.22%], [62.89%], [59.49%], [65.21%], [59.55%],
-    [*Peak process RAM (MiB)*], [1273.8633], [1425.3906], [1273.7383], [1425.4531], [1425.2578], [1425.4102],
-    [*Incremental RAM peak (MiB)*], [8.5664], [31.582], [8.9414], [31.457], [31.582], [31.582],
-    [*Peak system RAM usage*], [12.70%], [13.40%], [12.60%], [13.40%], [13.40%], [13.40%],
-    [*Peak PyTorch VRAM allocation*], [58.5664], [28.1646], [58.5664], [28.1646], [28.1646], [28.1646],
+    [*Peak process CPU*], [1008.2%], [947.5%], [1006.3%], [951.8%], [1043.3%], [952.8%],
+    [*Peak CPU total capacity*], [63.0%], [59.2%], [62.9%], [59.5%], [65.2%], [59.6%],
+    [*Peak process RAM (MiB)*], [1273.86], [1425.39], [1273.74], [1425.45], [1425.26], [1425.41],
+    [*Incremental RAM peak (MiB)*], [8.57], [31.58], [8.94], [31.46], [31.58], [31.58],
+    [*Peak system RAM usage*], [12.7%], [13.4%], [12.6%], [13.4%], [13.4%], [13.40%],
+    [*Peak PyTorch VRAM allocation*], [58.57], [28.16], [58.57], [28.16], [28.16], [28.16],
     [*Peak PyTorch VRAM reserve*], [184], [192], [184], [192], [192], [192],
-    [*Incremental VRAM allocation*], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367], [2.6367],
-    [*Maximum CPU temp (°C)*], [75.6], [75.6], [80.1], [78.2], [78.4], [72.8],
-    [*Maximum GPU temp (°C)*], [67], [64], [68], [66], [66], [66],
-    [*Peak device VRAM (NVML)*], [803.0391], [811.5391], [803.0391], [811.1016], [811.1016], [811.1016],
+    [*Incremental VRAM allocation*], [2.64], [2.64], [2.64], [2.64], [2.64], [2.64],
+    [*Maximum CPU temperature (°C)*], [75.6], [75.6], [80.1], [78.2], [78.4], [72.8],
+    [*Maximum GPU temperature (°C)*], [67], [64], [68], [66], [66], [66],
+    [*Peak device VRAM (NVML)*], [803.04], [811.54], [803.04], [811.10], [811.10], [811.10],
   ),
   caption: [Hardware utilization across all model checkpoints.]
 )
 #set par(
-  justify: true
+  justify: true,
+  leading: 2 * line_spacing
 )
 
 #pagebreak()
