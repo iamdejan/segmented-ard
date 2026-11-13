@@ -2002,6 +2002,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("teacher-robust-v5-pixel-accuracy-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-R-V5 robustness results, measured by pixel accuracy, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -2033,6 +2038,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("teacher-robust-v5-mean-iou-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-R-V5 robustness results, measured by mean IoU, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -2062,6 +2072,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("teacher-robust-v5-dice-score-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-R-V5 robustness results, measured by Dice score, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -2101,6 +2116,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("student-robust-v1-pixel-accuracy-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [S-R-V1 robustness results, measured by pixel accuracy, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -2132,6 +2152,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("student-robust-v1-mean-iou-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [S-R-V1 robustness results, measured by mean IoU, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -2161,6 +2186,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("student-robust-v1-dice-score-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [S-R-V1 robustness results, measured by Dice score, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
