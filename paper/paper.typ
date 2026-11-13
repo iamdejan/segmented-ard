@@ -1496,7 +1496,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 
 #figure(
   image("accumulated-robustness-results-mean-iou.png"),
-  caption: [[WIP] Accumulated robustness results, measured by mean IoU.]
+  caption: [Accumulated robustness results, measured by mean IoU.]
 )
 
 #figure(
