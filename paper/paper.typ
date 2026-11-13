@@ -1776,6 +1776,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("teacher-v5-pixel-accuracy-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-NR-V5 robustness results, measured by pixel accuracy, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -1807,6 +1812,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("teacher-v5-mean-iou-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-NR-V5 robustness results, measured by mean IoU, grouped by weather and time of day.]
+)
+
 #set par(
   justify: false,
   leading: line_spacing,
@@ -1836,6 +1846,11 @@ Similar to the limitation mentioned previously (in @segmentation-performance-wea
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("teacher-v5-dice-score-based-robustness-results-grouped-by-weather-timeofday.png"),
+  caption: [T-NR-V5 robustness results, measured by Dice score, grouped by weather and time of day.]
 )
 
 #v(2 * line_spacing)
@@ -2624,18 +2639,18 @@ Research objectives:
 ]
 
 #table(
-  columns: 3,
+  columns: 4,
   fill: (_, y) => if y == 0 { gray.lighten(85%) },
   table.header(
-    [*Research Question*], [*Specific Question*], [*Relevant Chart*],
+    [*Done?*], [*Research Question*], [*Specific Question*], [*Relevant Chart*],
   ),
-  [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
-  [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
-  [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training.],
-  [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training, grouped by weather and time of day.],
-  [RQ 3], [How is the latency across models?], [Chart showing the comparison of accumulated latency between models.],
-  [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
-  [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
+  [#sym.checkmark], [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
+  [], [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
+  [], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training.],
+  [], [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) before and after adversarial training, grouped by weather and time of day.],
+  [], [RQ 3], [How is the latency across models?], [Chart showing the comparison of accumulated latency between models.],
+  [], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
+  [], [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
 )
 
 #pagebreak()
