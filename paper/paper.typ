@@ -917,37 +917,37 @@ In addition, the results of two teachers, a non-robust teacher which will be cal
 This section contains the training graph for all models here. The training graphs function as an indicator of overfitting. If the evaluation loss starts increasing in the middle of the training process, that is the indication of overfitting during the training process.
 
 #figure(
-  image("teacher_v5_training_graph.png"),
+  image("teacher-v5-training-graph.png"),
   caption: [Training graph for non-robust teacher (T-NR-V5).]
 )
 #v(2 * line_spacing)
 
 #figure(
-  image("student_v5_training_graph.png"),
+  image("student-v5-training-graph.png"),
   caption: [Training graph for non-robust student distilled from non-robust teacher (S-NR-V5).]
 )
 #v(2 * line_spacing)
 
 #figure(
-  image("teacher_robust_v5_training_graph.png"),
+  image("teacher-robust-v5-training-graph.png"),
   caption: [Training graph for robust teacher (T-R-V5).]
 )
 #v(2 * line_spacing)
 
 #figure(
-  image("student_robust_v1_training_graph.png"),
+  image("student-robust-v1-training-graph.png"),
   caption: [Training graph for robust student distilled from non-robust teacher (S-R-V1).]
 )
 #v(2 * line_spacing)
 
 #figure(
-  image("student_robust_v2_training_graph.png"),
+  image("student-robust-v2-training-graph.png"),
   caption: [Training graph for robust student distilled from robust teacher (S-R-V2).]
 )
 #v(2 * line_spacing)
 
 #figure(
-  image("student_v6_training_graph.png"),
+  image("student-v6-training-graph.png"),
   caption: [Training graph for non-robust student distilled from robust teacher (S-NR-V6).]
 )
 #v(2 * line_spacing)
@@ -1487,6 +1487,21 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("accumulated-robustness-results-pixel-accuracy.png"),
+  caption: [Accumulated robustness results, measured by pixel accuracy.]
+)
+
+#figure(
+  image("accumulated-robustness-results-mean-iou.png"),
+  caption: [[WIP] Accumulated robustness results, measured by mean IoU.]
+)
+
+#figure(
+  image("accumulated-robustness-results-dice-score.png"),
+  caption: [Accumulated robustness results, measured by Dice score.]
 )
 
 #v(2 * line_spacing)
