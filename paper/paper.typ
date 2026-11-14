@@ -1024,6 +1024,26 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   caption: [Segmentation performance results, accumulated over all classes.]
 )
 
+#figure(
+  image("accumulated-performance-results-teachers.png"),
+  caption: [Comparison of segmentation performance results between non-robust teacher and robust teacher.]
+)
+
+#figure(
+  image("accumulated-performance-results-students.png"),
+  caption: [Comparison of segmentation performance results between students.]
+)
+
+#figure(
+  image("accumulated-performance-results-teacher-non-robust-vs-students.png"),
+  caption: [Comparison of segmentation performance results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
+)
+
+#figure(
+  image("accumulated-performance-results-teacher-robust-vs-students.png"),
+  caption: [Comparison of segmentation performance results between robust teacher (T-R-V5) and its students (S-R-V2 and S-NR-V6).]
+)
+
 #v(2 * line_spacing)
 #heading(level: 3)[
   #text(size: 12pt)[Per-Class Results]
@@ -1245,7 +1265,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.9132], [0.8403], [0.5167], [0.6102],
     [overcast], [daytime], [0.9152], [0.8437], [0.4850], [0.5782],
@@ -1274,7 +1294,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.9077], [0.8310], [0.5078], [0.6027],
     [overcast], [daytime], [0.9113], [0.8370], [0.4895], [0.5821],
@@ -1303,7 +1323,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.8051], [0.6738], [0.2355], [0.2937],
     [overcast], [daytime], [0.8338], [0.7149], [0.2476], [0.3008],
@@ -1332,7 +1352,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.8238], [0.7003], [0.2875], [0.3713],
     [overcast], [daytime], [0.8400], [0.7241], [0.2941], [0.3752],
@@ -1361,7 +1381,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.7477], [0.5971], [0.1670], [0.2040],
     [overcast], [daytime], [0.7732], [0.6302], [0.1790], [0.2154],
@@ -1390,7 +1410,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
   table(
     columns: 6,
     table.header(
-      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*IoU (Macro)*], [*Dice*]
+      [*Weather*], [*Time of day*], [*Pixel Accuracy*], [*IoU (Micro)*], [*Mean IoU*], [*Dice*]
     ),
     [clear], [daytime], [0.9038], [0.8245], [0.4530], [0.5436],
     [overcast], [daytime], [0.9052], [0.8267], [0.4497], [0.5414],
