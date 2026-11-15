@@ -1373,7 +1373,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
     [snowy], [night], [2],
     [rainy], [night], [1],
   ),
-  caption: [Distribution of weather and time of day group.]
+  caption: [Pairs' distribution of weather and time of day.]
 )
 
 #v(2 * line_spacing)
