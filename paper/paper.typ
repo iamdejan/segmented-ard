@@ -1026,7 +1026,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
 
 #figure(
   image("accumulated-performance-results-teachers.png"),
-  caption: [Comparison of segmentation performance results between non-robust teacher and robust teacher.]
+  caption: [Comparison of segmentation performance results between non-robust teacher (T-NR-V5) and robust teacher (T-R-V5).]
 )
 
 #figure(
@@ -1041,12 +1041,18 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
 
 #figure(
   image("accumulated-performance-results-teacher-robust-vs-students.png"),
-  caption: [Comparison of segmentation performance results between robust teacher (T-R-V5) and its students (S-R-V2 and S-NR-V6).]
+  caption: [Comparison of segmentation performance results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
 )
 
 #v(2 * line_spacing)
 #heading(level: 3)[
   #text(size: 12pt)[Per-Class Results]
+]
+#v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Non-Robust - V5 (T-NR-V5)]
 ]
 #v(2 * line_spacing)
 
@@ -1079,6 +1085,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   caption: [Segmentation performance results of T-NR-V5, grouped by each class.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V5 (S-NR-V5)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 4,
@@ -1107,6 +1119,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   ),
   caption: [Segmentation performance results of S-NR-V5, grouped by each class.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Teacher - Robust - V5 (T-R-V5)]
+]
+#v(2 * line_spacing)
 
 #figure(
   table(
@@ -1137,6 +1155,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   caption: [Segmentation performance results of T-R-V5, grouped by each class.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V1 (S-R-V1)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 4,
@@ -1165,6 +1189,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   ),
   caption: [Segmentation performance results of S-R-V1, grouped by each class.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Robust - V2 (S-R-V2)]
+]
+#v(2 * line_spacing)
 
 #figure(
   table(
@@ -1195,6 +1225,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   caption: [Segmentation performance results of S-R-V2, grouped by each class.]
 )
 
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Student - Non-Robust - V6 (S-R-V6)]
+]
+#v(2 * line_spacing)
+
 #figure(
   table(
     columns: 4,
@@ -1223,6 +1259,91 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
   ),
   caption: [Segmentation performance results of S-NR-V6, grouped by each class.]
 )
+
+#v(2 * line_spacing)
+#heading(level: 4)[
+  #text(size: 12pt)[Comparison Charts]
+]
+#v(2 * line_spacing)
+
+Here are the comparison charts for pixel accuracy.
+
+#figure(
+  image("per-class-pixel-accuracy-teachers.png"),
+  caption: [Comparison of per-class pixel accuracy results between non-robust teacher (T-NR-V5) and robust teacher (T-R-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-pixel-accuracy-students.png"),
+  caption: [Comparison of per-class pixel accuracy results between students.]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-pixel-accuracy-teacher-non-robust-vs-students.png"),
+  caption: [Comparison of per-class pixel accuracy results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-pixel-accuracy-teacher-robust-vs-students.png"),
+  caption: [Comparison of per-class pixel accuracy results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
+)
+#v(2 * line_spacing)
+
+#pagebreak()
+Here are the comparison charts for IoU.
+
+#figure(
+  image("per-class-iou-teachers.png"),
+  caption: [Comparison of per-class IoU results between non-robust teacher (T-NR-V5) and robust teacher (T-R-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-iou-students.png"),
+  caption: [Comparison of per-class IoU results between students.]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-iou-teacher-non-robust-vs-students.png"),
+  caption: [Comparison of per-class IoU results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-iou-teacher-robust-vs-students.png"),
+  caption: [Comparison of per-class IoU results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
+)
+#v(2 * line_spacing)
+
+Here are the comparison charts for Dice scores.
+
+#figure(
+  image("per-class-dice-score-teachers.png"),
+  caption: [Comparison of per-class Dice score results between non-robust teacher (T-NR-V5) and robust teacher (T-R-V5).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-dice-score-students.png"),
+  caption: [Comparison of per-class Dice score results between students.]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-dice-score-teacher-non-robust-vs-students.png"),
+  caption: [Comparison of per-class Dice score results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
+)
+#v(2 * line_spacing)
+
+#figure(
+  image("per-class-dice-score-teacher-robust-vs-students.png"),
+  caption: [Comparison of per-class Dice score results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
+)
+#v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -1753,7 +1874,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 
 #v(2 * line_spacing)
 #heading(level: 3)[
-  #text(size: 12pt)[Results Based on Weather and Time of Day]
+  #text(size: 12pt)[Results Grouped by Weather and Time of Day]
 ]
 #v(2 * line_spacing)
 
@@ -2741,7 +2862,7 @@ Research objectives:
   ),
   [#sym.checkmark], [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
   [#sym.checkmark], [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
-  [], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models.],
+  [v], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models.],
   [], [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models, grouped by weather and time of day.],
   [], [RQ 3], [How is the latency across models?], [Chart showing the comparison of accumulated latency between models.],
   [], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
