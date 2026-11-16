@@ -2580,6 +2580,44 @@ High-Level latency results present the latency without the breakdown of the U-Ne
 
 #v(2 * line_spacing)
 #heading(level: 4)[
+  #text(size: 12pt)[Inference Latency]
+]
+#v(2 * line_spacing)
+
+#set par(
+  justify: false,
+  leading: line_spacing,
+)
+#figure(
+  table(
+    columns: 7,
+    table.header(
+      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
+    ),
+    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
+    [*P25*], [11.3226], [11.9216], [11.3312], [11.8737], [11.3584], [11.3971],
+    [*P50 (median)*], [11.3469], [12.1104], [11.3563], [12.1081], [12.0448], [12.1099],
+    [*Average*], [11.3886], [11.8793], [11.4019], [11.8730], [11.8412], [11.7726],
+    [*P75*], [11.3811], [12.2060], [11.3906], [12.2814], [12.1625], [12.3062],
+    [*P90*], [11.4809], [12.3631], [11.4935], [12.4222], [12.4240], [12.4241],
+    [*P95*], [11.7473], [12.4196], [11.7991], [12.5718], [12.8567], [12.6710],
+    [*P99*], [12.0211], [12.8438], [12.2067], [12.8523], [13.1814], [12.9189],
+    [*Max*], [13.7022], [14.0261], [13.4138], [13.7758], [17.1346], [14.4398],
+  ),
+  caption: [Inference latency across all model checkpoints.]
+)
+#set par(
+  justify: true,
+  leading: 2 * line_spacing,
+)
+
+#figure(
+  image("inference-latency.png"),
+  caption: [Inference latency across all model checkpoints.]
+)
+
+#v(2 * line_spacing)
+#heading(level: 4)[
   #text(size: 12pt)[Computational Overhead]
 ]
 #v(2 * line_spacing)
@@ -2611,37 +2649,9 @@ High-Level latency results present the latency without the breakdown of the U-Ne
   leading: 2 * line_spacing,
 )
 
-#v(2 * line_spacing)
-#heading(level: 4)[
-  #text(size: 12pt)[Inference Latency]
-]
-#v(2 * line_spacing)
-
-#set par(
-  justify: false,
-  leading: line_spacing,
-)
 #figure(
-  table(
-    columns: 7,
-    table.header(
-      [*Model Name*], [*T-NR-V5*], [*S-NR-V5*], [*T-R-V5*], [*S-R-V1*], [*S-R-V2*], [*S-NR-V6*]
-    ),
-    [*Distilled From*], [X], [T-NR-V5], [X], [T-NR-V5], [T-R-V5], [T-R-V5],
-    [*P25*], [11.3226], [11.9216], [11.3312], [11.8737], [11.3584], [11.3971],
-    [*P50 (median)*], [11.3469], [12.1104], [11.3563], [12.1081], [12.0448], [12.1099],
-    [*Average*], [11.3886], [11.8793], [11.4019], [11.8730], [11.8412], [11.7726],
-    [*P75*], [11.3811], [12.2060], [11.3906], [12.2814], [12.1625], [12.3062],
-    [*P90*], [11.4809], [12.3631], [11.4935], [12.4222], [12.4240], [12.4241],
-    [*P95*], [11.7473], [12.4196], [11.7991], [12.5718], [12.8567], [12.6710],
-    [*P99*], [12.0211], [12.8438], [12.2067], [12.8523], [13.1814], [12.9189],
-    [*Max*], [13.7022], [14.0261], [13.4138], [13.7758], [17.1346], [14.4398],
-  ),
-  caption: [Inference latency across all model checkpoints.]
-)
-#set par(
-  justify: true,
-  leading: 2 * line_spacing,
+  image("computational-overhead.png"),
+  caption: [Computational overhead across all model checkpoints.]
 )
 
 #v(2 * line_spacing)
@@ -2675,6 +2685,11 @@ High-Level latency results present the latency without the breakdown of the U-Ne
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("end-to-end-latency.png"),
+  caption: [End-to-end latency across all model checkpoints.]
 )
 
 #v(2 * line_spacing)
@@ -2718,6 +2733,11 @@ This section presents the detailed results of latency for each component inside 
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("encoder-only-latency.png"),
+  caption: [Encoder-only latency across all model checkpoints.]
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[Decoder-only Latency]
@@ -2751,6 +2771,11 @@ This section presents the detailed results of latency for each component inside 
   leading: 2 * line_spacing,
 )
 
+#figure(
+  image("decoder-only-latency.png"),
+  caption: [Decoder-only latency across all model checkpoints.]
+)
+
 #v(2 * line_spacing)
 #heading(level: 4)[
   #text(size: 12pt)[Segmentation head Latency]
@@ -2782,6 +2807,11 @@ This section presents the detailed results of latency for each component inside 
 #set par(
   justify: true,
   leading: 2 * line_spacing,
+)
+
+#figure(
+  image("segmentation-head-latency.png"),
+  caption: [Segmentation head latency across all model checkpoints.]
 )
 
 #v(2 * line_spacing)
