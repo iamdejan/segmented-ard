@@ -1266,7 +1266,7 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
 ]
 #v(2 * line_spacing)
 
-Here are the comparison charts for pixel accuracy.
+Here are the pixel accuracy-based comparison charts.
 
 #figure(
   image("per-class-pixel-accuracy-teachers.png"),
@@ -1293,7 +1293,7 @@ Here are the comparison charts for pixel accuracy.
 #v(2 * line_spacing)
 
 #pagebreak()
-Here are the comparison charts for IoU.
+Here are the IoU-based comparison charts.
 
 #figure(
   image("per-class-iou-teachers.png"),
@@ -1319,7 +1319,7 @@ Here are the comparison charts for IoU.
 )
 #v(2 * line_spacing)
 
-Here are the comparison charts for Dice scores.
+Here are the Dice score-based comparison charts.
 
 #figure(
   image("per-class-dice-score-teachers.png"),
