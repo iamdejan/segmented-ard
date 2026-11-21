@@ -2917,12 +2917,12 @@ Research objectives:
     - Robust distillation
     - Does robust distillation have any effect? If not, why?
   - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
-  - How well the students learnt? Answer using CKA.
+  - How well the students learnt? Answer using CKA. Is CKA a reliable tool to tell?
 + Trade-off of the performance.
   - Briefly mention performance results from Chapter 3
   - Factors contributing to the performance results:
     - Weighted random sampling
-    - Focal loss
+    - Focal loss: https://www.ultralytics.com/glossary/focal-loss and Focal Loss for Dense Object Detection by Lin et al.
     - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
   - Factors contributing to the trade-off? Read, understand, and cite these papers:
     - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
@@ -2930,6 +2930,7 @@ Research objectives:
 + Hardware utilization, CPU and memory consumption.
 + Limitations
   - Computing power.
+  - I haven't done preprocessing. Considering the model focused on the edges, would a preprocessing around the edges (e.g. sharpening) increase the scores?
   - Variance of the dataset (heavily North America-centric).
   - Lack of access on real hardware deployment used by cars.
 
