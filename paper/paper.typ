@@ -2854,12 +2854,17 @@ The hardware utilization results, as the name implies, present the results of ha
 
 #pagebreak()
 #align(center)[
-  #heading(level: 1, numbering: none)[
+  #heading(level: 1)[
     #text(size: 12pt)[[WIP] DISCUSSIONS]
   ]
 ]
 #v(2 * line_spacing)
 
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Hardware Utilization Results]
+]
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -2894,10 +2899,40 @@ Research objectives:
   [#sym.checkmark], [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
   [#sym.checkmark], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models.],
   [#sym.checkmark], [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models, grouped by weather and time of day.],
-  [], [RQ 3], [How is the latency compared across models?], [Chart showing the comparison of accumulated latency between models.],
-  [], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
+  [#sym.checkmark], [RQ 3], [How is the latency compared across models?], [Chart showing the comparison of accumulated latency between models.],
+  [#sym.checkmark], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
   [#sym.checkmark], [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
 )
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Outline]
+]
+#v(2 * line_spacing)
+
++ Robustness comparison of the models.
+  - Briefly mention robustness results from Chapter 3
+  - Factors contributing to the results:
+    - Adversarial training
+    - Robust distillation
+    - Does robust distillation have any effect? If not, why?
+  - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
+  - How well the students learnt? Answer using CKA. Is CKA a reliable tool to tell?
++ Trade-off of the performance.
+  - Briefly mention performance results from Chapter 3
+  - Factors contributing to the performance results:
+    - Weighted random sampling
+    - Focal loss: https://www.ultralytics.com/glossary/focal-loss and Focal Loss for Dense Object Detection by Lin et al.
+    - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
+  - Factors contributing to the trade-off? Read, understand, and cite these papers:
+    - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
+    - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
++ Hardware utilization, CPU and memory consumption.
++ Limitations
+  - Computing power.
+  - I haven't done preprocessing. Considering the model focused on the edges, would a preprocessing around the edges (e.g. sharpening) increase the scores?
+  - Variance of the dataset (heavily North America-centric).
+  - Lack of access on real hardware deployment used by cars.
 
 #pagebreak()
 #align(center)[
