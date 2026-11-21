@@ -2915,14 +2915,16 @@ Research objectives:
   - Factors contributing to the results:
     - Adversarial training
     - Robust distillation
+    - Does robust distillation have any effect? If not, why?
   - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
-  - How similar are the distilled models, compared to the teacher models using CKA.
+  - How well the students learnt? Answer using CKA.
 + Trade-off of the performance.
   - Briefly mention performance results from Chapter 3
   - Factors contributing to the performance results:
     - Weighted random sampling
     - Focal loss
-  - Factors contributing to the trade-off:
+    - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
+  - Factors contributing to the trade-off? Read, understand, and cite these papers:
     - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
     - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
 + Hardware utilization, CPU and memory consumption.
