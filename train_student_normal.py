@@ -1,3 +1,35 @@
+"""Distil a frozen segmentation teacher into a smaller, non-robust student.
+
+Training workflow
+-----------------
+1. Load and preprocess BDD100k images and palette masks as for the normal
+   teacher, using augmentation and weighted sampling for training only.
+2. Load ``./model/teacher.pt`` (the output of a previous teacher run), set it
+   to eval mode, and freeze its parameters. Initialise a smaller U-Net student
+   with a MobileNetV2 encoder; only the student belongs to the optimizer.
+3. For each *clean* training image, obtain frozen teacher logits without
+   gradient tracking and a student prediction with gradient tracking.
+4. Supervise the student with ground-truth Dice + Focal loss **and** the
+   teacher's class probabilities softened by temperature ``T``:
+
+   ``L_KD = alpha * L_hard(student(x), y)``
+   ``       + (1 - alpha) * T**2 * mean_pixel KL(p_T(x) || p_S(x))``
+
+   Here ``p_M(x) = softmax(logits_M(x) / T, dim=1)``, the class KL is summed
+   before the batch/spatial mean, ``T=3`` and ``alpha=0.5`` by default.
+   The temperature exposes information about non-winning classes, and
+   ``T**2`` compensates for the gradient scaling from softened logits.
+5. Backpropagate the mixed objective through the student only, take an AdamW
+   step, and report *clean* student macro IoU over classes 0-18.
+6. Validate using just the ground-truth supervised loss (no teacher/KL),
+   select the lowest clean-validation-loss checkpoint, and save it as
+   ``./model/student.pt`` together with curves and test overlays.
+
+Unlike Adversarially Robust Distillation (ARD), this program evaluates the
+student on clean inputs in both parts of the objective and generates no PGD
+examples. ``alpha`` weights the hard loss, not the KL term.
+"""
+
 import glob
 import os
 from typing import Callable, Dict, List, Tuple, cast
@@ -143,6 +175,11 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
+    """Training dimensions, batch size, optimizer settings and target device.
+
+    Hyperparameters control student training; teacher parameters are loaded
+    from a checkpoint and never entered into the student optimizer.
+    """
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = torch.cuda.device_count()
     NUM_WORKERS = 2
@@ -170,6 +207,7 @@ class Configuration:
 
 
 class Path:
+    """BDD100k source folders and cache path for weighted frame sampling."""
     BASE = "./data/bdd100k"
 
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
@@ -576,6 +614,24 @@ class DistillationLoss(nn.Module):
     classification vector, the softmax and log-softmax are taken over the class
     axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
 
+    For every pixel, ``p_T = softmax(z_teacher/T)`` and
+    ``log(p_S) = log_softmax(z_student/T)``. This code computes the directional
+    divergence ``KL(p_T || p_S) = sum_c p_T * (log(p_T) - log(p_S))``; the class
+    sum is averaged over pixels/images, then multiplied by ``T**2``. The final
+    objective is ``alpha * L_hard + (1-alpha) * T**2 * mean(KL)``. The teacher
+    probabilities express relative class plausibility, not hard labels; the
+    compound loss anchors the student to the actual mask when the teacher errs.
+
+    Steps
+    -----
+    1. Compute the teacher's per-pixel soft targets with temperature ``T``.
+    2. Compute temperature-softened student log-probabilities on the same image.
+    3. Reduce ``KL(teacher || student)`` over classes, then pixels/images, and
+       multiply by ``T**2``.
+    4. Compute the clean ground-truth Dice + Focal loss from student logits.
+    5. Blend with ``alpha``; optimise the student only while the teacher is
+       held in eval mode and excluded from gradient computation.
+
     Parameters
     ----------
     hard_loss : Callable[[Logits, BatchMask], Scalar]
@@ -594,6 +650,18 @@ class DistillationLoss(nn.Module):
         temperature: float = 3.0,
         alpha: float = 0.5,
     ):
+        """Store the clean supervised criterion and distillation weights.
+
+        Parameters
+        ----------
+        hard_loss : Callable[[Logits, BatchMask], Scalar]
+            Ground-truth segmentation loss, normally ``CompoundLoss``.
+        temperature : float, optional
+            Softmax temperature for both networks. Defaults to 3.0.
+        alpha : float, optional
+            Coefficient of the hard loss; ``1-alpha`` weights the KL loss.
+            Defaults to 0.5.
+        """
         super().__init__()
         self.temperature = temperature
         self.alpha = alpha
@@ -607,6 +675,15 @@ class DistillationLoss(nn.Module):
     ) -> Scalar:
         """Compute the blended distillation loss.
 
+        Steps
+        -----
+        1. Temperature-soften frozen teacher logits and live student logits
+           along their class channels (dimension 1).
+        2. Evaluate ``KL(teacher || student)`` per pixel and scale by ``T**2``.
+        3. Calculate supervised Dice + Focal from the clean student prediction.
+        4. Return their weighted sum; it is differentiated through the student
+           logits but not through the teacher logits during the training loop.
+
         Parameters
         ----------
         student_logits : Logits
@@ -619,7 +696,7 @@ class DistillationLoss(nn.Module):
         Returns
         -------
         Scalar
-            Weighted sum of the Dice loss and the temperature-scaled KL loss.
+            Weighted sum of the compound Dice + Focal loss and scaled KL loss.
         """
         # Soften the teacher logits into probabilities and the student logits
         # into log-probabilities over the class axis (dim=1). The paper uses
@@ -628,9 +705,9 @@ class DistillationLoss(nn.Module):
         soft_targets = torch.softmax(teacher_logits / self.temperature, dim=1)
         soft_prob = torch.log_softmax(student_logits / self.temperature, dim=1)
 
-        # KL(soft_targets || soft_prob), summed over classes per pixel and then
-        # averaged over the batch and spatial positions. Scaled by T**2 as
-        # suggested by the authors of the paper.
+        # KL is asymmetric: KL(teacher || student) treats the frozen teacher as
+        # the distribution to match. Sum class differences at each pixel before
+        # averaging pixels and images; T**2 corrects for softened gradients.
         kl_loss = torch.sum(
             soft_targets * (soft_targets.log() - soft_prob), dim=1
         ).mean() * (self.temperature**2)
@@ -720,6 +797,16 @@ def execute_epoch(
     accumulates gradients. ``loss_fn`` is expected to be callable as
     ``loss_fn(student_logits, target, teacher_logits)``.
 
+    Steps
+    -----
+    1. Put the teacher in eval mode and the student in train mode.
+    2. For each batch, compute clean teacher predictions without autograd and
+       clean student predictions with autograd.
+    3. Combine hard ground-truth supervision with softened teacher KL, clear
+       old student gradients, backpropagate and take one optimizer step.
+    4. Track the mixed training loss and clean student macro IoU. IoU does not
+       enter the gradient-based objective.
+
     Parameters
     ----------
     teacher : nn.Module
@@ -762,11 +849,13 @@ def execute_epoch(
         # Student forward pass with gradient tracking enabled.
         student_logits = forward(student, X)
 
-        # Combined hard (Dice) + soft (KL) distillation loss.
+        # The hard Dice + Focal term uses ground-truth masks, while the soft KL
+        # term transfers per-class teacher confidence at each clean pixel.
         loss = loss_fn(student_logits, y, teacher_logits)
         train_loss += loss.item()
 
-        # Reset Gradients & Backpropagate Loss
+        # Differentiate only the student: the teacher ran under no_grad and
+        # none of its parameters were registered with the student optimizer.
         optimizer.zero_grad()
         loss.backward()
 
@@ -857,9 +946,20 @@ def train(
     """Train the student via knowledge distillation from the teacher.
 
     Each epoch runs a distillation pass (``loss_fn``) to update the student and
-    then evaluates the student against the hard ground-truth masks with a plain
-    Dice loss. The teacher is used only as the source of soft targets and is
-    never updated.
+    then evaluates the student against hard ground-truth masks with the clean
+    *compound Dice + Focal loss* (not a plain Dice-only loss). The teacher is
+    used only as the source of soft targets and is never updated. Therefore
+    the recorded train and validation losses measure different objectives:
+    train is hard-plus-KL, whereas validation is just hard supervision.
+
+    Steps
+    -----
+    1. Run a clean teacher-to-student distillation epoch; only student
+       parameters receive optimizer updates.
+    2. Evaluate clean student segmentation without the teacher or KL term.
+    3. Use clean validation loss to update the learning-rate scheduler and
+       snapshot the lowest-loss student state dictionary.
+    4. Log both losses and IoU, restore the best student state, and return it.
 
     Parameters
     ----------
@@ -1183,6 +1283,21 @@ def visualize_predictions(
 
 
 def main() -> None:
+    """Load a trained teacher and distil it into a smaller clean student.
+
+    Steps
+    -----
+    1. Build weighted/augmented training and clean validation data pipelines.
+    2. Load and freeze ``teacher.pt``; create a MobileNetV2 U-Net student.
+    3. Construct Dice + Focal hard loss and temperature-scaled KD loss.
+    4. Train only student weights, retaining the best clean-validation model.
+    5. Save ``student.pt`` and export training plots and test overlays.
+
+    Returns
+    -------
+    None
+        Produces saved model and visual diagnostics.
+    """
     # Print current Torch package versions
     print("Package versions:")
     print("*" * 26)

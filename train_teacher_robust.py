@@ -1,3 +1,30 @@
+"""Train a segmentation teacher with TRADES adversarial regularisation.
+
+Training workflow
+-----------------
+1. Read BDD100k images and palette masks, retaining ``(B, H, W)`` class-index
+   targets; augment training images and sample rare-class frames more often.
+2. Build an ImageNet-initialised ResNet18 U-Net and the same clean
+   ``0.5 * Dice + 1.0 * Focal`` loss used by the normal teacher.
+3. For every training batch, calculate clean logits and the supervised
+   ``L_natural``. Freeze the clean prediction as a reference distribution.
+4. Create a TRADES adversary by repeatedly increasing the per-pixel KL
+   divergence between clean and perturbed predictions, with an L-infinity
+   constraint around the original image and an additional ``[0, 1]`` clamp.
+5. Run the final perturbed image through the teacher and minimise
+   ``L_TRADES = L_natural + beta * KL(p_clean || p_adversarial)``.
+   Only the second term uses adversarial inputs; the supervised labels are
+   applied to the clean branch. The defaults are epsilon=0.03, step=0.01,
+   10 PGD steps, and beta=6.0, all on the image scale ``[0, 1]``.
+6. Update model parameters once per batch using the combined loss. Compute
+   training macro IoU from *clean* predictions; no adversarial IoU is logged.
+7. Validate using only the clean Dice + Focal loss, schedule on that metric,
+   restore the best clean-validation checkpoint, and save ``teacher.pt``.
+
+TRADES trains one model; it is not teacher-student distillation. The resulting
+teacher may later be frozen as the target of a student distillation run.
+"""
+
 import gc
 import glob
 import os
@@ -628,6 +655,11 @@ def kl_divergence(probs: Logits, adv_probs: Logits, eps: float = 1e-8) -> Scalar
     and spatial dimensions, so every pixel contributes equally to the regulariser
     regardless of the image resolution.
 
+    Mathematically, for each image ``b`` and pixel ``(h, w)``, the divergence
+    is ``sum_c p[b,c,h,w] * log(p[b,c,h,w] / q[b,c,h,w])``. The class sum
+    precedes the spatial/batch mean; using a global sum would scale with image
+    size and make the relative ``beta`` weight resolution-dependent.
+
     Steps
     -----
     1. Add ``eps`` to both distributions so the logarithm never sees a zero
@@ -677,6 +709,26 @@ class TradesLoss(nn.Module):
     projected back onto the ``L_inf`` ball of radius ``epsilon``. The final
     loss is ``natural_loss(clean) + beta * KL(clean || adversarial)``.
 
+    ``p_clean = softmax(model(x))`` is detached before attack generation: the
+    model's clean prediction serves as a fixed reference when finding and
+    penalising changes on nearby images. In the final loss, gradients of the
+    natural term flow through clean logits, and gradients of the robustness
+    term flow through the final adversarial forward pass. The PGD attack itself
+    is not differentiated through during the outer parameter update.
+
+    Steps
+    -----
+    1. Predict on clean ``x`` and compute the supervised Dice + Focal loss.
+    2. Detach its softmax as ``p_clean``; initialise ``x_adv`` at the *clean*
+       input (this implementation does not use a random PGD start).
+    3. Temporarily switch the network to evaluation mode (``model.eval()``)
+       to protect BatchNorm statistics, while retaining autograd. Ascend
+       ``KL(p_clean || softmax(model(x_adv)))`` using image sign gradients.
+    4. After each PGD step, project ``x_adv - x`` into ``[-epsilon, epsilon]``
+       and clamp image values to ``[0, 1]``.
+    5. Restore training mode, calculate the final KL regulariser, and return
+       ``L_natural + beta * L_robust`` with detached clean logits for IoU.
+
     Parameters
     ----------
     natural_loss : nn.Module
@@ -696,6 +748,10 @@ class TradesLoss(nn.Module):
     The ``model`` is passed to :meth:`forward` rather than stored on the
     instance, so the loss object stays independent of any particular network
     checkpoint and can be reused across runs.
+    ``beta`` balances clean accuracy against local prediction consistency;
+    it is not the radius or step size of the adversarial search. ``alpha`` here
+    is the PGD step size, unlike the mixture weight named alpha in the student
+    distillation scripts. The validation objective omits the TRADES KL term.
     """
 
     def __init__(
@@ -742,7 +798,8 @@ class TradesLoss(nn.Module):
         3. Iteratively ascend the KL divergence gradient while projecting back
            onto the epsilon ``L_inf`` ball and the ``[0, 1]`` pixel range.
         4. Restore the original training state and evaluate the final robustness
-           regulariser on the adversarial image.
+           regulariser on the adversarial image. Unlike the inner maximisation,
+           this last forward pass retains a graph for updating model weights.
         5. Return the total loss plus the detached clean logits so the caller
            does not need a redundant forward pass for metric tracking.
 
@@ -761,16 +818,17 @@ class TradesLoss(nn.Module):
             Tuple containing the differentiable composite loss and the detached
             clean logits.
         """
-        # 1. Clean branch: baseline predictions and the task loss. The clean
-        # probabilities are detached so the adversarial steps only propagate
-        # gradients through the perturbed branch.
+        # 1. Supervised branch: clean labels constrain accuracy while the KL
+        # branch below constrains local consistency. Detaching this reference
+        # distribution prevents the PGD search from chasing a moving target.
         clean_logits = forward(model, x)
         natural = cast(Scalar, self.natural_loss(clean_logits, y))
         clean_probs = torch.softmax(clean_logits, dim=1).detach()
 
-        # 2. PGD attack while freezing BatchNorm updates. Running BatchNorm in
-        # training mode over ``num_steps`` iterations would corrupt the moving
-        # mean/variance statistics and retain unnecessary graphs.
+        # 2. PGD inner maximisation. ``model.eval()`` stops BatchNorm running
+        # statistics from changing over repeated adversarial passes; it does
+        # NOT disable autograd. Gradients are requested only for x_adv via
+        # autograd.grad, so the attack does not accumulate parameter gradients.
         was_training = model.training
         model.eval()
 
@@ -797,8 +855,9 @@ class TradesLoss(nn.Module):
         if was_training:
             model.train()
 
-        # 3. Robustness term on the final adversarial example: penalise how much
-        # the perturbation moved the prediction away from the clean prediction.
+        # 3. Outer minimisation: the final adversarial forward pass uses the
+        # restored model mode and participates in loss.backward(). Its KL term
+        # pushes adversarial predictions toward the detached clean reference.
         adv_logits = forward(model, x_adv)
         adv_probs = torch.softmax(adv_logits, dim=1)
         robust = kl_divergence(clean_probs, adv_probs)
@@ -887,7 +946,9 @@ def execute_epoch(
     -----
     1. Set the model to training mode and initialise metric accumulators.
     2. Iterate over the dataloader, transferring tensors to the device.
-    3. Zero gradients, evaluate TRADES loss, backpropagate, and step weights.
+    3. Zero parameter gradients, run the PGD inner maximisation inside
+       ``TradesLoss``, backpropagate the final clean-plus-robust objective, and
+       step the model weights once (not once per PGD iteration).
     4. Accumulate loss and macro IoU from the returned clean logits.
     5. Return epoch-level average loss and IoU.
 
@@ -1367,6 +1428,21 @@ def visualize_predictions(
 
 
 def main() -> None:
+    """Prepare BDD100k and train, validate, and export the TRADES teacher.
+
+    Steps
+    -----
+    1. Construct weighted training and unaugmented validation loaders.
+    2. Create a ResNet18 U-Net, supervised Dice + Focal loss and ``TradesLoss``.
+    3. Run adversarial TRADES epochs while selecting checkpoints and scheduling
+       learning rate according to *clean* validation loss.
+    4. Save the best model and inspect learning curves and test overlays.
+
+    Returns
+    -------
+    None
+        Results are persisted to files and reported through the console.
+    """
     # Print current Torch package versions
     print("Package versions:")
     print("*" * 26)
@@ -1469,6 +1545,9 @@ def main() -> None:
         ignore_index=19,
     )
 
+    # This wrapper performs an inner KL-maximising PGD attack per batch and an
+    # outer combined-loss update. It reuses the same supervised criterion for
+    # clean labels; no teacher/student pair is involved in this stage.
     loss_fn = TradesLoss(natural_loss=natural_loss)
 
     # Define optimizer

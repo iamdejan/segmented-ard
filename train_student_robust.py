@@ -1,3 +1,39 @@
+"""Train a smaller semantic-segmentation student using ARD and a frozen teacher.
+
+Training workflow
+-----------------
+1. Prepare augmented/weighted BDD100k training batches and clean validation
+   batches. Masks are one-hot 20-class tensors; the supervised criterion ignores
+   class 19 (``unknown``), and macro IoU reports classes 0-18 only.
+2. Load the pretrained ``./model/teacher.pt`` and freeze its parameters.
+   Initialise a smaller MobileNetV2 U-Net student; only student weights are
+   included in AdamW. The teacher can originate from normal or TRADES training.
+3. For each clean image ``x`` and mask ``y``, find ``x_adv`` by *maximising*
+   the student's Dice + Focal loss on the perturbed image. Start randomly
+   inside an L-infinity ball, take signed-gradient PGD steps, and project onto
+   both the epsilon-ball and the valid image range ``[0, 1]``.
+4. Forward the student on ``x_adv`` and ``x``. Forward the frozen teacher on
+   only ``x`` (under ``no_grad``). Distil the clean teacher's prediction into
+   the student's **adversarial** prediction with a per-pixel directional KL:
+
+   ``L_ARD = alpha * L_hard(student(x), y)``
+   ``        + (1-alpha) * T**2 * mean_pixel KL(p_T(x) || p_S(x_adv))``
+
+   Softmax class probabilities use temperature ``T=3``, and ``alpha=0.5``
+   weights the clean Dice + Focal term. The class KL is summed before the
+   batch/spatial mean. This alpha convention weights the opposite term from
+   the alpha used in the original ARD paper.
+5. Optimise the student once with this *outer* objective; attack creation is
+   separate and is not differentiated through. Report clean student macro IoU.
+6. Select the best student by *clean* validation Dice + Focal loss (not ARD
+   loss), then save ``student.pt`` and export training curves/test overlays.
+
+PGD defaults: ``epsilon=8/255``, ``step_size=2/255`` and ``10`` ascent steps.
+The teacher is a fixed target, not the model being attacked. The robust
+student differs from ordinary distillation because its KL term evaluates
+the *adversarial student* against the *clean teacher*.
+"""
+
 import glob
 import os
 
@@ -137,6 +173,12 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
+    """Student optimizer settings and PGD attack budget for ARD training.
+
+    The ``ARD_*`` settings operate on ``[0, 1]`` RGB image tensors. They
+    constrain the inner *maximisation* and are separate from the KL mixture
+    weight and temperature supplied when ``DistillationLoss`` is constructed.
+    """
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = torch.cuda.device_count()
     NUM_WORKERS = 2
@@ -172,6 +214,7 @@ class Configuration:
 
 
 class Path:
+    """BDD100k source folders and cache path for weighted frame sampling."""
     BASE = "./data/bdd100k"
 
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
@@ -582,6 +625,18 @@ class DistillationLoss(nn.Module):
     classification vector, the softmax and log-softmax are taken over the class
     axis ``dim=1`` (the paper's ``dim=-1`` refers to a 1-D class vector).
 
+    Formula (the mean is over the batch and pixel positions after summing
+    over classes)::
+
+        L_ARD = alpha * [dice_weight * Dice(S(x), y)
+                         + focal_weight * Focal(S(x), y)]
+                + (1-alpha) * T**2 * mean KL(p_T(x) || p_S(x_adv))
+
+    Unlike normal distillation, the KL branch does not see clean student
+    logits. Those logits contribute only the direct supervised term. The KL
+    direction matters: teacher probabilities are the *target*, and gradients
+    on the student drive adversarial predictions toward that clean target.
+
     Steps
     -----
     1. Soften the clean teacher logits and adversarial student logits.
@@ -614,6 +669,23 @@ class DistillationLoss(nn.Module):
         temperature: float = 3.0,
         alpha: float = 0.5,
     ) -> None:
+        """Configure the supervised and distillation terms and their weights.
+
+        Parameters
+        ----------
+        hard_loss : Callable[[Logits, BatchMask], Scalar]
+            Ground-truth Dice + Focal criterion, also used for the PGD attack.
+        temperature : float, optional
+            Positive softmax temperature for teacher and student. Default 3.0.
+        alpha : float, optional
+            Fraction of clean supervised loss; ``1-alpha`` multiplies KL.
+            Must lie between zero and one. Default 0.5.
+
+        Raises
+        ------
+        ValueError
+            If temperature is non-positive or alpha is not in ``[0, 1]``.
+        """
         super().__init__()
 
         # Distillation temperature must be positive because it divides logits,
@@ -645,7 +717,9 @@ class DistillationLoss(nn.Module):
         -----
         1. Temperature-soften clean teacher and adversarial student logits.
         2. Compute the temperature-scaled, per-pixel KL divergence.
-        3. Compute clean Dice + Focal supervision with ``hard_loss``.
+        3. Compute clean Dice + Focal supervision with ``hard_loss``. Only
+           ``student_clean_logits`` are compared to the ground-truth mask;
+           the teacher is not trained by this term.
         4. Return the weighted sum using this class's existing alpha convention.
 
         Parameters
@@ -673,9 +747,10 @@ class DistillationLoss(nn.Module):
             dim=1,
         )
 
-        # Preserve the script's existing KL formulation exactly: sum over
-        # classes per pixel, average across batch/spatial positions, and scale
-        # by T**2. ARD changes which logits enter this term, not its definition.
+        # The divergence is KL(teacher_clean || student_adversarial), not the
+        # reverse: the clean teacher's full class distribution is the reference.
+        # First sum over classes at every pixel, then average batch and space.
+        # T**2 compensates for the temperature's gradient-scale reduction.
         kl_loss = torch.sum(
             soft_targets * (soft_targets.log() - soft_prob),
             dim=1,
@@ -706,6 +781,12 @@ def generate_adversarial_examples(
     use cross-entropy for classification; this segmentation adaptation instead
     maximizes the existing compound Dice + Focal loss so the attack objective
     matches the task's current supervision.
+
+    This is an *inner maximisation*, not the final student update. At step
+    ``k`` the code differentiates ``L_hard(S(x_adv_k), y)`` with respect to
+    ``x_adv_k``, sets ``x_adv_(k+1) = x_adv_k + step_size * sign(gradient)``,
+    and projects the perturbation onto ``[-epsilon, epsilon]`` about the clean
+    input followed by a clamp to ``[0, 1]``. Parameters are not stepped here.
 
     Steps
     -----
@@ -763,9 +844,9 @@ def generate_adversarial_examples(
     )
     adversarial_images = torch.clamp(adversarial_images, 0.0, 1.0).detach()
 
-    # Only the image gradient is requested. ``autograd.grad`` therefore avoids
-    # accumulating parameter gradients during attack construction; the student
-    # parameters are updated later from the final ARD objective.
+    # Only the image gradient is requested. ``autograd.grad`` avoids adding to
+    # parameter .grad buffers; the student weights change only during the outer
+    # update. PGD nevertheless requires autograd to be enabled by its caller.
     for _ in range(num_steps):
         adversarial_images.requires_grad_(True)
         adversarial_logits = forward(student, adversarial_images)
@@ -879,6 +960,8 @@ def execute_epoch(
     3. Compute clean teacher logits without gradients.
     4. Compute clean and adversarial student logits and the ARD loss.
     5. Backpropagate only through the student and record clean macro IoU.
+       Gradients are enabled for the training step; the ``no_grad`` decorator
+       on the separate IoU helper does not disable training gradients.
 
     Parameters
     ----------
@@ -965,7 +1048,9 @@ def execute_epoch(
         )
         train_loss += loss.item()
 
-        # Backpropagate the outer ARD objective through the student only.
+        # The outer minimisation differentiates through the clean student
+        # branch (hard supervision) and adversarial branch (KL supervision),
+        # but not the frozen teacher or PGD image-generation trajectory.
         loss.backward()
 
         # Update Model Gradients
@@ -1070,6 +1155,12 @@ def train(
     2. Evaluate the student on clean validation images with the compound loss.
     3. Step the scheduler, log metrics, and retain the best validation checkpoint.
     4. Restore and return the best student weights after all epochs.
+
+    Notes
+    -----
+    Training loss and clean validation loss are not directly like-for-like:
+    the training objective includes adversarial KL while validation includes
+    only supervised Dice + Focal.
 
     Parameters
     ----------
@@ -1371,6 +1462,22 @@ def visualize_predictions(
 
 
 def main() -> None:
+    """Configure an ARD student run and export the best clean-validation model.
+
+    Steps
+    -----
+    1. Load BDD100k and create weighted training / clean validation loaders.
+    2. Freeze the pretrained teacher and initialise a smaller student U-Net.
+    3. Create the segmentation hard loss, ARD KL loss and PGD hyperparameters.
+    4. Train the student using adversarial inputs to its KL branch; use clean
+       validation loss for the scheduler and best-checkpoint selection.
+    5. Save the chosen student and produce learning curves/test overlays.
+
+    Returns
+    -------
+    None
+        Outputs are saved files and console diagnostics.
+    """
     # Print current Torch package versions
     print('Package versions:')
     print('*'*26)

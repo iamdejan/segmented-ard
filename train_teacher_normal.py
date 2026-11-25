@@ -1,3 +1,31 @@
+"""Train a standard (non-adversarial) U-Net segmentation teacher on BDD100k.
+
+Training workflow
+-----------------
+1. Locate BDD100k RGB images and colour-coded semantic masks, convert each
+   mask colour to one of 20 class IDs, and make train/validation/test tables.
+2. Resize and augment only the training samples. Convert masks to one-hot
+   tensors; class 19 (``unknown``) is ignored by the supervised loss and IoU.
+3. Draw training frames with a weighted replacement sampler so rare or
+   boundary-heavy examples are seen more often than under uniform sampling.
+4. Train an ImageNet-initialised ResNet18 U-Net with a compound segmentation
+   objective: ``L_hard = 0.5 * L_Dice + 1.0 * L_Focal``. Dice encourages region
+   overlap, while focal loss emphasises pixels that are hard to classify.
+5. For each batch, predict ``(B, 20, H, W)`` logits, compute ``L_hard`` from
+   the ground-truth mask, backpropagate, and take an AdamW optimizer step.
+   Report clean batch macro IoU over classes 0-18, excluding absent classes.
+6. After every epoch, measure the same clean objective and macro IoU on the
+   validation split; use validation loss to adjust the learning rate and retain
+   the best checkpoint (not necessarily the final epoch's weights).
+7. Restore those weights, save ``./model/teacher.pt``, plot the history, and
+   visualise test predictions. The resulting teacher can supply fixed soft
+   targets to either student-training script.
+
+This is supervised teacher training: there is no adversarial perturbation,
+TRADES regulariser, or student distillation term in this program. Paths and
+hyperparameters are defined by :class:`Path` and :class:`Configuration`.
+"""
+
 import glob
 import os
 from typing import Dict, List, Tuple, cast
@@ -143,6 +171,12 @@ def color_label_to_class_index(label: np.ndarray) -> np.ndarray:
 
 
 class Configuration:
+    """Training hyperparameters, segmentation dimensions and target device.
+
+    ``NUM_CLASSES`` includes the ignored ``unknown`` class; the resolution
+    values define the smaller images used in all forward/backward passes.
+    The patience setting controls validation-loss-based learning-rate decay.
+    """
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     NUM_DEVICES = torch.cuda.device_count()
     NUM_WORKERS = 2
@@ -170,6 +204,11 @@ class Configuration:
 
 
 class Path:
+    """Locations of BDD100k images, masks and cached sampling weights.
+
+    Training uses the train/validation folders and derives a held-out test
+    subset in ``load_dataset_from_files``; no test examples update weights.
+    """
     BASE = "./data/bdd100k"
 
     SEGMENTATION_MASK_LABEL_FOLDER = BASE + "/segmentation_maps/color_labels"
@@ -481,6 +520,12 @@ class CompoundLoss(nn.Module):
     Focal loss down-weights easy background pixels to focus gradient updates on
     hard boundaries and minority classes.
 
+    The loss operates on unnormalised logits and combines two complementary
+    error signals: Dice penalises disagreement in predicted and true regions,
+    while focal loss emphasises difficult pixels. The ``unknown`` target class
+    (ID 19) is excluded from both constituent supervised losses; macro IoU is
+    computed separately and does not contribute gradients.
+
     Steps
     -----
     1. Initialize the underlying SMP DiceLoss and FocalLoss modules in multiclass mode.
@@ -533,7 +578,8 @@ class CompoundLoss(nn.Module):
         -----
         1. Check if targets are 4D (one-hot encoded); if so, collapse to class indices.
         2. Evaluate Dice loss and Focal loss independently.
-        3. Weight and sum both loss terms.
+        3. Weight and sum both loss terms. This is the complete training
+           objective for the normal teacher, with no adversarial KL term.
 
         Parameters
         ----------
@@ -639,8 +685,10 @@ def execute_epoch(
     1. Set the model to training mode.
     2. For each batch, move the data to ``device``, run :func:`forward`, and
        compute the loss.
-    3. Backpropagate the loss and step the optimizer.
-    4. Accumulate the batch loss and macro IoU.
+    3. Clear old gradients, backpropagate the compound loss, and step AdamW;
+       only the teacher network is optimised.
+    4. Accumulate the batch loss and clean macro IoU. IoU is diagnostic, not
+       an additional loss term, and classes absent from the batch are skipped.
     5. Return the per-batch mean loss and macro IoU.
 
     Parameters
@@ -678,11 +726,13 @@ def execute_epoch(
         loss = loss_fn(y_pred, y)
         train_loss += loss.item()
 
-        # Reset Gradients & Backpropagate Loss
+        # Every batch is an independent optimisation step: clear accumulated
+        # gradients before differentiating the current Dice + Focal objective.
         optimizer.zero_grad()
         loss.backward()
 
-        # Update Model Gradients
+        # Apply the computed parameter gradients once; no PGD inner loop is
+        # involved in ordinary teacher training.
         optimizer.step()
 
         # Compute Macro IoU for the batch (excluding class 19)
@@ -1089,6 +1139,22 @@ def visualize_predictions(
 
 
 def main() -> None:
+    """Prepare data, train the clean teacher, and export its best checkpoint.
+
+    Steps
+    -----
+    1. Create train/validation/test tables and the augmentation pipelines.
+    2. Reuse or calculate sampling weights, then construct data loaders.
+    3. Initialise a ResNet18 U-Net, compound Dice + Focal loss, AdamW and a
+       validation-loss-driven learning-rate scheduler.
+    4. Optimise on training batches and choose weights by clean validation loss.
+    5. Save ``teacher.pt`` and export learning curves and test overlays.
+
+    Returns
+    -------
+    None
+        Outputs are files and printed training diagnostics.
+    """
     # Print current Torch package versions
     print("Package versions:")
     print("*" * 26)
@@ -1199,7 +1265,8 @@ def main() -> None:
         ignore_index=19,
     )
 
-    # Define optimizer
+    # AdamW minimises the supervised compound loss; the scheduler reacts to
+    # held-out clean validation loss, not the training loss or IoU score.
     optimizer = torch.optim.AdamW(model.parameters(), lr=Configuration.LR)
 
     # Define Scheduler
