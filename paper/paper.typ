@@ -1553,7 +1553,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Adversarial Robustness]
-]
+] <results-adversarial-robustness>
 #v(2 * line_spacing)
 
 The results of the adversarial robustness will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the robustness for images with weather and time of day metadata.
@@ -1878,7 +1878,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 ]
 #v(2 * line_spacing)
 
-Similar to the limitation mentioned previously (in @segmentation-performance-weather-timeofday), the adversarial robustness results of this part will not be based on all 10K images, but rather a small selected subset of 545 images.
+Similar to the limitation mentioned previously in @segmentation-performance-weather-timeofday, the adversarial robustness results of this part will not be based on all 10K images, but rather a small selected subset of 545 images.
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -2862,7 +2862,7 @@ The hardware utilization results, as the name implies, present the results of ha
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[Hardware Utilization Results]
+  #text(size: 12pt)[[WIP] Charts]
 ]
 #v(2 * line_spacing)
 
@@ -2928,11 +2928,31 @@ Research objectives:
     - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
     - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
 + Hardware utilization, CPU and memory consumption.
+  - Why are the latency between ResNet-18-based U-Net model and MobileNetV2-based U-Net model similar?
 + Limitations
   - Computing power.
   - I haven't done preprocessing. Considering the model focused on the edges, would a preprocessing around the edges (e.g. sharpening) increase the scores?
   - Variance of the dataset (heavily North America-centric).
   - Lack of access on real hardware deployment used by cars.
+
+#set par(
+  justify: true,
+  leading: 2 * line_spacing
+)
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Comparison of Robustness Between Models]
+]
+#v(2 * line_spacing)
+
+Based on the results presented in @results-adversarial-robustness, adversarial training has been effectively applied to both robust students S-R-V1 (distilled from T-NR-V5) and S-R-V2 (distilled from T-R-V5). In both students, the attack successful rate (ASR) of pixel accuracy, mean IoU, and Dice scores are below 40% for each metric, compared to non-robust models that achieve more than 95%. This is consistent with results presented by Goldblum et al. (2020), where adversarial robust distillation indeed makes the student models more robust.
+
+However, by comparing the ASR of the students and the robust model, it can be deduced that adversarial robust distillation is less effective than the TRADES distiillation used by the teacher. In pixel accuracy, mean IoU, and Dice score, T-R-V5 achieve less than 25% ASR, lower than ASR of the students. This can attributed by the fact that the student models do not fully learn by distillation. The weight of the knowledge distillation is only 50%, which means some knowledge that the students were trained on were not robust to adversarial attack. This also proves that even though Adversarial Robustness Distillation (ARD) presented by Goldblum et al. (2020) can produce a student that is more robust than its teacher, at least for semantic segmentation task, it is not always the case.
+
+Another interesting point for discussion is that the student's robustness is in any way not related to the robustness of the teacher. S-R-V1, which is distilled from non-robust teacher T-NR-V5, has lower pixel accuracy ASR of 16.47%, compared to S-R-V2 (distilled from a robust teacher T-R-V5) which has pixel accuracy ASR of 22.38%. Even though the mean IoU and Dice score ASR are lower for S-R-V2 (meaning that S-R-V2 is comparatively more robust), student model distilled from non-robust teacher has a relatively robust result. Moreover, comparing the robustness results between S-NR-V5 (using regular, non-robust knowledge distillation technique from a non-robust teacher T-NR-V5) and S-NR-V6 (using regular, non-robust knowledge distillation technique from a robust teacher T-R-V5), both student models yield attack successful rate of more than 90% on each metric. This is, once again, consistent with results presented by Goldblum et al. (2020).
+
+// TODO dejan: show the CKA result.
 
 #pagebreak()
 #align(center)[
