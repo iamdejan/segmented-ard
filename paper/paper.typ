@@ -1687,6 +1687,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1724,6 +1725,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: true
@@ -1760,6 +1762,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1797,6 +1800,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1834,6 +1838,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -2855,14 +2860,14 @@ The hardware utilization results, as the name implies, present the results of ha
 #pagebreak()
 #align(center)[
   #heading(level: 1)[
-    #text(size: 12pt)[[WIP] DISCUSSIONS]
+    #text(size: 12pt)[DISCUSSIONS]
   ]
 ]
 #v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Charts]
+  #text(size: 12pt)[[WIP] Outline]
 ]
 #v(2 * line_spacing)
 
@@ -2889,27 +2894,8 @@ Research objectives:
   + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
 ]
 
-#table(
-  columns: 4,
-  fill: (_, y) => if y == 0 { gray.lighten(85%) },
-  table.header(
-    [*Done?*], [*Research Question*], [*Specific Question*], [*Relevant Chart*],
-  ),
-  [#sym.checkmark], [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
-  [#sym.checkmark], [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
-  [#sym.checkmark], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models.],
-  [#sym.checkmark], [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models, grouped by weather and time of day.],
-  [#sym.checkmark], [RQ 3], [How is the latency compared across models?], [Chart showing the comparison of accumulated latency between models.],
-  [#sym.checkmark], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
-  [#sym.checkmark], [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
-)
-
-#v(2 * line_spacing)
-#heading(level: 2)[
-  #text(size: 12pt)[[WIP] Outline]
-]
-#v(2 * line_spacing)
-
+\
+Outline:
 + Robustness comparison of the models.
   - Briefly mention robustness results from Chapter 3
   - Factors contributing to the results:
@@ -2918,7 +2904,7 @@ Research objectives:
     - Does robust distillation have any effect? If not, why?
   - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
   - How well the students learnt? Answer using CKA. Is CKA a reliable tool to tell?
-+ Trade-off of the performance.
++ Performance trade-off.
   - Briefly mention performance results from Chapter 3
   - Factors contributing to the performance results:
     - Weighted random sampling
@@ -2942,17 +2928,21 @@ Research objectives:
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Comparison of Robustness Between Models]
+  #text(size: 12pt)[Comparison of Robustness Between Models]
 ]
 #v(2 * line_spacing)
 
-Based on the results presented in @results-adversarial-robustness, adversarial training has been effectively applied to both robust students S-R-V1 (distilled from T-NR-V5) and S-R-V2 (distilled from T-R-V5). In both students, the attack successful rate (ASR) of pixel accuracy, mean IoU, and Dice scores are below 40% for each metric, compared to non-robust models that achieve more than 95%. This is consistent with results presented by Goldblum et al. (2020), where adversarial robust distillation indeed makes the student models more robust.
+Based on the results presented in @results-adversarial-robustness, adversarial training has been effectively applied to both robust students S-R-V1 (distilled from T-NR-V5) and S-R-V2 (distilled from T-R-V5). In both students, the attack successful rate (ASR) of pixel accuracy, mean IoU, and Dice scores are below 40% for each metric, compared to non-robust models that achieve more than 95%. All of the results are consistent with results presented by Goldblum et al. (2020), where adversarial robust distillation indeed makes the student models more robust.
 
 However, by comparing the ASR of the students and the robust model, it can be deduced that adversarial robust distillation is less effective than the TRADES distiillation used by the teacher. In pixel accuracy, mean IoU, and Dice score, T-R-V5 achieve less than 25% ASR, lower than ASR of the students. This can attributed by the fact that the student models do not fully learn by distillation. The weight of the knowledge distillation is only 50%, which means some knowledge that the students were trained on were not robust to adversarial attack. This also proves that even though Adversarial Robustness Distillation (ARD) presented by Goldblum et al. (2020) can produce a student that is more robust than its teacher, at least for semantic segmentation task, it is not always the case.
 
-Another interesting point for discussion is that the student's robustness is in any way not related to the robustness of the teacher. S-R-V1, which is distilled from non-robust teacher T-NR-V5, has lower pixel accuracy ASR of 16.47%, compared to S-R-V2 (distilled from a robust teacher T-R-V5) which has pixel accuracy ASR of 22.38%. Even though the mean IoU and Dice score ASR are lower for S-R-V2 (meaning that S-R-V2 is comparatively more robust), student model distilled from non-robust teacher has a relatively robust result. Moreover, comparing the robustness results between S-NR-V5 (using regular, non-robust knowledge distillation technique from a non-robust teacher T-NR-V5) and S-NR-V6 (using regular, non-robust knowledge distillation technique from a robust teacher T-R-V5), both student models yield attack successful rate of more than 90% on each metric. This is, once again, consistent with results presented by Goldblum et al. (2020).
+Another interesting point for discussion is that the student's robustness is in any way not related to the robustness of the teacher. S-R-V1, which is distilled from non-robust teacher T-NR-V5, has lower pixel accuracy ASR of 16.47%, compared to S-R-V2 (distilled from a robust teacher T-R-V5) which has pixel accuracy ASR of 22.38%. Even though the mean IoU and Dice score ASR are lower for S-R-V2 (meaning that S-R-V2 is comparatively more robust), student model distilled from non-robust teacher has a relatively robust result. Moreover, comparing the robustness results between S-NR-V5 (using regular, non-robust knowledge distillation technique from a non-robust teacher T-NR-V5) and S-NR-V6 (using regular, non-robust knowledge distillation technique from a robust teacher T-R-V5), both student models yield attack successful rate of more than 90% on each metric. This is consistent with results presented by Goldblum et al. (2020). Goldblum et al. in their study stated that ARD is able to create robust students from teachers whose robustness failed to transfer during distillation process. In this study, even student distilled from non-robust teacher is still able to withstand adversarial attack. ARD and Segmented-ARD enable this mechanism by minimizing discrepancies between the outputs of the teacher on clean images and the outputs of the student on adversarial images.
 
-// TODO dejan: show the CKA result.
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[[WIP] Segmentation Performance Trade-Off]
+]
+#v(2 * line_spacing)
 
 #pagebreak()
 #align(center)[
