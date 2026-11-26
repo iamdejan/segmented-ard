@@ -322,7 +322,7 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
   inset: (left: tab_length)
 )[
   + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
-  + To evaluate and benchmark the trade-off between clean segmentation performance and adversarial robustness using BDD100K dataset.
+  + To evaluate and benchmark the tradeoff between clean segmentation performance and adversarial robustness using BDD100K dataset.
   + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
 ]
 
@@ -998,7 +998,7 @@ The class proportion will be used for oversampling process during training proce
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Segmentation Performance]
-]
+] <results-segmentation-performance>
 #v(2 * line_spacing)
 
 The results of the semantic segmentation will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the performance for images with weather and time of day metadata.
@@ -2890,7 +2890,7 @@ Research objectives:
   inset: (left: tab_length)
 )[
   + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
-  + To evaluate and benchmark the trade-off between clean segmentation performance and adversarial robustness using BDD100K dataset.
+  + To evaluate and benchmark the tradeoff between clean segmentation performance and adversarial robustness using BDD100K dataset.
   + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
 ]
 
@@ -2903,14 +2903,14 @@ Outline:
     - Robust distillation
     - Does robust distillation have any effect? If not, why?
   - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
-  - How well the students learnt? Answer using CKA. Is CKA a reliable tool to tell?
-+ Performance trade-off.
+  - How well the students learnt? Answer using CKA. Is CKA a reliable tool?
++ Performance tradeoff.
   - Briefly mention performance results from Chapter 3
   - Factors contributing to the performance results:
     - Weighted random sampling
     - Focal loss: https://www.ultralytics.com/glossary/focal-loss and Focal Loss for Dense Object Detection by Lin et al.
     - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
-  - Factors contributing to the trade-off? Read, understand, and cite these papers:
+  - Factors contributing to the tradeoff? Read, understand, and cite these papers:
     - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
     - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
 + Hardware utilization, CPU and memory consumption.
@@ -2938,11 +2938,21 @@ However, by comparing the ASR of the students and the robust model, it can be de
 
 Another interesting point for discussion is that the student's robustness is in any way not related to the robustness of the teacher. S-R-V1, which is distilled from non-robust teacher T-NR-V5, has lower pixel accuracy ASR of 16.47%, compared to S-R-V2 (distilled from a robust teacher T-R-V5) which has pixel accuracy ASR of 22.38%. Even though the mean IoU and Dice score ASR are lower for S-R-V2 (meaning that S-R-V2 is comparatively more robust), student model distilled from non-robust teacher has a relatively robust result. Moreover, comparing the robustness results between S-NR-V5 (using regular, non-robust knowledge distillation technique from a non-robust teacher T-NR-V5) and S-NR-V6 (using regular, non-robust knowledge distillation technique from a robust teacher T-R-V5), both student models yield attack successful rate of more than 90% on each metric. This is consistent with results presented by Goldblum et al. (2020). Goldblum et al. in their study stated that ARD is able to create robust students from teachers whose robustness failed to transfer during distillation process. In this study, even student distilled from non-robust teacher is still able to withstand adversarial attack. ARD and Segmented-ARD enable this mechanism by minimizing discrepancies between the outputs of the teacher on clean images and the outputs of the student on adversarial images.
 
+// TODO dejan: explain about the problem that the models exhibit, which is to detect edges / boundaries between segments.
+
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Segmentation Performance Trade-Off]
+  #text(size: 12pt)[Segmentation Performance Tradeoff]
 ]
 #v(2 * line_spacing)
+
+Based on the results presented in @results-segmentation-performance, there is a clear tradeoff shown between non-robust students and robust students. In fact, the tradeoff also applies to non-robust teacher T-NR-V5 and robust teacher T-R-V5. For the teachers, pixel accuracy is degraded by 11.6%, micro IoU is degraded by 19.6%, mean IoU is degraded by 56%, and finally Dice score is degraded by 53.7%. For the students, the tradeoff is even starker. Between the best performing student (S-NR-V5) and the worst performing student (S-R-V2), pixel accuracy is degraded by 17.2%, micro IoU is degraded by 27.8%, mean IoU is degraded by 67%, and finally Dice score is degraded by 66.1%.
+
+// TODO dejan: write the factors contributing to the performance results. Mention weighted random sampling and focal loss.
+
+These degradations across performance metrics can be attributed to the tradeoff between clean image performance and adversarial performance. Tsipras et al. (2019) pointed out that adversarial features in classification task can shift the weakly-correlated features into the other class, rendering the decision boundary less accurate compared to non-robust model. This is later confirmed and expanded by H. Zhang et al. (2019), who argued that robustness error is a combination of natural error and boundary error. The complications from the adversarial inputs make the decision boundary more difficult to decide, which in turn lower the accuracy. Although these two studies discussed the tradeoff for the classification task, however the results presented in this study confirmed the earlier observations. Because the contraction path of U-Net model, which is implemented by Segmentation Models Pytorch library by Iakubovskii (2019), resembles the ResNet model used by Tsipras et al. and H. Zhang et al., the tradeoff mentioned in earlier studies are also applied here.
+
+// TODO dejan: point out that the performance between group 1 (T-NR-V5 + its students) and group 2 (T-R-V5 + its students), and link with robustness result.
 
 #pagebreak()
 #align(center)[
@@ -3010,6 +3020,8 @@ He, K., Zhang, X., Ren, S., & Sun, J. (2015). Deep residual learning for image r
 
 Hinton, G., Vinyals, O., & Dean, J. (2015). Distilling the knowledge in a neural network. _arXiv (Cornell University)_. https://doi.org/10.48550/arxiv.1503.02531
 
+Iakubovskii, P. (2019). _Segmentation models PyTorch_ [Computer software]. GitHub. https://github.com/qubvel/segmentation_models.pytorch
+
 Kargin, A., & Petrenko, T. (2023). Knowledge distillation for autonomous intelligent unmanned system. In _Studies in computational intelligence_ (pp. 193-230). https://doi.org/10.1007/978-3-031-32095-8_7
 
 Khamaiseh, S. Y., Bagagem, D., Al-Alaj, A., Mancino, M., & Alomari, H. W. (2022). Adversarial Deep Learning: A survey on adversarial attacks and defense mechanisms on image classification. _IEEE Access_, _10_, 102266-102291. https://doi.org/10.1109/access.2022.3208131
@@ -3061,6 +3073,8 @@ Shang, Y., Li, D., & Wang, Y. (2025). A survey on Adversarial Attack and Defense
 Song, Y., Zhang, P., Huang, W., Zha, Y., & Zhang, Y. (2025). Flexible temperature parallel distillation for dense object detection: Make Response-Based Knowledge distillation great again. _IEEE Transactions on Circuits and Systems for Video Technology_, _35_(5), 4963-4975. https://doi.org/10.1109/tcsvt.2024.3525051
 
 Stapel, J., Mullakkal-Babu, F. A., & Happee, R. (2018). Automated driving reduces perceived workload, but monitoring causes higher cognitive load than manual driving. _Transportation Research Part F Traffic Psychology and Behaviour_, _60_, 590-605. https://doi.org/10.1016/j.trf.2018.11.006
+
+Tsipras, D., Santurkar, S., Engstrom, L., Turner, A., & Madry, A. (2019). Robustness may be at odds with accuracy. In _International Conference on Learning Representations_. https://openreview.net/forum?id=SyxAb30cY7
 
 Xiao, Z., & Tong, H. (2025). Federated Contrastive Learning with Feature-Based distillation for human activity recognition. _IEEE Transactions on Computational Social Systems_, _12_(4), 1759-1772. https://doi.org/10.1109/tcss.2024.3510428
 
