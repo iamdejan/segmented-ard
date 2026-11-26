@@ -957,7 +957,7 @@ For all training graphs above, there are no clear indications of overfitting. So
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Class Proportion]
-]
+] <results-class-proportion>
 #v(2 * line_spacing)
 
 In this section, the proportion of each class on all images is calculated. The calculation method is to count the number of pixels associated on the class, then divide by total number of pixels.
@@ -1037,12 +1037,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
 #figure(
   image("accumulated-performance-results-teacher-non-robust-vs-students.png"),
   caption: [Comparison of segmentation performance results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
-)
+) <accumulated-performance-results-teacher-non-robust-vs-students>
 
 #figure(
   image("accumulated-performance-results-teacher-robust-vs-students.png"),
   caption: [Comparison of segmentation performance results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
-)
+) <accumulated-performance-results-teacher-robust-vs-students>
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -2929,7 +2929,7 @@ Outline:
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Comparison of Robustness Between Models]
-]
+] <discussion-comparison-of-robustness-between-models>
 #v(2 * line_spacing)
 
 Based on the results presented in @results-adversarial-robustness, adversarial training has been effectively applied to both robust students S-R-V1 (distilled from T-NR-V5) and S-R-V2 (distilled from T-R-V5). In both students, the attack successful rate (ASR) of pixel accuracy, mean IoU, and Dice scores are below 40% for each metric, compared to non-robust models that achieve more than 95%. All of the results are consistent with results presented by Goldblum et al. (2020), where adversarial robust distillation indeed makes the student models more robust.
@@ -2948,11 +2948,11 @@ Another interesting point for discussion is that the student's robustness is in 
 
 Based on the results presented in @results-segmentation-performance, there is a clear tradeoff shown between non-robust students and robust students. In fact, the tradeoff also applies to non-robust teacher T-NR-V5 and robust teacher T-R-V5. For the teachers, pixel accuracy is degraded by 11.6%, micro IoU is degraded by 19.6%, mean IoU is degraded by 56%, and finally Dice score is degraded by 53.7%. For the students, the tradeoff is even starker. Between the best performing student (S-NR-V5) and the worst performing student (S-R-V2), pixel accuracy is degraded by 17.2%, micro IoU is degraded by 27.8%, mean IoU is degraded by 67%, and finally Dice score is degraded by 66.1%.
 
-// TODO dejan: write the factors contributing to the performance results. Mention weighted random sampling and focal loss.
+There are at least two important factors for the high performance, especially for non-robust models. The first one is weighted random sampling. As noted in @results-class-proportion, there is a class imbalance, with some classes like road and building being overrepresented in the dataset compared to the rest of the class. The problem with imbalance class is that the decision boundary of the model can be skewed in favor of dominant classes. Weighted random sampling ensures that when the images are being sampled for training, the input images that contain minority classes are selected more often. The second factor is focal loss (Lin et al., 2018). Focal loss was originally developed to tackle the class imbalance problem on one-stage object detection task. Instead of sampling heuristics, focal loss works by adding focusing parameter, which according to Lin et al. is able to down-weight the contribution of easy examples during training and rapidly focus the model on hard examples. Even though this study focuses on semantic segmentation task, the same improvement still applies.
 
-These degradations across performance metrics can be attributed to the tradeoff between clean image performance and adversarial performance. Tsipras et al. (2019) pointed out that adversarial features in classification task can shift the weakly-correlated features into the other class, rendering the decision boundary less accurate compared to non-robust model. This is later confirmed and expanded by H. Zhang et al. (2019), who argued that robustness error is a combination of natural error and boundary error. The complications from the adversarial inputs make the decision boundary more difficult to decide, which in turn lower the accuracy. Although these two studies discussed the tradeoff for the classification task, however the results presented in this study confirmed the earlier observations. Because the contraction path of U-Net model, which is implemented by Segmentation Models Pytorch library by Iakubovskii (2019), resembles the ResNet model used by Tsipras et al. and H. Zhang et al., the tradeoff mentioned in earlier studies are also applied here.
+These degradations across performance metrics can be attributed to the tradeoff between clean image performance and adversarial performance. Tsipras et al. (2019) pointed out that adversarial features in classification task can shift the weakly-correlated features into the other class, rendering the decision boundary less accurate compared to non-robust model. This is later confirmed and expanded by H. Zhang et al. (2019), who argued that robustness error is a combination of natural error and boundary error. The complications from the adversarial inputs make the decision boundary more difficult to decide, which in turn lower the accuracy. Although these two studies discussed the tradeoff for the classification task, however the results presented in this study confirmed the earlier observations. Because the contraction path of U-Net model in the implementation for this study, which is implemented by Segmentation Models Pytorch library by Iakubovskii (2019), resembles the ResNet and MobileNetV2 models used by Tsipras et al. and H. Zhang et al., the tradeoff mentioned in earlier studies are also applied here.
 
-// TODO dejan: point out that the performance between group 1 (T-NR-V5 + its students) and group 2 (T-R-V5 + its students), and link with robustness result.
+One interesting finding from this study is the performance of the student is not correlated with the performance of the teacher. From @accumulated-performance-results-teacher-non-robust-vs-students and @accumulated-performance-results-teacher-robust-vs-students, it is apparent that the performance of the student is more affected by the distillation technique applied to the student models themselves. Non-robust students (S-NR-V5 and S-NR-V6) are able to achieve pixel accuracy above 0.9 and micro IoU above 0.8, despite the former is distilled from a non-robust teacher and the later is distilled from a robust teacher. In contrast, robust students (S-R-V1 and S-R-V2) cannot achieve 0.9 pixel accuracy, and they also cannot achieve 0.75 micro IoU. This is a strong proof that not only tradeoffs exist between performance and robustness, but also this is linked to the discussion in @discussion-comparison-of-robustness-between-models, where the teacher's robustness is irrelevant to the student's robustness.
 
 #pagebreak()
 #align(center)[
@@ -3033,6 +3033,8 @@ Lee, J., Yoon, J., Kim, J., & Choi, J. W. (2026). Image-text driven style random
 Lê, M. T., Wolinski, P., & Arbel, J. (2026). Efficient Neural Networks for tiny Machine Learning: A Comprehensive Review. _ACM Transactions on Intelligent Systems and Technology_, _17_(4), 1-41. https://doi.org/10.1145/3798276
 
 Li, G., Togo, R., Ogawa, T., & Haseyama, M. (2022). Self-Knowledge Distillation based Self-Supervised Learning for Covid-19 Detection from Chest X-Ray Images. _ICASSP 2022 - 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)_, 1371-1375. https://doi.org/10.1109/icassp43922.2022.9746540
+
+Lin, T., Goyal, P., Girshick, R., He, K., & Dollar, P. (2018). Focal loss for dense object detection. _IEEE Transactions on Pattern Analysis and Machine Intelligence_, 42(2), 318-327. https://doi.org/10.1109/tpami.2018.2858826
 
 Long, J., Shelhamer, E., & Darrell, T. (2015). Fully convolutional networks for semantic segmentation. In _2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)_ (pp. 3431-3440). https://doi.org/10.1109/cvpr.2015.7298965
 
