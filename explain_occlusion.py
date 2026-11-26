@@ -1858,45 +1858,6 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def validate_configuration(config: OcclusionConfiguration) -> None:
-    """Check fixed experiment settings before loading any checkpoints.
-
-    Steps
-    -----
-    1. Check positive batching and repetition counts and valid deletion budgets.
-    2. Check tile/stride coverage and Gaussian replacement parameters.
-
-    Parameters
-    ----------
-    config : OcclusionConfiguration
-        Fixed experiment configuration shared by every checkpoint.
-
-    Returns
-    -------
-    None
-        Nothing; raises when an option is invalid.
-
-    Raises
-    ------
-    ValueError
-        If any fixed parameter is outside its supported range.
-    """
-    if OcclusionConfiguration.PERTURBATIONS_PER_EVAL < 1 or OcclusionConfiguration.RANDOM_REPEATS < 1:
-        raise ValueError("Batch size and random repeats must be positive.")
-    if not 0 < OcclusionConfiguration.INTERIOR_THRESHOLD <= 1:
-        raise ValueError("interior_threshold must lie in (0,1].")
-    if any(value <= 0 for pair in (OcclusionConfiguration.PATCH_SIZE, OcclusionConfiguration.STRIDE, OcclusionConfiguration.TILE_SIZE) for value in pair):
-        raise ValueError("Patch, stride, and tile dimensions must be positive.")
-    if any(x > y for x, y in zip(OcclusionConfiguration.STRIDE, OcclusionConfiguration.PATCH_SIZE, strict=True)):
-        raise ValueError("Sliding stride cannot exceed patch size.")
-    if OcclusionConfiguration.BLUR_KERNEL < 3 or OcclusionConfiguration.BLUR_KERNEL % 2 == 0 or OcclusionConfiguration.BLUR_SIGMA <= 0:
-        raise ValueError("Gaussian blur requires an odd kernel >= 3 and sigma > 0.")
-    if not OcclusionConfiguration.BUDGETS or OcclusionConfiguration.BUDGETS[0] != 0 or any(
-        not 0 <= budget <= 1 for budget in OcclusionConfiguration.BUDGETS
-    ) or tuple(sorted(set(OcclusionConfiguration.BUDGETS))) != OcclusionConfiguration.BUDGETS:
-        raise ValueError("Deletion budgets must be sorted, unique, and start at zero.")
-
-
 def validate_cam_reference_score(
     cam_record: Optional[Dict[str, Any]],
     original: InferenceMetrics,
@@ -2080,7 +2041,6 @@ def save_reference_artifacts(
 
 @jaxtyped(typechecker=beartype)
 def run_sliding_artifacts(
-    config: OcclusionConfiguration,
     model: nn.Module,
     image: SingleImage,
     baseline: SingleImage,
@@ -2173,7 +2133,6 @@ def run_sliding_artifacts(
 
 @jaxtyped(typechecker=beartype)
 def run_deletion_artifacts(
-    config: OcclusionConfiguration,
     model: nn.Module,
     image: SingleImage,
     baseline: SingleImage,
@@ -2283,7 +2242,6 @@ def run_deletion_artifacts(
 
 
 def build_case_record(
-    config: OcclusionConfiguration,
     target_id: int,
     baseline_mode: BaselineMode,
     model_name: str,
@@ -2463,7 +2421,6 @@ def explain_cases_for_model(
     baseline_mode: BaselineMode,
     cam_index: CamIndex,
     palette: NumpyPalette,
-    config: OcclusionConfiguration,
 ) -> List[Dict[str, Any]]:
     """Generate sliding occlusion and CAM-ranked deletion for one checkpoint.
 
@@ -2562,7 +2519,7 @@ def explain_cases_for_model(
                 validate_cam_reference_score(cam_record, original, mode)
 
                 directory, source_id = prepare_case_directory(
-                    config, output_dir, baseline_mode, model_name, mode, image_index,
+                    output_dir, baseline_mode, model_name, mode, image_index,
                     image_path, mask_path, image, cam,
                 )
                 save_reference_artifacts(directory, image, original)
@@ -2570,10 +2527,10 @@ def explain_cases_for_model(
                 # Every case runs BOTH experiments with the same original input
                 # and replacement tensor, preserving a fair faithfulness test.
                 sensitivity = run_sliding_artifacts(
-                    config, model, image, baseline, gt, target_id, directory
+                    model, image, baseline, gt, target_id, directory
                 )
                 patch_frame, deletion_frame, previews, tiles = run_deletion_artifacts(
-                    config, model, image, baseline, gt, target_id, cam,
+                    model, image, baseline, gt, target_id, cam,
                     original, directory,
                 )
                 save_diagnostic(
@@ -2581,7 +2538,7 @@ def explain_cases_for_model(
                     cam, sensitivity, previews, tiles, palette, baseline_mode,
                 )
                 case_record = build_case_record(
-                    config, target_id, baseline_mode, model_name,
+                    target_id, baseline_mode, model_name,
                     checkpoint_path, image_index, image_path, mask_path, mode,
                     image, group, cam_record, directory, source_id,
                 )
@@ -2647,8 +2604,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
 
     args = parse_arguments(argv)
-    config = OcclusionConfiguration()
-    validate_configuration(config)
     torch.manual_seed(OcclusionConfiguration.SEED)
     np.random.seed(OcclusionConfiguration.SEED)
 
@@ -2730,7 +2685,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             model_summaries = explain_cases_for_model(
                 model, model_name, checkpoint_path, model_cases,
                 project_root, output_dir, target_id, input_modes,
-                baseline_mode, cam_index, palette, config,
+                baseline_mode, cam_index, palette,
             )
             all_summaries.extend(model_summaries)
             del model_summaries
