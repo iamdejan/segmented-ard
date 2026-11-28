@@ -2893,67 +2893,6 @@ The hardware utilization results, as the name implies, present the results of ha
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Outline]
-]
-#v(2 * line_spacing)
-
-#set par(
-  justify: false,
-)
-Research questions:
-#block(
-  stroke: none,
-  inset: (left: tab_length),
-)[
-  + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
-  + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
-  + What is the impact of the proposed framework on inference latency and hardware utilization in resource-constrained deployment settings?
-]
-
-Research objectives:
-#block(
-  stroke: none,
-  inset: (left: tab_length),
-)[
-  + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
-  + To evaluate and benchmark the tradeoff between clean segmentation performance and adversarial robustness using BDD100K dataset.
-  + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
-]
-
-\
-Outline:
-+ Robustness comparison of the models.
-  - Briefly mention robustness results from Chapter 3
-  - Factors contributing to the results:
-    - Adversarial training
-    - Robust distillation
-    - Does robust distillation have any effect? If not, why?
-  - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
-  - How well the students learnt? Answer using CKA. Is CKA a reliable tool?
-+ Performance tradeoff.
-  - Briefly mention performance results from Chapter 3
-  - Factors contributing to the performance results:
-    - Weighted random sampling
-    - Focal loss: https://www.ultralytics.com/glossary/focal-loss and Focal Loss for Dense Object Detection by Lin et al.
-    - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
-  - Factors contributing to the tradeoff? Read, understand, and cite these papers:
-    - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
-    - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
-+ Hardware utilization, CPU and memory consumption.
-  - Why are the latency between ResNet-18-based U-Net model and MobileNetV2-based U-Net model similar?
-+ Limitations
-  - Computing power.
-  - I haven't done preprocessing. Considering the model focused on the edges, would a preprocessing around the edges (e.g. sharpening) increase the scores?
-  - Variance of the dataset (heavily North America-centric).
-  - Lack of access on real hardware deployment used by cars.
-
-#set par(
-  justify: true,
-  leading: 2 * line_spacing
-)
-
-#v(2 * line_spacing)
-#heading(level: 2)[
   #text(size: 12pt)[Comparison of Robustness Between Models]
 ] <discussion-comparison-of-robustness-between-models>
 #v(2 * line_spacing)
@@ -2992,13 +2931,53 @@ Based on the original MobileNetV2 paper by Sandler et al. (2018), MobileNetV2 is
 
 Another interesting finding is the CPU RAM consumption. Previously, it is mentioned that VRAM consumption (as shown in @hardware-utilization-peak-pytorch-vram-allocation) is lower for student models. However, the students models also have higher CPU consumption (see @hardware-utilization-incremental-cpu-ram-peak). One way to explain this is that in the implementation of MobileNetV2, due to the non-parallel nature of MobileNetV2's building blocks, less GPU time are needed, which may cause some of the data during inference were stored in CPU RAM. However, without CPU memory probing, it is hard to say if the memory consumption is indeed caused by inference process, since other processes can also access CPU RAM during inference. Nonetheless, the correlation is interesting to note, and more studies and rigorous memory probing could dig deeper into this finding.
 
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Limitations]
+]
+#v(2 * line_spacing)
+
+The first limitation is the performance of the minority classes. Even after applying weighted random sampling and focal loss, some minority classes simply are not have enough represented in the dataset. The resizing of the input images from 1280 x 720 to 640 x 360, which is intended to speed up the training process, unfortunately affects the representation of minority classes, rendering them almost invisible in the training dataset.
+
+The second limitation is the computing resource to conduct the training. Due to the computing constraint in the training process (limited computing power and even more limited allocation from HPC system), a downscaling has to be applied for the input images. This not only affects the minority classes, but also the knowledge that the models possess. Because the model only learned from downscaled images, if this model were to be deployed to real-life embedded systems, the images from the vehicle's camera needs to be downscaled as well. Such downscaling might have unintended side effects on the semantic segmentation performance.
+
+The next limitation is the real hardware deployment that automotive professionals use. All of the evaluations in this study are done from a consumer-grade laptop GPU, which in theory is able to simulate the resouce-constrained setting of intelligent vehicles. However, without deployment to the actual embedded systems, the latency and hardware utilization analysis presented in this study may be different compared to the real-world cases.
+
 #pagebreak()
 #align(center)[
   #heading(level: 1, numbering: none)[
-    #text(size: 12pt)[[WIP] CONCLUSIONS AND FUTURE WORK]
+    #text(size: 12pt)[CONCLUSIONS AND FUTURE WORK]
   ]
 ]
 #v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Conclusions]
+]
+#v(2 * line_spacing)
+
+Overall, the robustness is successfully distilled from the teacher to the student. Segmented-ARD, which is a modification of adversarially robust distillation (ARD), is proven to be able to distill the robustness for semantic segmentation task from teacher models, which are ResNet-18-based U-Net model, into student models, which are MobileNetV2-based U-Net model. The successful distillation is proven by the results, in which the student models are able to match either the performance of a non-robust teacher, or able to match the robustness of a robust teacher.
+
+However, while the robustness is able to be distilled, there is not any noticable improvement in the model's performance, nor any improvement in the inference and end-to-end latencies. This suggests that if the memory consumption is not a constraint, the distillation effort might be not worth it and it is better to directly deploy the teacher model, which is ResNet-18-based U-Net model, into the embedded devices.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Future Work]
+]
+#v(2 * line_spacing)
+
+There are some future works based on the limitations of this study:
+\
+#block(
+  stroke: none,
+  inset: (left: tab_length),
+)[
+  - Computing resource for training: A more powerful computer would be able to train and evaluate the models without downscaling to 640 x 360.
+  - Memory probing: In order to deeply understand the hardware utilization, a more thorough memory probing on CPU RAM, and if possible GPU RAM, is recommended.
+  - Preprocessing of input images: One of the possibilities to improve the model's segmentation capability is the preprocessing of input images using classical computer vision techniques. One of the possibilities is sharpening, which in theory should help with boundary detection between segments. Another example is image blurring to improve the robustness. However, preprocessing can also bring unintended side effects. A study about the preprocessing and its effects is recommended.
+  - Pruning: One of the techniques to optimize a deep neural network is through pruning. Pruning might be useful to compress both teacher and student models, therefore a study on using the pruning technique is recommended. Pruning can be done in isolation, or in theory it can be combined with knowledge distillation.
+]
 
 #pagebreak()
 #align(center)[
