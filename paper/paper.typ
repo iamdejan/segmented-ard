@@ -69,9 +69,9 @@
 )
 
 #let signature_inset = 5pt
-#box(
-  stroke: 0pt + black,
-  inset: (left: 15pt, rest: 6.5pt)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   #set par(justify: true)
   #set enum(numbering: "(1)")
@@ -198,7 +198,6 @@ I am deeply grateful for the supervision of Dr. Lim Chee Kau during the writing 
 #show outline.entry.where(level: 1): it => {
   if it.element.func() == heading {
     if it.element.numbering != none {
-      v(0.8em, weak: true)
       strong(it)
     } else {
       it
@@ -303,9 +302,9 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
   #text(size: 12pt)[Research Questions]
 ]
 
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
   + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
@@ -317,12 +316,12 @@ Therefore, to address this gap, this study proposes Seg-ARD, an adversarial robu
   #text(size: 12pt)[Research Objectives]
 ]
 
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
-  + To evaluate and benchmark the trade-off between clean segmentation performance and adversarial robustness using BDD100K dataset.
+  + To evaluate and benchmark the tradeoff between clean segmentation performance and adversarial robustness using BDD100K dataset.
   + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
 ]
 
@@ -532,9 +531,9 @@ $
 #set par(first-line-indent: (amount: 0cm))
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $S_(theta)$ is the student model with parameters $theta$.
   - $T$ is the teacher model.
@@ -574,9 +573,9 @@ By looking at the existing studies, it is noticeable that there is a gap that ha
 #v(2 * line_spacing)
 
 The research design will be a comparative study. However, due to the novel nature of this study, the comparison will be made between these student models:
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - A student distilled from a non-robust teacher.
   - A student distilled from a robust teacher.
@@ -716,9 +715,9 @@ $
 #set par(first-line-indent: (amount: 0cm))
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $p_(\i\i)$ is the number of pixels of class $i$ predicted as belonging to class $i$. In other words, number of pixels in class $i$ that are correctly classified.
   - $p_(\i\j)$ is the number of pixels of class $i$ predicted as belonging to class $j$.
@@ -740,9 +739,9 @@ $
 
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $p_(\i\i)$ is the number of pixels in class $i$ predicted as class $i$. In other words, this refers to the number of pixels truly belonging in class $i$.
   - $p_(\i\j)$ is the number of pixels in class $i$ predicted as class $j$.
@@ -795,9 +794,9 @@ $
 #set par(first-line-indent: (amount: 0cm))
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $text("Acc")_(text("adversarial"))$ is defined as the accuracy of the perturbed inputs.
   - $text("Acc")_(text("clean"))$ is defined as the accuracy of the clean inputs. The clean inputs are inputs from the dataset, without any attack applied.
@@ -812,9 +811,9 @@ $
 
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $text("mIoU")_(text("adversarial"))$ is defined as the mean intersection of union (mIoU) for the perturbed inputs. The inputs will be purturbed using multi-step PGD attacks.
   - $text("mIoU")_(text("clean"))$ is defined as the mean intersection of union (mIoU) of the clean inputs. The clean inputs are inputs from the dataset, without any PGD attack applied.
@@ -827,9 +826,9 @@ $
 
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $text("PA")_(text("adversarial"))$ is defined as the pixel accuracy for the perturbed inputs.
   - $text("PA")_(text("clean"))$ is defined as the pixel accuracy of the clean inputs.
@@ -842,9 +841,9 @@ $
 
 where:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - $text("Dice")_(text("adversarial"))$ is defined as the Dice score for the perturbed inputs.
   - $text("Dice")_(text("clean"))$ is defined as the Dice score of the clean inputs.
@@ -896,9 +895,9 @@ In this chapter, the results that correspond with each research question will be
 
 As previously mentioned in Section 3.1 Research Design, the results presented in this chapter belong to four types of students:
 \
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
+#block(
+  stroke: none,
+  inset: (left: tab_length),
 )[
   - A non-robust student distilled from a non-robust teacher. Moving forward, this student will be named as "S-NR-V5."
   - A non-robust student distilled from a robust teacher. Moving forward, this student will be named as "S-NR-V6."
@@ -957,7 +956,7 @@ For all training graphs above, there are no clear indications of overfitting. So
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Class Proportion]
-]
+] <results-class-proportion>
 #v(2 * line_spacing)
 
 In this section, the proportion of each class on all images is calculated. The calculation method is to count the number of pixels associated on the class, then divide by total number of pixels.
@@ -998,7 +997,7 @@ The class proportion will be used for oversampling process during training proce
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Segmentation Performance]
-]
+] <results-segmentation-performance>
 #v(2 * line_spacing)
 
 The results of the semantic segmentation will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the performance for images with weather and time of day metadata.
@@ -1037,12 +1036,12 @@ The results of the semantic segmentation will be divided into two sub-chapters: 
 #figure(
   image("accumulated-performance-results-teacher-non-robust-vs-students.png"),
   caption: [Comparison of segmentation performance results between non-robust teacher (T-NR-V5) and its students (S-NR-V5 and S-R-V1).]
-)
+) <accumulated-performance-results-teacher-non-robust-vs-students>
 
 #figure(
   image("accumulated-performance-results-teacher-robust-vs-students.png"),
   caption: [Comparison of segmentation performance results between robust teacher (T-R-V5) and its students (S-NR-V6 and S-R-V2).]
-)
+) <accumulated-performance-results-teacher-robust-vs-students>
 
 #v(2 * line_spacing)
 #heading(level: 3)[
@@ -1553,7 +1552,7 @@ Due to the limitation of the dataset, not all images have weather and time of da
 #v(2 * line_spacing)
 #heading(level: 2)[
   #text(size: 12pt)[Adversarial Robustness]
-]
+] <results-adversarial-robustness>
 #v(2 * line_spacing)
 
 The results of the adversarial robustness will be divided into two sub-chapters: accumulated results, and per-class results. In addition, there will be a third sub-chapter for the results of the robustness for images with weather and time of day metadata.
@@ -1687,6 +1686,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1724,6 +1724,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: true
@@ -1760,6 +1761,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1797,6 +1799,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1834,6 +1837,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
   justify: true,
   leading: 2 * line_spacing,
 )
+#v(2 * line_spacing)
 
 #set par(
   justify: false,
@@ -1878,7 +1882,7 @@ The results of the adversarial robustness will be divided into two sub-chapters:
 ]
 #v(2 * line_spacing)
 
-Similar to the limitation mentioned previously (in @segmentation-performance-weather-timeofday), the adversarial robustness results of this part will not be based on all 10K images, but rather a small selected subset of 545 images.
+Similar to the limitation mentioned previously in @segmentation-performance-weather-timeofday, the adversarial robustness results of this part will not be based on all 10K images, but rather a small selected subset of 545 images.
 
 #v(2 * line_spacing)
 #heading(level: 4)[
@@ -2573,7 +2577,7 @@ In this section, the latency and hardware utilization results will be reported. 
 #v(2 * line_spacing)
 #heading(level: 3)[
   #text(size: 12pt)[High-Level Latency Results]
-]
+] <results-latency>
 #v(2 * line_spacing)
 
 High-Level latency results present the latency without the breakdown of the U-Net component. The results are useful for the discussion of the deployment in embedded settings, allowing in-depth analysis and decision on whether or not the model is adequate for real-world deployment.
@@ -2820,7 +2824,24 @@ This section presents the detailed results of latency for each component inside 
 ]
 #v(2 * line_spacing)
 
-The hardware utilization results, as the name implies, present the results of hardware utilization during inference. The hardware utilization results allow discussion regarding the minimum acceptable hardware specifications suited for the model.
+The hardware utilization results, as the name implies, present the results of hardware utilization during inference. The hardware utilization results allow discussion regarding the minimum acceptable hardware specifications suited for the model. Here are the short description of various metrics used for hardware benchmark:
+
+#block(
+  stroke: none,
+  inset: (left: tab_length),
+)[
+  - Peak process CPU: This metric measures how much CPU processing time your Python process consumes while performing a model forward pass. CPU percentages for a process can exceed 100% when multiple CPU cores or threads are being utilized.
+  - Peak CPU total capacity: Normalized CPU usage against the machine's total logical CPU count.
+  - Peak process RAM: This is the maximum amount of physical system RAM accounted for by your benchmark's main Python process during the measured phase.
+  - Incremental RAM peak: This metric measures how much the main process's resident memory increased from its initial measured-phase baseline to its highest sampled value.
+  - Peak system RAM usage: This metric reports the percentage of system RAM considered used at the time of sampling.
+  - Peak PyTorch VRAM allocation: This represents the maximum amount of GPU memory occupied by live PyTorch-managed CUDA allocations during the measured inference phase.
+  - Peak PyTorch VRAM reserve: This measures the maximum GPU memory reserved by PyTorch's CUDA caching allocator during the measured phase.
+  - Incremental VRAM allocation: This metric measures how much the peak live PyTorch CUDA memory allocation exceeds the allocation already present after warm-up.
+  - Maximum CPU temperature: This metric measures the maximum CPU temperature during inference. This is measured with HWiNFo's CPU (Tctl/Tdie).
+  - Maximum GPU temperature: This metric reports the highest GPU temperature captured by the benchmark's background monitor.
+  - Peak device VRAM (NVML): This measures total VRAM reported as used on the NVIDIA GPU, not just memory allocated by PyTorch.
+]
 
 #v(2 * line_spacing)
 #set par(
@@ -2852,95 +2873,111 @@ The hardware utilization results, as the name implies, present the results of ha
   leading: 2 * line_spacing
 )
 
+#figure(
+  image("hardware-utilization-incremental-cpu-ram-peak.png"),
+  caption: [Incremental CPU RAM peak usage, which means the increase in CPU RAM usage during inference.]
+) <hardware-utilization-incremental-cpu-ram-peak>
+
+#figure(
+  image("hardware-utilization-peak-pytorch-vram-allocation.png"),
+  caption: [Peak PyTorch VRAM allocation, which means the peak amount of VRAM allocated for PyTorch inference.]
+) <hardware-utilization-peak-pytorch-vram-allocation>
+
 #pagebreak()
 #align(center)[
   #heading(level: 1)[
-    #text(size: 12pt)[[WIP] DISCUSSIONS]
+    #text(size: 12pt)[DISCUSSIONS]
   ]
 ]
 #v(2 * line_spacing)
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[Hardware Utilization Results]
-]
+  #text(size: 12pt)[Comparison of Robustness Between Models]
+] <discussion-comparison-of-robustness-between-models>
 #v(2 * line_spacing)
 
-#set par(
-  justify: false,
-)
-Research questions:
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
-)[
-  + How effective is the proposed adversarial distillation framework (Seg-ARD) in improving the adversarial robustness of compact student model compared to standard response-based model when subjected to multi-step PGD attacks?
-  + To what extent does integrating adversarial training into knowledge distillation impact the clean segmentation fidelity across diverse driving conditions?
-  + What is the impact of the proposed framework on inference latency and hardware utilization in resource-constrained deployment settings?
-]
+Based on the results presented in @results-adversarial-robustness, adversarial training has been effectively applied to both robust students S-R-V1 (distilled from T-NR-V5) and S-R-V2 (distilled from T-R-V5). In both students, the attack successful rate (ASR) of pixel accuracy, mean IoU, and Dice scores are below 40% for each metric, compared to non-robust models that achieve more than 95%. All of the results are consistent with results presented by Goldblum et al. (2020), where adversarial robust distillation indeed makes the student models more robust.
 
-Research objectives:
-#box(
-  stroke: 0pt,
-  inset: (left: tab_length)
-)[
-  + To develop and adapt an adversarial robustness distillation framework for semantic segmentation using ResNet-18-based segmentation teacher model and MobileNetV2-based segmentation student model.
-  + To evaluate and benchmark the trade-off between clean segmentation performance and adversarial robustness using BDD100K dataset.
-  + To quantify and analyze the inference latency and efficiency of the robust distilled model to validate its feasibility for real-time autonomous driving applications.
-]
+However, by comparing the ASR of the students and the robust model, it can be deduced that adversarial robust distillation is less effective than the TRADES distiillation used by the teacher. In pixel accuracy, mean IoU, and Dice score, T-R-V5 achieve less than 25% ASR, lower than ASR of the students. This can attributed by the fact that the student models do not fully learn by distillation. The weight of the knowledge distillation is only 50%, which means some knowledge that the students were trained on were not robust to adversarial attack. This also proves that even though Adversarial Robustness Distillation (ARD) presented by Goldblum et al. (2020) can produce a student that is more robust than its teacher, at least for semantic segmentation task, it is not always the case.
 
-#table(
-  columns: 4,
-  fill: (_, y) => if y == 0 { gray.lighten(85%) },
-  table.header(
-    [*Done?*], [*Research Question*], [*Specific Question*], [*Relevant Chart*],
-  ),
-  [#sym.checkmark], [RQ 1], [How much has the robustness improved?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU.],
-  [#sym.checkmark], [RQ 1], [How much has the robustness improved for specific driving conditions?], [Comparison chart showing attack successful rate before and after adversarial training, using mean IoU, grouped by weather and time of day.],
-  [#sym.checkmark], [RQ 2], [What are the tradeoffs?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models.],
-  [#sym.checkmark], [RQ 2], [What are the tradeoffs for specific driving conditions?], [Comparison chart showing the performance (pixel accuracy, mean IoU, and Dice) between non-robust and robust models, grouped by weather and time of day.],
-  [#sym.checkmark], [RQ 3], [How is the latency compared across models?], [Chart showing the comparison of accumulated latency between models.],
-  [#sym.checkmark], [RQ 3], [Which part of U-Net is the slowest?], [Chart showing the comparison of accumulated latency between models, grouped by each component.],
-  [#sym.checkmark], [RQ 3], [How is the hardware utilization across models?], [Hardware utilization table.],
-)
+Another interesting point for discussion is that the student's robustness is in any way not related to the robustness of the teacher. S-R-V1, which is distilled from non-robust teacher T-NR-V5, has lower pixel accuracy ASR of 16.47%, compared to S-R-V2 (distilled from a robust teacher T-R-V5) which has pixel accuracy ASR of 22.38%. Even though the mean IoU and Dice score ASR are lower for S-R-V2 (meaning that S-R-V2 is comparatively more robust), student model distilled from non-robust teacher has a relatively robust result. Moreover, comparing the robustness results between S-NR-V5 (using regular, non-robust knowledge distillation technique from a non-robust teacher T-NR-V5) and S-NR-V6 (using regular, non-robust knowledge distillation technique from a robust teacher T-R-V5), both student models yield attack successful rate of more than 90% on each metric. This is consistent with results presented by Goldblum et al. (2020). Goldblum et al. in their study stated that ARD is able to create robust students from teachers whose robustness failed to transfer during distillation process. In this study, even student distilled from non-robust teacher is still able to withstand adversarial attack. ARD and Segmented-ARD enable this mechanism by minimizing discrepancies between the outputs of the teacher on clean images and the outputs of the student on adversarial images.
+
+// TODO: explain about the problem that the models exhibit, which is to detect edges / boundaries between segments.
 
 #v(2 * line_spacing)
 #heading(level: 2)[
-  #text(size: 12pt)[[WIP] Outline]
+  #text(size: 12pt)[Segmentation Performance Tradeoff]
 ]
 #v(2 * line_spacing)
 
-+ Robustness comparison of the models.
-  - Briefly mention robustness results from Chapter 3
-  - Factors contributing to the results:
-    - Adversarial training
-    - Robust distillation
-    - Does robust distillation have any effect? If not, why?
-  - XAI to point out where the models are looking and occlusion to verify the Grad-CAM++ heatmap.
-  - How well the students learnt? Answer using CKA. Is CKA a reliable tool to tell?
-+ Trade-off of the performance.
-  - Briefly mention performance results from Chapter 3
-  - Factors contributing to the performance results:
-    - Weighted random sampling
-    - Focal loss: https://www.ultralytics.com/glossary/focal-loss and Focal Loss for Dense Object Detection by Lin et al.
-    - There's a limit to the performance results. Below certain weight, the performance cannot be improved. Explain about this.
-  - Factors contributing to the trade-off? Read, understand, and cite these papers:
-    - Dimitris Tsipras, Shibani Santurkar, Logan Engstrom, Alexander Turner, and Aleksander Madry. Robustness may be at odds with accuracy. In International Conference on Learning Representations, 2019.
-    - Theoretically Principled Trade-off between Robustness and Accuracy by Zhang et al.
-+ Hardware utilization, CPU and memory consumption.
-+ Limitations
-  - Computing power.
-  - I haven't done preprocessing. Considering the model focused on the edges, would a preprocessing around the edges (e.g. sharpening) increase the scores?
-  - Variance of the dataset (heavily North America-centric).
-  - Lack of access on real hardware deployment used by cars.
+Based on the results presented in @results-segmentation-performance, there is a clear tradeoff shown between non-robust students and robust students. In fact, the tradeoff also applies to non-robust teacher T-NR-V5 and robust teacher T-R-V5. For the teachers, pixel accuracy is degraded by 11.6%, micro IoU is degraded by 19.6%, mean IoU is degraded by 56%, and finally Dice score is degraded by 53.7%. For the students, the tradeoff is even starker. Between the best performing student (S-NR-V5) and the worst performing student (S-R-V2), pixel accuracy is degraded by 17.2%, micro IoU is degraded by 27.8%, mean IoU is degraded by 67%, and finally Dice score is degraded by 66.1%.
+
+There are at least two important factors for the high performance, especially for non-robust models. The first one is weighted random sampling. As noted in @results-class-proportion, there is a class imbalance, with some classes like road and building being overrepresented in the dataset compared to the rest of the class. The problem with imbalance class is that the decision boundary of the model can be skewed in favor of dominant classes. Weighted random sampling ensures that when the images are being sampled for training, the input images that contain minority classes are selected more often. The second factor is focal loss (Lin et al., 2018). Focal loss was originally developed to tackle the class imbalance problem on one-stage object detection task. Instead of sampling heuristics, focal loss works by adding focusing parameter, which according to Lin et al. is able to down-weight the contribution of easy examples during training and rapidly focus the model on hard examples. Even though this study focuses on semantic segmentation task, the same improvement still applies.
+
+These degradations across performance metrics can be attributed to the tradeoff between clean image performance and adversarial performance. Tsipras et al. (2019) pointed out that adversarial features in classification task can shift the weakly-correlated features into the other class, rendering the decision boundary less accurate compared to non-robust model. This is later confirmed and expanded by H. Zhang et al. (2019), who argued that robustness error is a combination of natural error and boundary error. The complications from the adversarial inputs make the decision boundary more difficult to decide, which in turn lower the accuracy. Although these two studies discussed the tradeoff for the classification task, however the results presented in this study confirmed the earlier observations. Because the contraction path of U-Net model in the implementation for this study, which is implemented by Segmentation Models Pytorch library by Iakubovskii (2019), resembles the ResNet and MobileNetV2 models used by Tsipras et al. and H. Zhang et al., the tradeoff mentioned in earlier studies are also applied here.
+
+One interesting finding from this study is the performance of the student is not correlated with the performance of the teacher. From @accumulated-performance-results-teacher-non-robust-vs-students and @accumulated-performance-results-teacher-robust-vs-students, it is apparent that the performance of the student is more affected by the distillation technique applied to the student models themselves. Non-robust students (S-NR-V5 and S-NR-V6) are able to achieve pixel accuracy above 0.9 and micro IoU above 0.8, despite the former is distilled from a non-robust teacher and the later is distilled from a robust teacher. In contrast, robust students (S-R-V1 and S-R-V2) cannot achieve 0.9 pixel accuracy, and they also cannot achieve 0.75 micro IoU. This is a strong proof that not only tradeoffs exist between performance and robustness, but also this is linked to the discussion in @discussion-comparison-of-robustness-between-models, where the teacher's robustness is irrelevant to the student's robustness.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Latency and Hardware Utilization]
+]
+#v(2 * line_spacing)
+
+The latency (presented in @results-latency) between teacher model checkpoints (ResNet-18-based U-Net model) and student model checkpoints (MobileNetV2-based U-Net model) are comparable. This is consistent with results by Evers (2021) on a similiar task, which is real-time semantic road scene segmentation. This suggests that while MobileNetV2 is proclaimed to be an embedded friendly architecture, there is a tradeoff.
+
+Based on the original MobileNetV2 paper by Sandler et al. (2018), MobileNetV2 is claimed to be memory-efficient, making it suitable for deployment in mobile and embedded devices. Indeed, as shown in @hardware-utilization-peak-pytorch-vram-allocation, VRAM consumption is lower. MobileNetV2 uses depthwise separable convolutions, linear bottlenecks, and inverted residuals, which according to Sandler et al. are effective for reducting VRAM consumption. Since memory is a constrained resource, it makes sense that their focus is to lower the consumption. However, these improvements come at a cost, which is higher inference latency. All of these improvements, which help to bring down VRAM consumption, increase the latency due to the non-parallel execution. ResNet architecture still relies on conventional CNN block, which is designed for parallel execution. Parallel execution is suitable, and indeed optimized, for GPU use due to the number of cores that a GPU has. However, this is not the case for MobileNetV2's building blocks.
+
+Another interesting finding is the CPU RAM consumption. Previously, it is mentioned that VRAM consumption (as shown in @hardware-utilization-peak-pytorch-vram-allocation) is lower for student models. However, the students models also have higher CPU consumption (see @hardware-utilization-incremental-cpu-ram-peak). One way to explain this is that in the implementation of MobileNetV2, due to the non-parallel nature of MobileNetV2's building blocks, less GPU time are needed, which may cause some of the data during inference were stored in CPU RAM. However, without CPU memory probing, it is hard to say if the memory consumption is indeed caused by inference process, since other processes can also access CPU RAM during inference. Nonetheless, the correlation is interesting to note, and more studies and rigorous memory probing could dig deeper into this finding.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Limitations]
+]
+#v(2 * line_spacing)
+
+The first limitation is the performance of the minority classes. Even after applying weighted random sampling and focal loss, some minority classes simply are not have enough represented in the dataset. The resizing of the input images from 1280 x 720 to 640 x 360, which is intended to speed up the training process, unfortunately affects the representation of minority classes, rendering them almost invisible in the training dataset.
+
+The second limitation is the computing resource to conduct the training. Due to the computing constraint in the training process (limited computing power and even more limited allocation from HPC system), a downscaling has to be applied for the input images. This not only affects the minority classes, but also the knowledge that the models possess. Because the model only learned from downscaled images, if this model were to be deployed to real-life embedded systems, the images from the vehicle's camera needs to be downscaled as well. Such downscaling might have unintended side effects on the semantic segmentation performance.
+
+The next limitation is the real hardware deployment that automotive professionals use. All of the evaluations in this study are done from a consumer-grade laptop GPU, which in theory is able to simulate the resouce-constrained setting of intelligent vehicles. However, without deployment to the actual embedded systems, the latency and hardware utilization analysis presented in this study may be different compared to the real-world cases.
 
 #pagebreak()
 #align(center)[
   #heading(level: 1, numbering: none)[
-    #text(size: 12pt)[[WIP] CONCLUSIONS AND FUTURE WORK]
+    #text(size: 12pt)[CONCLUSIONS AND FUTURE WORK]
   ]
 ]
 #v(2 * line_spacing)
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Conclusions]
+]
+#v(2 * line_spacing)
+
+Overall, the robustness is successfully distilled from the teacher to the student. Segmented-ARD, which is a modification of adversarially robust distillation (ARD), is proven to be able to distill the robustness for semantic segmentation task from teacher models, which are ResNet-18-based U-Net model, into student models, which are MobileNetV2-based U-Net model. The successful distillation is proven by the results, in which the student models are able to match either the performance of a non-robust teacher, or able to match the robustness of a robust teacher.
+
+However, while the robustness is able to be distilled, there is not any noticable improvement in the model's performance, nor any improvement in the inference and end-to-end latencies. This suggests that if the memory consumption is not a constraint, the distillation effort might be not worth it and it is better to directly deploy the teacher model, which is ResNet-18-based U-Net model, into the embedded devices.
+
+#v(2 * line_spacing)
+#heading(level: 2)[
+  #text(size: 12pt)[Future Work]
+]
+#v(2 * line_spacing)
+
+There are some future works based on the limitations of this study:
+\
+#block(
+  stroke: none,
+  inset: (left: tab_length),
+)[
+  - Computing resource for training: A more powerful computer would be able to train and evaluate the models without downscaling to 640 x 360.
+  - Memory probing: In order to deeply understand the hardware utilization, a more thorough memory probing on CPU RAM, and if possible GPU RAM, is recommended.
+  - Preprocessing of input images: One of the possibilities to improve the model's segmentation capability is the preprocessing of input images using classical computer vision techniques. One of the possibilities is sharpening, which in theory should help with boundary detection between segments. Another example is image blurring to improve the robustness. However, preprocessing can also bring unintended side effects. A study about the preprocessing and its effects is recommended.
+  - Pruning: One of the techniques to optimize a deep neural network is through pruning. Pruning might be useful to compress both teacher and student models, therefore a study on using the pruning technique is recommended. Pruning can be done in isolation, or in theory it can be combined with knowledge distillation.
+]
 
 #pagebreak()
 #align(center)[
@@ -2982,6 +3019,8 @@ Corke, P. (2023). Robotics, vision and control. In _Springer tracts in advanced 
 
 Dai, J., He, K., & Sun, J. (2016). Instance-Aware Semantic Segmentation via Multi-task Network Cascades. In _2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)_ (pp. 3150-3158). IEEE. https://doi.org/10.1109/cvpr.2016.343
 
+Evers, L. (2021). Benchmarking pre-trained Encoders for real-time Semantic Road Scene Segmentation. _PAMM_, _20_(1), e202000275. https://doi.org/10.1002/pamm.202000275
+
 Fang, Z., & Yang, Y. (2023). Knowledge distillation across vision and language. In _Studies in computational intelligence_ (pp. 65-94). https://doi.org/10.1007/978-3-031-32095-8_3
 
 Goldblum, M., Fowl, L., Feizi, S., & Goldstein, T. (2020). Adversarially robust distillation. In _Proceedings of the AAAI Conference on Artificial Intelligence_ (Vol. 34, pp. 3996-4003). https://aaai.org/ojs/index.php/AAAI/article/view/5816/5672
@@ -3000,6 +3039,8 @@ He, K., Zhang, X., Ren, S., & Sun, J. (2015). Deep residual learning for image r
 
 Hinton, G., Vinyals, O., & Dean, J. (2015). Distilling the knowledge in a neural network. _arXiv (Cornell University)_. https://doi.org/10.48550/arxiv.1503.02531
 
+Iakubovskii, P. (2019). _Segmentation models PyTorch_ [Computer software]. GitHub. https://github.com/qubvel/segmentation_models.pytorch
+
 Kargin, A., & Petrenko, T. (2023). Knowledge distillation for autonomous intelligent unmanned system. In _Studies in computational intelligence_ (pp. 193-230). https://doi.org/10.1007/978-3-031-32095-8_7
 
 Khamaiseh, S. Y., Bagagem, D., Al-Alaj, A., Mancino, M., & Alomari, H. W. (2022). Adversarial Deep Learning: A survey on adversarial attacks and defense mechanisms on image classification. _IEEE Access_, _10_, 102266-102291. https://doi.org/10.1109/access.2022.3208131
@@ -3011,6 +3052,8 @@ Lee, J., Yoon, J., Kim, J., & Choi, J. W. (2026). Image-text driven style random
 Lê, M. T., Wolinski, P., & Arbel, J. (2026). Efficient Neural Networks for tiny Machine Learning: A Comprehensive Review. _ACM Transactions on Intelligent Systems and Technology_, _17_(4), 1-41. https://doi.org/10.1145/3798276
 
 Li, G., Togo, R., Ogawa, T., & Haseyama, M. (2022). Self-Knowledge Distillation based Self-Supervised Learning for Covid-19 Detection from Chest X-Ray Images. _ICASSP 2022 - 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)_, 1371-1375. https://doi.org/10.1109/icassp43922.2022.9746540
+
+Lin, T., Goyal, P., Girshick, R., He, K., & Dollar, P. (2018). Focal loss for dense object detection. _IEEE Transactions on Pattern Analysis and Machine Intelligence_, 42(2), 318-327. https://doi.org/10.1109/tpami.2018.2858826
 
 Long, J., Shelhamer, E., & Darrell, T. (2015). Fully convolutional networks for semantic segmentation. In _2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)_ (pp. 3431-3440). https://doi.org/10.1109/cvpr.2015.7298965
 
@@ -3042,6 +3085,8 @@ Rossolini, G., Nesti, F., D'Amico, G., Nair, S., Biondi, A., & Buttazzo, G. (202
 
 Saeedizadeh, N., Jalali, S. M. J., Khan, B., Kebria, P. M., & Mohamed, S. (2024). A new optimization approach based on neural architecture search to enhance deep U-Net for efficient road segmentation. _Knowledge-Based Systems_, _296_, 111966. https://doi.org/10.1016/j.knosys.2024.111966
 
+Sandler, M., Howard, A., Zhu, M., Zhmoginov, A., & Chen, L. (2018). MobileNetV2: Inverted residuals and linear bottlenecks. In _IEEE Computer Society Conference on Computer Vision and Pattern Recognition/Proceedings - IEEE Computer Society Conference on Computer Vision and Pattern Recognition/Proceedings_ (pp. 4510-4520). https://doi.org/10.1109/cvpr.2018.00474
+
 Seghier, M. L. (2024). Image Segmentation Evaluation with the DICE Index: Methodological issues. _International Journal of Imaging Systems and Technology_, _34_(6). https://doi.org/10.1002/ima.23203
 
 Shafahi, A., Najibi, M., Ghiasi, A., Xu, Z., Dickerson, J., Studer, C., S. Davis, L., Taylor, G., & Goldstein, T. (2019). Adversarial training for free! In _Proceedings of the 33rd International Conference on Neural Information Processing Systems_ (pp. 3358-3369). Curran Associates Inc. https://dl.acm.org/doi/10.5555/3454287.3454589
@@ -3051,6 +3096,8 @@ Shang, Y., Li, D., & Wang, Y. (2025). A survey on Adversarial Attack and Defense
 Song, Y., Zhang, P., Huang, W., Zha, Y., & Zhang, Y. (2025). Flexible temperature parallel distillation for dense object detection: Make Response-Based Knowledge distillation great again. _IEEE Transactions on Circuits and Systems for Video Technology_, _35_(5), 4963-4975. https://doi.org/10.1109/tcsvt.2024.3525051
 
 Stapel, J., Mullakkal-Babu, F. A., & Happee, R. (2018). Automated driving reduces perceived workload, but monitoring causes higher cognitive load than manual driving. _Transportation Research Part F Traffic Psychology and Behaviour_, _60_, 590-605. https://doi.org/10.1016/j.trf.2018.11.006
+
+Tsipras, D., Santurkar, S., Engstrom, L., Turner, A., & Madry, A. (2019). Robustness may be at odds with accuracy. In _International Conference on Learning Representations_. https://openreview.net/forum?id=SyxAb30cY7
 
 Xiao, Z., & Tong, H. (2025). Federated Contrastive Learning with Feature-Based distillation for human activity recognition. _IEEE Transactions on Computational Social Systems_, _12_(4), 1759-1772. https://doi.org/10.1109/tcss.2024.3510428
 
